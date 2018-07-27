@@ -1,0 +1,37 @@
+# Do not include temporary files
+*~
+*.swp
+*.optimized
+*.o
+*.pyc
+.nfs*
+*.pdf
+*.aux
+*.tar
+*.gz
+\#*
+\.\#*
+bin/
+log/
+.cproject
+.project
+*.bbl
+*.blg
+*.fdb_latexmk
+*.log
+*.fls
+*.svg
+*.pdf
+
+# Do not include automake output
+autoscan.log
+configure.scan
+
+# Do not include the test directory
+
+.DS_Store
+
+data
+output_files
+slurm*
+config_*
