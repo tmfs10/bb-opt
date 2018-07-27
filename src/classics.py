@@ -2,39 +2,14 @@
 Benchmark problems which correspond to so-called "classic" problems from the
 global-optimization literature. All problems are transformed into maximization
 problems and can be combined with additional additive noise.
+Forked from https://github.com/mwhoffman/benchfunk/.
 """
 
-from __future__ import division
-from __future__ import absolute_import
-from __future__ import print_function
-
 import numpy as np
-
+from typing import Optional
 
 __all__ = ['Sinusoidal', 'Gramacy', 'Branin', 'Bohachevsky', 'Goldstein',
            'Hartmann3', 'Hartmann6']
-
-
-def rstate(rng=None):
-    """
-    Return a RandomState object. This is just a simple wrapper such that if rng
-    is already an instance of RandomState it will be passed through, otherwise
-    it will create a RandomState object using rng as its seed.
-    """
-    if not isinstance(rng, np.random.RandomState):
-        rng = np.random.RandomState(rng)
-    return rng
-
-
-def repr_args(obj, *args, **kwargs):
-    """
-    Return a repr string for an object with args and kwargs.
-    """
-    typename = type(obj).__name__
-    args = ['{:s}'.format(str(val)) for val in args]
-    kwargs = ['{:s}={:s}'.format(name, str(val))
-              for name, val in kwargs.items()]
-    return '{:s}({:s})'.format(typename, ', '.join(args + kwargs))
 
 
 class Benchmark(object):
@@ -44,39 +19,37 @@ class Benchmark(object):
     takes an (n,d)-array of input locations and returns the value of each
     input.
     """
-    def __init__(self, sn2=0.0, rng=None):
-        self._sn2 = float(sn2)
-        self._rng = rstate(rng)
+    ndim = None
+
+    def __init__(self, variance: float=0.0, seed: Optional[float]=None):
+        self._variance = variance
+        self._rng = np.random.RandomState(seed)
 
     def __repr__(self):
-        args = []
-        kwargs = {}
-        if self._sn2 > 0:
-            args.append(self._sn2)
-        return repr_args(self, *args, **kwargs)
-
-    def __call__(self, x):
-        return self.get(x)[0]
+        variance = f'(variance = {self._variance})' if self._variance > 0 else ''
+        typename = type(self).__name__
+        return f'{typename}{variance}'
 
     def _f(self, X):
         """Vectorized access to the noise-free benchmark function. Note: this
         function does no bounds checking."""
         raise NotImplementedError
 
-    def get(self, X):
+    def __call__(self, x):
         """Vectorized access to the benchmark function."""
-        y = self.get_f(X)
-        if self._sn2 > 0:
-            y += self._rng.normal(scale=np.sqrt(self._sn2), size=len(y))
-        return y
+        if self.ndim is None:
+            print("All subclasses of `Benchmark` must define `ndim`")
+            raise NotImplementedError
 
-    def get_f(self, X):
-        """Vectorized access to the noise-free benchmark function."""
-        X = np.array(X, ndmin=2, dtype=float, copy=False)
-        if X.shape != (X.shape[0], self.bounds.shape[0]):
-            raise ValueError('function inputs must be {:d}-dimensional'
-                             .format(self.ndim))
-        return self._f(X)
+        x = np.array(x, dtype=float, copy=False) # convert in case of list
+        if x.shape[-1] != self.ndim:
+            raise ValueError(f'Last dimenion of inputs must be size {self.ndim}.')
+
+        y = self._f(x)
+
+        if self._variance > 0:
+            y += self._rng.normal(scale=np.sqrt(self._variance), size=len(y))
+        return y
 
 
 class Sinusoidal(Benchmark):
@@ -115,12 +88,18 @@ class Branin(Benchmark):
     ndim = 2
 
     def _f(self, x):
-        y = (x[:, 1]-(5.1/(4*np.pi**2))*x[:, 0]**2+5*x[:, 0]/np.pi-6)**2
-        y += 10*(1-1/(8*np.pi))*np.cos(x[:, 0])+10
-        # NOTE: this rescales branin by 10 to make it more manageable.
-        y /= 10.
-        return -y
+        a = 1
+        b = 5.1 / (4 * np.pi ** 2)
+        c = 5 / np.pi
+        r = 6
+        s = 10
+        t = 1 / (8 * np.pi)
 
+        y = a * (x[..., 1] - b * x[..., 0] ** 2 + c * x[..., 0] - r) ** 2
+        y += s * (1 - t) * np.cos(x[..., 0]) + s
+        # negate to make this a maximization problem
+        # NOTE: this rescales branin by 10 to make it more manageable.
+        return -y / 10
 
 class Bohachevsky(Benchmark):
     """
@@ -132,9 +111,11 @@ class Bohachevsky(Benchmark):
     ndim = 2
 
     def _f(self, x):
-        y = 0.7 + x[:, 0]**2 + 2.0*x[:, 1]**2
-        y -= 0.3*np.cos(3*np.pi*x[:, 0])
-        y -= 0.4*np.cos(4*np.pi*x[:, 1])
+        x0 = x[..., 0]
+        x1 = x[..., 1]
+        y = 0.7 + x0 ** 2 + 2.0 * x1 ** 2
+        y -= 0.3 * np.cos(3 * np.pi * x0)
+        y -= 0.4 * np.cos(4 * np.pi * x1)
         return -y
 
 
