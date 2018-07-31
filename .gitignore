@@ -35,3 +35,4 @@ data
 output_files
 slurm*
 config_*
+.ipynb_checkpoints

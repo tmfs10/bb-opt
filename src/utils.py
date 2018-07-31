@@ -1,7 +1,7 @@
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import axes3d
 import numpy as np
-from typing import Dict, Tuple, Sequence, Union, Callable
+from typing import Dict, Tuple, Sequence, Union, Callable, Optional
 
 
 def plot_performance(
