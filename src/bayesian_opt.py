@@ -35,6 +35,56 @@ def normal_priors(
     return priors
 
 
+class SpikeSlabNormal(pyro.distributions.TorchDistribution):
+    def __init__(self, param, std1: float = 0.03, std2: float = 2, alpha: float = 0.7):
+        super().__init__(event_shape=param.shape)
+        self.normal1 = pyro.distributions.Normal(
+            torch.zeros_like(param), torch.ones_like(param) * std1
+        ).independent(param.ndimension())
+
+        self.normal2 = pyro.distributions.Normal(
+            torch.zeros_like(param), torch.ones_like(param) * std2
+        ).independent(param.ndimension())
+
+        self.alpha = torch.tensor(alpha).to(param.device)
+        self.bernoulli = pyro.distributions.Bernoulli(self.alpha)
+
+        # self.batch_shape = self.normal1.batch_shape
+        # self.event_shape = self.normal1.event_shape
+
+    def sample(self, sample_shape=torch.Size([])):
+        bernoullis = self.bernoulli.sample(sample_shape)
+        bernoulli_inverse = (~bernoullis.byte()).float()
+        sampled = bernoullis * self.normal1.sample(
+            sample_shape
+        ) + bernoulli_inverse * self.normal2.sample(sample_shape)
+        print("SAMPLED")
+        print(sampled)
+        print()
+        return sampled
+
+    def log_prob(self, value):
+        log_p1 = self.normal1.log_prob(value)
+        log_p2 = self.normal2.log_prob(value)
+
+        c = -torch.max(log_p1, log_p2)  # for numerical stability
+        log_p = (
+            self.alpha * (c + log_p1).exp() + (1 - self.alpha) * (c + log_p2).exp()
+        ).log() - c
+
+        return log_p
+
+
+def spike_slab_priors(
+    model: torch.nn.Module, std1: float = 0.03, std2: float = 2, alpha: float = 0.7
+) -> Dict[str, pyro.distributions.TorchDistribution]:
+    priors = {}
+    for name, param in model.named_parameters():
+        priors[name] = SpikeSlabNormal(param, std1, std2, alpha)
+
+    return priors
+
+
 def normal_variationals(
     model: torch.nn.Module, mean: float = 0, std: float = 1
 ) -> Dict[str, pyro.distributions.TorchDistribution]:
@@ -89,7 +139,7 @@ def optimize(
     acquisition_func: Callable[[ModelType, InputType, Set[int], int], List[int]],
     train_model: Callable[[ModelType, InputType, LabelType], None],
     inputs: Union[torch.Tensor, np.ndarray],
-    labels: pd.Series,
+    labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
     n_repeats: int = 1,
     batch_size: int = 256,
@@ -98,6 +148,9 @@ def optimize(
     verbose: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray]:
 
+    if isinstance(labels, pd.Series):
+        labels = labels.values
+
     if not isinstance(inputs, torch.Tensor):
         inputs = torch.tensor(inputs).float()
 
@@ -105,18 +158,18 @@ def optimize(
         inputs = inputs.to(device)
 
     n_top_k_percent = int(top_k_percent / 100 * len(labels))
-    best_idx = set(labels.sort_values(ascending=False)[:n_top_k_percent].index)
+    best_idx = set(labels.argsort()[-n_top_k_percent:])
     labels = torch.tensor(labels).float()
     if device and labels.device != device:
         labels = labels.to(device)
 
     all_fraction_best_sampled = []
-    for i in range(n_repeats):
+    for _ in range(n_repeats):
         model = get_model(batch_size=batch_size, device=device)
         sampled_idx = set()
         fraction_best_sampled = []
 
-        for j in range(int(np.ceil(len(labels) / batch_size))):
+        for _ in range(int(np.ceil(len(labels) / batch_size))):
             acquire_samples = acquisition_func(model, inputs, sampled_idx, batch_size)
             sampled_idx.update(acquire_samples)
             fraction_best_sampled.append(
