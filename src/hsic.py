@@ -1,7 +1,7 @@
 import torch
-import global_constants as gl
+from . import global_constants as gl
 import sys
-import ops
+from . import ops
 
 
 def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], wts=None):

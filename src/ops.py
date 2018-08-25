@@ -3,8 +3,8 @@
 
 import torch
 import torch.nn.functional as F
-from global_constants import _eps
-import global_constants as gl
+from .global_constants import _eps
+from . import global_constants as gl
 
 
 def recon_loss(x, x_recon):
