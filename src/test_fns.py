@@ -3,10 +3,15 @@ import torch
 import numpy as np
 import math
 
+"""
+values taken from 
+    * https://www.sfu.ca/~ssurjano/shekel.html 
+    * http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
+    * wikipedia
+"""
+
 class Shekel(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Global minima:
         m=5,7,10, at x*=(4,4,4,4)
     """
@@ -33,8 +38,6 @@ class Shekel(object):
 
 class Michalewicz(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Global minima:
         d=2, x*=(2.2, 1.57)
     """
@@ -49,8 +52,6 @@ class Michalewicz(object):
 
 class Eggholder(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Global minima:
         x*=(512, 404.2319)
     """
@@ -61,8 +62,6 @@ class Eggholder(object):
 
 class Ackley(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Global minima:
         x*=[0]^n
     """
@@ -78,8 +77,6 @@ seen used in a Bayes-opt paper
 
 class Ackley3(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Normally evaluated on [-32, 32]
 
     Global minima:
@@ -93,8 +90,6 @@ class Ackley3(object):
 
 class Ackley4(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Normally evaluated on [-35, 35]^d
 
     Global minima:
@@ -109,8 +104,6 @@ class Ackley4(object):
 
 class Adjiman(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Normally evaluated on x[0] \in [-1, 2] and x[1] \in [-1, 1]
 
     Global minima:
@@ -124,8 +117,6 @@ class Adjiman(object):
 
 class Apline1(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Normally evaluated on [0, 10]^d 
 
     Global minima:
@@ -139,8 +130,6 @@ class Apline1(object):
 
 class Alpine2(object):
     """ 
-    from http://benchmarkfcns.xyz/benchmarkfcns/ackleyfcn.html 
-
     Normally evaluated on [0, 10]^d
 
     Global minima:
@@ -154,8 +143,6 @@ class Alpine2(object):
 
 class Rastrigin(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Normally evaluated on [-5.12, 5.12]
 
     Global minima:
@@ -168,8 +155,6 @@ class Rastrigin(object):
 
 class Rosenbrock(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Normally evaluated on [-5, 10]^d
 
     Global minima:
@@ -182,8 +167,6 @@ class Rosenbrock(object):
 
 class CrossInTray(object):
     """ 
-    values taken from https://www.sfu.ca/~ssurjano/shekel.html 
-
     Normally evaluated on [-10, 10]^2
 
     Global minima:
