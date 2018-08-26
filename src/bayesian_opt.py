@@ -11,9 +11,15 @@ import pyro
 import pyro.optim
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Union, Tuple, Optional, Callable, Dict, Set, List, Any
-from argparse import ArgumentParser
+from typing import Union, Tuple, Optional, Callable, Dict, Set, List, Any, Iterable
 import pickle
+from bb_opt.src.hsic import (
+    dimwise_mixrq_kernels,
+    precompute_batch_hsic_stats,
+    compute_point_hsics,
+    total_hsic,
+)
+
 
 N_HIDDEN = 100
 NON_LINEARITY = "ReLU"
@@ -136,7 +142,7 @@ def make_guide(
 def optimize(
     # TODO: how to do the typing for inputs to `get_model`? needs batch_size and device somewhere
     get_model: Callable[..., ModelType],
-    acquisition_func: Callable[[ModelType, InputType, Set[int], int], List[int]],
+    acquisition_func: Callable[[ModelType, InputType, Set[int], int], Iterable[int]],
     train_model: Callable[[ModelType, InputType, LabelType], None],
     inputs: Union[torch.Tensor, np.ndarray],
     labels: Union[pd.Series, np.ndarray],
@@ -146,6 +152,7 @@ def optimize(
     n_epochs: int = 2,
     device: Optional[torch.device] = None,
     verbose: bool = False,
+    exp: Optional = None,
 ) -> Tuple[np.ndarray, np.ndarray]:
 
     if isinstance(labels, pd.Series):
@@ -164,33 +171,60 @@ def optimize(
         labels = labels.to(device)
 
     all_fraction_best_sampled = []
-    for _ in range(n_repeats):
-        model = get_model(batch_size=batch_size, device=device)
-        sampled_idx = set()
-        fraction_best_sampled = []
+    try:
+        for _ in range(n_repeats):
+            model = get_model(batch_size=batch_size, device=device)
+            sampled_idx = set()
+            fraction_best_sampled = []
 
-        for _ in range(int(np.ceil(len(labels) / batch_size))):
-            acquire_samples = acquisition_func(model, inputs, sampled_idx, batch_size)
-            sampled_idx.update(acquire_samples)
-            fraction_best_sampled.append(
-                len(best_idx.intersection(sampled_idx)) / len(best_idx)
-            )
-            train_model(
-                model,
-                inputs[list(sampled_idx)],
-                labels[list(sampled_idx)],
-                n_epochs,
-                batch_size,
-            )
+            for step in range(int(np.ceil(len(labels) / batch_size))):
+                acquire_samples = acquisition_func(
+                    model, inputs, sampled_idx, batch_size, exp=exp
+                )
+                sampled_idx.update(acquire_samples)
+                fraction_best = len(best_idx.intersection(sampled_idx)) / len(best_idx)
+                fraction_best_sampled.append(fraction_best)
 
-        assert len(sampled_idx) == len(labels)
+                if verbose:
+                    print(step, fraction_best)
 
-        all_fraction_best_sampled.append(fraction_best_sampled)
+                if exp:
+                    exp.log_metric("fraction_best", fraction_best, step)
+
+                train_model(
+                    model,
+                    inputs[list(sampled_idx)],
+                    labels[list(sampled_idx)],
+                    n_epochs,
+                    batch_size,
+                )
+
+            assert len(sampled_idx) == len(labels)
+
+            all_fraction_best_sampled.append(fraction_best_sampled)
+    except KeyboardInterrupt:
+        pass
 
     fraction_best_sampled = np.array(all_fraction_best_sampled)
     mean_fraction_best = fraction_best_sampled.mean(axis=0)
     std_fraction_best = fraction_best_sampled.std(axis=0)
     return mean_fraction_best, std_fraction_best
+
+
+def get_model_uniform(*args, **kwargs):
+    pass
+
+
+def acquire_batch_uniform(
+    model: ModelType, inputs: InputType, sampled_idx: Set[int], batch_size: int
+) -> List[int]:
+    unused_idx = [i for i in range(len(inputs)) if i not in sampled_idx]
+    np.random.shuffle(unused_idx)
+    return unused_idx[:batch_size]
+
+
+def train_model_uniform(*args, **kwargs):
+    pass
 
 
 def get_model_nn(n_inputs: int = 512, batch_size: int = 200, device: Optional = None):
@@ -289,23 +323,116 @@ def acquire_batch_bnn_greedy(
 
 
 def acquire_batch_pdts(
-    model, inputs: InputType, sampled_idx: Set[int], batch_size
-) -> List[int]:
+    model,
+    inputs: InputType,
+    sampled_idx: Set[int],
+    batch_size: int,
+    exp: Optional = None,
+) -> Set[int]:
     bnn_model, guide = model
-    preds = bnn_predict(guide, inputs, n_samples=batch_size)
-    sorted_idx = np.argsort(preds)
+    # preds = bnn_predict(guide, inputs, n_samples=batch_size)
 
-    acquire_samples = []
+    with torch.no_grad():
+        preds = [
+            torch.unsqueeze(guide()(inputs).squeeze(), 0) for _ in range(batch_size)
+        ]
+    preds = torch.cat(preds)
+
+    # TODO: sorting makes this O(mn log n) when it should just be O(mn)
+    # however, we can't just take the max from each sampled NN in case
+    # it's already been acquired or is acquired by another of the NN samples
+    # if we don't even predict on the already acquired samples, then we
+    # could just take the m max points from each NN sample and use the largest
+    # of those that isn't already selected by another NN sample
+    # what would the runtime for this be? if m is O(n), would it be any
+    # better than O(n log n)?
+    sorted_idx = np.argsort(preds).numpy()
+
+    acquire_samples = set()
     for row in sorted_idx:
         for idx in row[::-1]:  # largest last so reverse
             # avoid acquiring the same point from multiple nn samples
             if idx in acquire_samples or idx in sampled_idx:
                 continue
 
-            acquire_samples.append(idx)
+            acquire_samples.add(idx)
             break
 
+    hsic = total_hsic(dimwise_mixrq_kernels(preds[:, list(acquire_samples)]))
+    exp.log_metric("hsic_mean", hsic, step=len(sampled_idx))
+
     return acquire_samples
+
+
+def acquire_batch_hsic(
+    model,
+    inputs: InputType,
+    sampled_idx: Set[int],
+    batch_size: int,
+    n_points_parallel: int = 100,
+    exp: Optional = None,
+) -> List[int]:
+    hsic_coeff = 150
+    n_preds = 250
+    bnn_model, guide = model
+
+    with torch.no_grad():
+        preds = [torch.unsqueeze(guide()(inputs).squeeze(), 0) for _ in range(n_preds)]
+    preds = torch.cat(preds)
+
+    mean = preds.mean(dim=0)
+    std = preds.std(dim=0)
+    metric = mean / std
+
+    acquirable_idx = set(range(len(metric))).difference(sampled_idx)
+
+    best_metric = -float("inf")
+    best_idx = None
+
+    for idx in acquirable_idx:
+        if metric[idx] > best_metric:
+            best_metric = metric[idx]
+            best_idx = idx
+
+    batch = [best_idx]
+    acquirable_idx.remove(best_idx)
+
+    while len(batch) < batch_size:
+        best_idx = None
+        best_batch_metric = -float("inf")
+
+        batch_stats = precompute_batch_hsic_stats(preds, batch)
+
+        all_hsics = []
+
+        for next_points in torch.tensor(list(acquirable_idx)).split(n_points_parallel):
+            hsics = compute_point_hsics(preds, next_points, *batch_stats)
+            idx = hsics.argmax()
+            hsic = hsics[idx]
+            idx = next_points[idx]
+
+            all_hsics.append(hsics.cpu().numpy())
+
+            batch_metric = metric[idx] - hsic_coeff * hsic
+
+            if batch_metric > best_batch_metric:
+                best_batch_metric = batch_metric
+                best_idx = idx.item()
+            else:
+                print(best_metric, hsic_coeff, hsic, metric[idx])
+
+        batch.append(best_idx)
+        acquirable_idx.remove(best_idx)
+
+        all_hsics = np.concatenate(all_hsics)
+        exp.log_multiple_metrics(
+            {"hsic_mean": np.mean(all_hsics), "hsic_std": np.std(all_hsics)},
+            step=len(sampled_idx) + len(batch),
+        )
+
+        if not acquirable_idx:
+            break
+    return batch
 
 
 def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
@@ -313,18 +440,61 @@ def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
     optimizer = pyro.optim.Adam({})
     pyro.clear_param_store()
     svi = pyro.infer.SVI(bnn_model, guide, optimizer, loss=pyro.infer.Trace_ELBO())
-    n_steps = int(len(inputs) / batch_size * n_epochs)
+    if n_epochs == -1:
+        n_steps = 10000000000000
+    else:
+        n_steps = int(len(inputs) / batch_size * n_epochs)
     train(svi, n_steps, inputs, labels)
 
 
-def train(svi, n_steps: int, inputs, labels, verbose: bool = False):
-    losses = []
+def get_early_stopping(
+    max_patience: int, threshold: float = 1.0
+) -> Callable[[float], bool]:
+    old_min = float("inf")
+    patience = max_patience
 
-    for step in range(n_steps):
-        loss = svi.step(inputs, labels)
-        losses.append(loss)
-        if verbose and step % 500 == 0:
-            print(f"[S{step:04}] loss: {loss:,.0f}")
+    def early_stopping(metric: float) -> bool:
+        nonlocal old_min
+        nonlocal patience
+        nonlocal max_patience
+        if metric < threshold * old_min:
+            old_min = metric
+            patience = max_patience
+        else:
+            patience -= 1
+
+        if patience == 0:
+            return True
+        return False
+
+    return early_stopping
+
+
+def train(
+    svi,
+    n_steps: int,
+    inputs,
+    labels,
+    verbose: bool = False,
+    max_patience: int = 5,
+    n_steps_early_stopping: int = 1000,
+):
+    losses = []
+    early_stopping = get_early_stopping(max_patience)
+
+    try:
+        for step in range(n_steps):
+            loss = svi.step(inputs, labels)
+            losses.append(loss)
+            if step % n_steps_early_stopping == 0:
+                if verbose:
+                    print(f"[S{step:04}] loss: {loss:,.0f}")
+
+                stop_now = early_stopping(min(losses[-n_steps_early_stopping:]))
+                if stop_now:
+                    break
+    except KeyboardInterrupt:
+        pass
     return losses
 
 
@@ -366,47 +536,3 @@ def optimize_inputs(
     if bounds is not None:
         for i in range(len(bounds)):
             inputs.data[:, i].clamp_(*bounds[i])
-
-
-if __name__ == "__main__":
-    parser = ArgumentParser()
-    parser.add_argument("-d", "--device_num", type=int, default=0)
-    parser.add_argument("-n", "--n_epochs", type=int, default=1)
-    args = parser.parse_args()
-
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device_num)
-    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-    data = pd.read_csv("../data/malaria.csv")
-    bond_radius = 2
-    n_bits = 512
-
-    molecules = [MolFromSmiles(smile) for smile in data.smile]
-    fingerprints = [
-        get_fingerprint(mol, radius=bond_radius, nBits=n_bits) for mol in molecules
-    ]
-    fingerprints = np.array([[int(i) for i in fp.ToBitString()] for fp in fingerprints])
-
-    fraction_best = {}  # {model_name: (mean, std)}
-    n_repeats = 1
-    top_k_percent = 1
-    batch_size = 200
-
-    mean, std = optimize(
-        get_model_bnn,
-        acquire_batch_pdts,
-        train_model_bnn,
-        fingerprints,
-        data.ec50,
-        top_k_percent,
-        n_repeats,
-        batch_size,
-        args.n_epochs,
-        device,
-    )
-    fraction_best["PDTS"] = (mean, std)
-
-    rand = np.random.randint(100000000)
-    with open(
-        f"../plot_data/fraction_best_n_epochs_{args.n_epochs}_{rand}.pkl", "wb"
-    ) as f:
-        pickle.dump(fraction_best, f)
