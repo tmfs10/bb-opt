@@ -13,22 +13,27 @@ from bb_opt.src.bayesian_opt import (
     get_model_nn,
     get_model_bnn,
     acquire_batch_uniform,
-    acquire_batch_uniform,
     acquire_batch_nn_greedy,
     acquire_batch_bnn_greedy,
     acquire_batch_pdts,
-    acquire_batch_hsic,
+    acquire_batch_hsic_mean_std,
+    acquire_batch_hsic_pdts,
+    acquire_batch_mi,
     train_model_uniform,
     train_model_nn,
     train_model_bnn,
 )
+from bb_opt.src.hsic import dimwise_mixrq_kernels, dimwise_mixrbf_kernels
+from bb_opt.src.utils import get_path
 
 models = {
     "uniform": get_model_uniform,
     "nn": get_model_nn,
     "bnn": get_model_bnn,
     "pdts": get_model_bnn,
-    "hsic": get_model_bnn,
+    "hsic_ms": get_model_bnn,
+    "hsic_pdts": get_model_bnn,
+    "mi": get_model_bnn,
 }
 
 acquisition_functions = {
@@ -36,7 +41,9 @@ acquisition_functions = {
     "nn": acquire_batch_nn_greedy,
     "bnn": acquire_batch_bnn_greedy,
     "pdts": acquire_batch_pdts,
-    "hsic": acquire_batch_hsic,
+    "hsic_ms": acquire_batch_hsic_mean_std,
+    "hsic_pdts": acquire_batch_hsic_pdts,
+    "mi": acquire_batch_mi,
 }
 
 train_functions = {
@@ -44,17 +51,21 @@ train_functions = {
     "nn": train_model_nn,
     "bnn": train_model_bnn,
     "pdts": train_model_bnn,
-    "hsic": train_model_bnn,
+    "hsic_ms": train_model_bnn,
+    "hsic_pdts": train_model_bnn,
+    "mi": train_model_bnn,
 }
 
 
-def _get_path(*path_segments):
-    return os.path.realpath(os.path.join(*path_segments))
-
-
-if __name__ == "__main__":
+def main():
     parser = ArgumentParser()
-    parser.add_argument("model_key", help="One of [uniform, nn, bnn, pdts, hsic]")
+    parser.add_argument("model_key", help="One of {uniform, nn, bnn, pdts, hsic}")
+    parser.add_argument("project", help="One of {malaria, dna_binding}")
+    parser.add_argument(
+        "--dataset",
+        default="",
+        help="Needed for projects w/ multiple datasets e.g. 'crx_ref_r1' for for dna_binding",
+    )
     parser.add_argument(
         "-s",
         "--save_key",
@@ -69,6 +80,11 @@ if __name__ == "__main__":
         default=-1,
         help="-1 means train until early stopping occurs; this must be supported by the model function used.",
     )
+    parser.add_argument("-k", "--kernel", default="rq", help="rq (default) or rbf")
+    parser.add_argument("-c", "--hsic_coeff", type=float, default=150.0)
+    parser.add_argument("--hsic_metric", default="mu / sigma - hsic")
+    parser.add_argument("--preds_multiplier", type=float, default=2.5)
+    parser.add_argument("--pdts_multiplier", type=float, default=2.0)
     args = parser.parse_args()
 
     model_key = args.model_key
@@ -77,9 +93,10 @@ if __name__ == "__main__":
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device_num)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    root = os.path.realpath(os.path.join(__file__, "../.."))
-    fingerprints = np.load(_get_path(root, "data/fingerprints.npy"))
-    ec50 = pd.read_csv(_get_path(root, "data/malaria.csv")).ec50.values
+    root = get_path(__file__, "..", "..")
+    data_dir = get_path(root, "data", args.project, args.dataset)
+    inputs = np.load(get_path(data_dir, "inputs.npy"))
+    labels = np.load(get_path(data_dir, "labels.npy"))
 
     n_repeats = 1
     top_k_percent = 1
@@ -87,34 +104,51 @@ if __name__ == "__main__":
     with open(f"{os.environ['HOME']}/.comet_key") as f:
         comet_key = f.read().strip()
 
-    exp = Experiment(comet_key, project_name="bb_opt", auto_param_logging=False)
+    exp = Experiment(
+        comet_key, project_name="bb_opt", auto_param_logging=False, parse_args=False
+    )
     exp.log_multiple_params(
         {
             "model_key": model_key,
             "save_key": save_key,
+            "project": args.project,
+            "dataset": args.dataset,
             "batch_size": args.batch_size,
             "n_epochs": args.n_epochs,
+            "n_hidden": 100,
         }
     )
 
-    if model_key == "hsic":
-        # TODO: these should be command line args too;
-        # maybe `optimize` should accept kwargs for ac func and train func?
-        exp.log_multiple_params(
-            {
-                "hsic_coeff": 150,
-                "n_preds": 250,
-                "metric": "mu / sigma - hsic",
-                "kernel": "linear",
-            }
-        )
+    acquisition_args = {}
+    if model_key in ["mi", "hsic_ms", "hsic_pdts", "pdts"]:
+        kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
+        acquisition_args["kernel"] = args.kernel
+
+        if model_key != "mi":
+            # just because, for now at least, we report HSIC during PDTS acquisition,
+            # even though the HSIC doesn't affect the result
+            acquisition_args[
+                "preds_multiplier"
+            ] = args.preds_multiplier  # n_preds = preds_mult * batch_size
+
+    if model_key == "hsic_ms":
+        acquisition_args["hsic_coeff"] = args.hsic_coeff
+        acquisition_args["metric"] = args.hsic_metric
+
+    if model_key == "hsic_pdts":
+        acquisition_args["pdts_multiplier"] = args.pdts_multiplier
+
+    exp.log_multiple_params(acquisition_args)
+
+    if "kernel" in acquisition_args:
+        acquisition_args["kernel"] = kernels[acquisition_args["kernel"]]
 
     mean, std = optimize(
         models[model_key],
         acquisition_functions[model_key],
         train_functions[model_key],
-        fingerprints,
-        ec50,
+        inputs,
+        labels,
         top_k_percent,
         n_repeats,
         args.batch_size,
@@ -122,10 +156,15 @@ if __name__ == "__main__":
         device,
         verbose=True,
         exp=exp,
+        acquisition_args=acquisition_args,
     )
     fraction_best = {save_key: (mean, std)}
 
     rand = np.random.randint(1000000)
-    fname = _get_path(root, f"figures/plot_data/fraction_best_{model_key}_{rand}.pkl")
+    fname = get_path(root, f"figures/plot_data/fraction_best_{model_key}_{rand}.pkl")
     with open(fname, "wb") as f:
         pickle.dump(fraction_best, f)
+
+
+if __name__ == "__main__":
+    main()

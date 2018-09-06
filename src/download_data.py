@@ -6,7 +6,7 @@ from rdkit.Chem import MolFromSmiles
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect as get_fingerprint
 from bb_opt.src.utils import get_path
 
-data_root = get_path(__file__, "../../data")
+data_root = get_path(__file__, "..", "..", "data")
 
 
 def download_malaria():
