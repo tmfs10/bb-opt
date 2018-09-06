@@ -374,28 +374,24 @@ def acquire_batch_pdts(
     preds_multiplier: float = 2.0,
 ) -> Set[int]:
     bnn_model, guide = model
-    acquire_samples = set()
-    acquired = [int(i in sampled_idx) for i in range(len(inputs))]
-    mask = ~inputs.new_tensor(acquired, dtype=torch.uint8)
+    batch = []
+    acquirable_idx = list(set(range(len(inputs))).difference(sampled_idx))
 
     for _ in range(batch_size):
         with torch.no_grad():
-            preds = guide()(inputs[mask])
+            preds = guide()(inputs[acquirable_idx])
 
         acquire_idx = preds.argmax().item()
+        acquire_idx = acquirable_idx[acquire_idx]
 
-        for idx, already_acquired in enumerate(acquired):
-            if idx <= acquire_idx:
-                acquire_idx += already_acquired
-            else:
-                break
+        batch.append(acquire_idx)
+        acquirable_idx.remove(acquire_idx)
 
-        mask[acquire_idx] = 0
-        acquired[acquire_idx] = 1
-        acquire_samples.add(acquire_idx)
+        if not acquirable_idx:
+            break
 
-    assert len(acquire_samples) == batch_size
-    return acquire_samples
+    assert len(batch) == batch_size or not acquirable_idx
+    return batch
 
 
 def acquire_batch_hsic_mean_std(
@@ -554,8 +550,6 @@ def acquire_batch_mi(
     kernel: Optional[Callable] = None,
 ) -> List[int]:
 
-    assert batch_size == 1
-
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
     n_preds = 1000
@@ -566,48 +560,51 @@ def acquire_batch_mi(
 
     max_dist = preds.max(dim=1)[0]
 
-    batch = []
+    batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
 
-    for _ in range(batch_size):
-        best_idx = None
-        max_hsic = -float("inf")
+    all_hsics = []
+    all_idx = list(acquirable_idx)
 
-        batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
+    for next_points in torch.tensor(all_idx).split(n_points_parallel):
+        hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
+        all_hsics.append(hsics.cpu().numpy())
 
-        all_hsics = []
+    all_hsics = np.concatenate(all_hsics)
+    all_idx = np.array(all_idx)
 
-        for next_points in torch.tensor(list(acquirable_idx)).split(n_points_parallel):
-            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
-            idx = hsics.argmax()
-            hsic = hsics[idx]
-            idx = next_points[idx]
+    sorted_idx = np.argsort(all_hsics)
+    all_idx = all_idx[sorted_idx]
 
-            all_hsics.append(hsics.cpu().numpy())
+    batch = all_idx[:batch_size].tolist()
 
-            if hsic > max_hsic:
-                max_hsic = hsic
-                best_idx = idx.item()
+    exp.log_multiple_metrics(
+        {
+            "hsic_mean": np.mean(all_hsics),
+            "hsic_std": np.std(all_hsics),
+            "hsic_max": np.max(all_hsics),
+        },
+        step=len(sampled_idx) + len(batch),
+    )
 
-        batch.append(best_idx)
-        acquirable_idx.remove(best_idx)
-
-        all_hsics = np.concatenate(all_hsics)
-        exp.log_multiple_metrics(
-            {
-                "hsic_mean": np.mean(all_hsics),
-                "hsic_std": np.std(all_hsics),
-                "hsic_max": max_hsic,
-            },
-            step=len(sampled_idx) + len(batch),
-        )
-
-        exp.log_metric("hsic_max", max_hsic, step=len(sampled_idx))
-
-        if not acquirable_idx:
-            break
-
-    assert (len(batch) == batch_size) or not acquirable_idx, len(batch)
+    assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
     return batch
+
+
+def acquire_batch_pi(
+    model,
+    inputs: InputType,
+    sampled_idx: Set[int],
+    batch_size: int,
+    exp: Optional = None,
+) -> List[int]:
+
+    acquirable_idx = list(set(range(len(inputs))).difference(sampled_idx))
+
+    n_preds = 1000
+    bnn_model, guide = model
+
+    with torch.no_grad():
+        preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
 
 
 def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
