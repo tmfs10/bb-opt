@@ -51,4 +51,3 @@ def is_nan(x):
 
 def is_finite(x):
     return tensor_all((x != float('inf')) * (x == x))
-
