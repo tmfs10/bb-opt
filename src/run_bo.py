@@ -18,7 +18,9 @@ from bb_opt.src.bayesian_opt import (
     acquire_batch_pdts,
     acquire_batch_hsic_mean_std,
     acquire_batch_hsic_pdts,
-    acquire_batch_mi,
+    acquire_batch_mves,
+    acquire_batch_es,
+    acquire_batch_pi,
     train_model_uniform,
     train_model_nn,
     train_model_bnn,
@@ -33,7 +35,9 @@ models = {
     "pdts": get_model_bnn,
     "hsic_ms": get_model_bnn,
     "hsic_pdts": get_model_bnn,
-    "mi": get_model_bnn,
+    "mves": get_model_bnn,
+    "es": get_model_bnn,
+    "pi": get_model_bnn,
 }
 
 acquisition_functions = {
@@ -43,7 +47,9 @@ acquisition_functions = {
     "pdts": acquire_batch_pdts,
     "hsic_ms": acquire_batch_hsic_mean_std,
     "hsic_pdts": acquire_batch_hsic_pdts,
-    "mi": acquire_batch_mi,
+    "mves": acquire_batch_mves,
+    "es": acquire_batch_es,
+    "pi": acquire_batch_pi,
 }
 
 train_functions = {
@@ -53,7 +59,9 @@ train_functions = {
     "pdts": train_model_bnn,
     "hsic_ms": train_model_bnn,
     "hsic_pdts": train_model_bnn,
-    "mi": train_model_bnn,
+    "mves": train_model_bnn,
+    "es": train_model_bnn,
+    "pi": train_model_bnn,
 }
 
 
@@ -98,20 +106,22 @@ def main():
     inputs = np.load(get_path(data_dir, "inputs.npy"))
     labels = np.load(get_path(data_dir, "labels.npy"))
 
-    n_repeats = 1
     top_k_percent = 1
 
     with open(f"{os.environ['HOME']}/.comet_key") as f:
         comet_key = f.read().strip()
 
     exp = Experiment(
-        comet_key, project_name="bb_opt", auto_param_logging=False, parse_args=False
+        comet_key,
+        workspace="bayesian-optimization",
+        project_name=args.project,
+        auto_param_logging=False,
+        parse_args=False,
     )
     exp.log_multiple_params(
         {
             "model_key": model_key,
             "save_key": save_key,
-            "project": args.project,
             "dataset": args.dataset,
             "batch_size": args.batch_size,
             "n_epochs": args.n_epochs,
@@ -120,11 +130,11 @@ def main():
     )
 
     acquisition_args = {}
-    if model_key in ["mi", "hsic_ms", "hsic_pdts", "pdts"]:
+    if model_key in ["es", "mves", "hsic_ms", "hsic_pdts", "pdts"]:
         kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
         acquisition_args["kernel"] = args.kernel
 
-        if model_key != "mi":
+        if model_key not in ("es", "mves"):
             # just because, for now at least, we report HSIC during PDTS acquisition,
             # even though the HSIC doesn't affect the result
             acquisition_args[
@@ -143,14 +153,13 @@ def main():
     if "kernel" in acquisition_args:
         acquisition_args["kernel"] = kernels[acquisition_args["kernel"]]
 
-    mean, std = optimize(
+    optimize(
         models[model_key],
         acquisition_functions[model_key],
         train_functions[model_key],
         inputs,
         labels,
         top_k_percent,
-        n_repeats,
         args.batch_size,
         args.n_epochs,
         device,
@@ -158,12 +167,6 @@ def main():
         exp=exp,
         acquisition_args=acquisition_args,
     )
-    fraction_best = {save_key: (mean, std)}
-
-    rand = np.random.randint(1000000)
-    fname = get_path(root, f"figures/plot_data/fraction_best_{model_key}_{rand}.pkl")
-    with open(fname, "wb") as f:
-        pickle.dump(fraction_best, f)
 
 
 if __name__ == "__main__":
