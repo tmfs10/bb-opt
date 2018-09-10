@@ -33,7 +33,7 @@ N_HIDDEN = 100
 NON_LINEARITY = "ReLU"
 
 InputType = torch.Tensor
-LabelType = Union[torch.Tensor, np.ndarray]
+LabelType = torch.Tensor
 ModelType = Callable[[InputType], LabelType]
 
 
@@ -167,19 +167,21 @@ def make_guide(
 def optimize(
     # TODO: how to do the typing for inputs to `get_model`? needs batch_size and device somewhere
     get_model: Callable[..., ModelType],
-    acquisition_func: Callable[[ModelType, InputType, Set[int], int], Iterable[int]],
+    # TODO: need a similar typing update for acquisition (some required args, can be any other optional ones too)
+    acquisition_func: Callable[
+        [ModelType, InputType, LabelType, Set[int], int], Iterable[int]
+    ],
     train_model: Callable[[ModelType, InputType, LabelType], None],
     inputs: Union[torch.Tensor, np.ndarray],
     labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
-    n_repeats: int = 1,
     batch_size: int = 256,
     n_epochs: int = 2,
     device: Optional[torch.device] = None,
     verbose: bool = False,
     exp: Optional = None,
     acquisition_args: Optional[dict] = None,
-) -> Tuple[np.ndarray, np.ndarray]:
+) -> np.ndarray:
 
     acquisition_args = acquisition_args or {}
 
@@ -194,54 +196,72 @@ def optimize(
 
     n_top_k_percent = int(top_k_percent / 100 * len(labels))
     best_idx = set(labels.argsort()[-n_top_k_percent:])
+    sum_best = np.sort(labels)[-n_top_k_percent:].sum()
+    best_value = np.sort(labels)[-1]
+
     labels = torch.tensor(labels).float()
     if device and labels.device != device:
         labels = labels.to(device)
 
-    all_fraction_best_sampled = []
     try:
-        for _ in range(n_repeats):
-            model = get_model(
-                n_inputs=inputs.shape[1], batch_size=batch_size, device=device
+        model = get_model(
+            n_inputs=inputs.shape[1], batch_size=batch_size, device=device
+        )
+        sampled_idx = set()
+        fraction_best_sampled = []
+
+        for step in range(int(np.ceil(len(labels) / batch_size))):
+            acquire_samples = acquisition_func(
+                model,
+                inputs,
+                labels[list(sampled_idx)],
+                sampled_idx,
+                batch_size,
+                exp=exp,
+                **acquisition_args,
             )
-            sampled_idx = set()
-            fraction_best_sampled = []
+            sampled_idx.update(acquire_samples)
+            fraction_best = len(best_idx.intersection(sampled_idx)) / len(best_idx)
+            fraction_best_sampled.append(fraction_best)
 
-            for step in range(int(np.ceil(len(labels) / batch_size))):
-                acquire_samples = acquisition_func(
-                    model, inputs, sampled_idx, batch_size, exp=exp, **acquisition_args
+            if verbose:
+                print(f"{step} {fraction_best:.3f}")
+
+            if exp:
+                sampled_labels = labels[list(sampled_idx)]
+                sampled_sum_best = (
+                    sampled_labels.sort()[0][-n_top_k_percent:].sum().item()
                 )
-                sampled_idx.update(acquire_samples)
-                fraction_best = len(best_idx.intersection(sampled_idx)) / len(best_idx)
-                fraction_best_sampled.append(fraction_best)
+                sampled_best_value = sampled_labels.max().item()
 
-                if verbose:
-                    print(f"{step} {fraction_best:.3f}")
-
-                if exp:
-                    exp.log_metric("fraction_best", fraction_best, step)
-                    exp.log_metric(
-                        "best_value", labels[list(sampled_idx)].max().item(), step
-                    )
-
-                train_model(
-                    model,
-                    inputs[list(sampled_idx)],
-                    labels[list(sampled_idx)],
-                    n_epochs,
-                    batch_size,
+                exp.log_metric("fraction_best", fraction_best, step * batch_size)
+                exp.log_metric("best_value", sampled_best_value, step * batch_size)
+                exp.log_metric(
+                    "best_value_ratio",
+                    sampled_best_value / best_value,
+                    step * batch_size,
+                )
+                exp.log_metric(
+                    "best_values_ratio", sampled_sum_best / sum_best, step * batch_size
                 )
 
-            assert len(sampled_idx) == len(labels)
+            if fraction_best == 1.0:
+                break
 
-            all_fraction_best_sampled.append(fraction_best_sampled)
+            train_model(
+                model,
+                inputs[list(sampled_idx)],
+                labels[list(sampled_idx)],
+                n_epochs,
+                batch_size,
+            )
+
+        assert (len(sampled_idx) == len(labels)) or (fraction_best == 1.0)
+
     except KeyboardInterrupt:
         pass
 
-    fraction_best_sampled = np.array(all_fraction_best_sampled)
-    mean_fraction_best = fraction_best_sampled.mean(axis=0)
-    std_fraction_best = fraction_best_sampled.std(axis=0)
-    return mean_fraction_best, std_fraction_best
+    return np.array(fraction_best_sampled)
 
 
 def get_model_uniform(*args, **kwargs):
@@ -251,6 +271,7 @@ def get_model_uniform(*args, **kwargs):
 def acquire_batch_uniform(
     model: ModelType,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -287,6 +308,7 @@ def get_model_nn(n_inputs: int = 512, batch_size: int = 200, device: Optional = 
 def acquire_batch_nn_greedy(
     model: ModelType,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -350,6 +372,7 @@ def get_model_bnn(
 def acquire_batch_bnn_greedy(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     n_bnn_samples: int = 50,
@@ -367,6 +390,7 @@ def acquire_batch_bnn_greedy(
 def acquire_batch_pdts(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -397,6 +421,7 @@ def acquire_batch_pdts(
 def acquire_batch_hsic_mean_std(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -478,6 +503,7 @@ def acquire_batch_hsic_mean_std(
 def acquire_batch_hsic_pdts(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -540,9 +566,10 @@ def acquire_batch_hsic_pdts(
     return batch
 
 
-def acquire_batch_mi(
+def acquire_batch_mves(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -590,21 +617,83 @@ def acquire_batch_mi(
     return batch
 
 
-def acquire_batch_pi(
+def acquire_batch_es(
     model,
     inputs: InputType,
+    sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
+    n_points_parallel: int = 100,
     exp: Optional = None,
+    kernel: Optional[Callable] = None,
 ) -> List[int]:
 
-    acquirable_idx = list(set(range(len(inputs))).difference(sampled_idx))
+    acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
     n_preds = 1000
     bnn_model, guide = model
 
     with torch.no_grad():
         preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+
+    max_dist = inputs[preds.argmax(dim=1)]
+
+    batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
+
+    all_hsics = []
+    all_idx = list(acquirable_idx)
+
+    for next_points in torch.tensor(all_idx).split(n_points_parallel):
+        hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
+        all_hsics.append(hsics.cpu().numpy())
+
+    all_hsics = np.concatenate(all_hsics)
+    all_idx = np.array(all_idx)
+
+    sorted_idx = np.argsort(all_hsics)
+    all_idx = all_idx[sorted_idx]
+
+    batch = all_idx[:batch_size].tolist()
+
+    exp.log_multiple_metrics(
+        {
+            "hsic_mean": np.mean(all_hsics),
+            "hsic_std": np.std(all_hsics),
+            "hsic_max": np.max(all_hsics),
+        },
+        step=len(sampled_idx) + len(batch),
+    )
+
+    assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
+    return batch
+
+
+def acquire_batch_pi(
+    model,
+    inputs: InputType,
+    sampled_labels: LabelType,
+    sampled_idx: Set[int],
+    batch_size: int,
+    exp: Optional = None,
+) -> List[int]:
+    n_preds = 1000
+    max_val = sampled_labels.max()
+    bnn_model, guide = model
+
+    batch = []
+    acquirable_idx = list(set(range(len(inputs))).difference(sampled_idx))
+    inputs = inputs[acquirable_idx]
+
+    with torch.no_grad():
+        preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+
+    prob_improvement = (preds > max_val).sum(dim=0).float() / n_preds
+
+    batch = prob_improvement.sort(descending=True)[1][:batch_size].tolist()
+    batch = [acquirable_idx[i] for i in batch]
+
+    assert len(batch) == batch_size or not acquirable_idx
+    return batch
 
 
 def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
