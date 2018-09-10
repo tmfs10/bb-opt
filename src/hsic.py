@@ -39,7 +39,8 @@ def dimwise_mixrq_kernels(
     Here we (by default) use a weighted combination of multiple alphas and set l = sigma = 1.
     """
 
-    assert X.ndimension() == 2, X.ndimension()
+    n_dims = X.ndimension()
+    assert n_dims in (2, 3), X.ndimension()
 
     alphas = X.new_tensor(alphas).view(-1, 1, 1, 1)
     weights = weights or 1.0 / len(alphas)
@@ -47,6 +48,10 @@ def dimwise_mixrq_kernels(
 
     # dims are (alpha, x, y, dim)
     sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+
+    if n_dims == 3:
+        sqdists = sqdists.sum(dim=-1)
+
     # 30% faster without asserts in some quick tests (n = 250, d = 1K)
     #     assert (sqdists >= 0).all()
 
