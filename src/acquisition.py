@@ -3,7 +3,7 @@ import torch
 import matlab
 
 
-def init_pes(args, eng, obj, n_init_samples, n_opt_samples, x_min, x_max):
+def init_pes(is_cuda, eng, obj, n_init_samples, n_opt_samples, x_min, x_max):
     eng.addpath('pes_matlab/sourceFiles', eng.path())
     x_samples = eng.lhsu(x_min, x_max, n_init_samples, nargout=1) # (n_init_samples, nvars)
     y_samples = []
@@ -11,7 +11,7 @@ def init_pes(args, eng, obj, n_init_samples, n_opt_samples, x_min, x_max):
         y_samples += [obj(np.asarray(x_samples[i]))]
     y_samples = matlab.double(y_samples)
 
-    if args.cuda:
+    if is_cuda:
         x_samples = eng.gpuArray(x_samples, nargout=1)
         y_samples = eng.gpuArray(y_samples, nargout=1)
 
@@ -46,7 +46,7 @@ def pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y
 
     return x_samples, y_samples, guesses, l, sigma, sigma0
 
-def init_mes(args, eng, obj, x_min, x_max, init_x, init_y):
+def init_mes(is_cuda, eng, obj, x_min, x_max, init_x, init_y):
     eng.addpath('mes_matlab', eng.path())
 
     xx = init_x
