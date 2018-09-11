@@ -15,7 +15,7 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], wts=None):
     assert len(shp) == 2
 
     bws = torch.tensor(bws, dtype=X.dtype)
-    wts = ((1 if wts is None else wts) * torch.ones(bws.shape)).type(X.type())
+    wts = ((1./len(bws) if wts is None else wts) * torch.ones(bws.shape)).type(X.type())
 
     sqdists = (torch.unsqueeze(X, 0) - torch.unsqueeze(X, 1)) ** 2
     bws_e = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(bws, 1), 2), 3)
