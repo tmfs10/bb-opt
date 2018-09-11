@@ -98,3 +98,7 @@ def random_points(bounds: np.ndarray, ndim: int, n_points: int) -> np.ndarray:
         upper_bounds - lower_bounds
     )
     return points
+
+
+def get_path(*path_segments):
+    return os.path.realpath(os.path.join(*path_segments))

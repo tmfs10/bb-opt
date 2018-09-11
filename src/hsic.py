@@ -1,9 +1,9 @@
 import torch
 import sys
-from typing import Sequence
+from typing import Sequence, Callable, Optional
 
 
-def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], wts=None):
+def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=1.0):
     """Mixture of RBF kernels between each dimension of X.
 
     If X is shape (n, d), returns shape (n, n, d).
@@ -11,17 +11,15 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], wts=None):
     Kernel is sum_i wt_i exp(- (x - y)^2 / (2 bw^2)).
     If wts is not passed, uses 1 for each alpha.
     """
-    shp = X.shape
-    assert len(shp) == 2
+    assert X.ndimension() == 2
 
     bws = torch.tensor(bws, dtype=X.dtype)
     wts = ((1./len(bws) if wts is None else wts) * torch.ones(bws.shape)).type(X.type())
 
-    sqdists = (torch.unsqueeze(X, 0) - torch.unsqueeze(X, 1)) ** 2
-    bws_e = torch.unsqueeze(torch.unsqueeze(torch.unsqueeze(bws, 1), 2), 3)
+    sqdists = (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
 
-    parts = torch.exp(torch.unsqueeze(sqdists, 0) / (-2 * bws_e ** 2))
-    return torch.einsum("w,wijd->ijd", (wts, parts))
+    parts = torch.exp(sqdists.unsqueeze(0) / (-2 * bws ** 2))
+    return torch.einsum("w,wijd->ijd", (weights, parts))
 
 
 def dimwise_mixrq_kernels(
@@ -38,10 +36,11 @@ def dimwise_mixrq_kernels(
     If weights is not passed, each alpha is weighted equally.
 
     A vanilla RQ kernel is k(x, x') = sigma^2 (1 + (x - x')^2 / (2 alpha l^2)) ^ -alpha
-    Here we (by defautl) use a weighted combination of multiple alphas and set l = sigma = 1.
+    Here we (by default) use a weighted combination of multiple alphas and set l = sigma = 1.
     """
 
-    assert X.ndimension() == 2, X.ndimension()
+    n_dims = X.ndimension()
+    assert n_dims in (2, 3), X.ndimension()
 
     alphas = X.new_tensor(alphas).view(-1, 1, 1, 1)
     weights = weights or 1.0 / len(alphas)
@@ -49,6 +48,10 @@ def dimwise_mixrq_kernels(
 
     # dims are (alpha, x, y, dim)
     sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+
+    if n_dims == 3:
+        sqdists = sqdists.sum(dim=-1)
+
     # 30% faster without asserts in some quick tests (n = 250, d = 1K)
     #     assert (sqdists >= 0).all()
 
@@ -62,6 +65,13 @@ def linear_kernel(x: torch.Tensor, c: float = 1):
     :param x: n x d for n samples from d RVs
     """
     return x.unsqueeze(0) * x.unsqueeze(1) + c
+
+
+def distance_kernel(x: torch.Tensor):
+    """
+    :param x: n x d for n samples from d RVs
+    """
+    return (x.unsqueeze(0) - x.unsqueeze(1)).abs()
 
 
 ################################################################################
@@ -137,14 +147,19 @@ def sum_pairwise_hsic(kernels):
 
 
 def precompute_batch_hsic_stats(
-    preds: torch.Tensor, batch: Sequence[int]
+    preds: torch.Tensor,
+    batch: Optional[Sequence[int]] = None,
+    kernel: Callable = dimwise_mixrq_kernels,
 ) -> Sequence[torch.Tensor]:
-    batch_kernels = linear_kernel(preds[:, batch])
+    if batch:
+        preds = preds[:, batch]
+
+    batch_kernels = kernel(preds)
     batch_kernels.log_()
     batch_kernels = batch_kernels.unsqueeze(-1)
 
-    batch_sum_b = torch.logsumexp(batch_kernels, dim=1)
-    batch_l1_sum = torch.sum(batch_kernels, dim=2)
+    batch_sum_b = batch_kernels.logsumexp(dim=1)
+    batch_l1_sum = batch_kernels.sum(dim=2)
     batch_l2_sum = batch_sum_b.sum(dim=1)
     batch_l3_sum = batch_sum_b.logsumexp(dim=0).sum(dim=0)
     return batch_sum_b, batch_l1_sum, batch_l2_sum, batch_l3_sum
@@ -157,12 +172,13 @@ def compute_point_hsics(
     batch_l1_sum: torch.Tensor,
     batch_l2_sum: torch.Tensor,
     batch_l3_sum: torch.Tensor,
+    kernel: Callable = dimwise_mixrq_kernels,
 ) -> torch.Tensor:
     log_n = preds.new_tensor(len(batch_sum_b)).log_()
     d = preds.new_tensor(batch_sum_b.shape[1] + 1)
     log_2 = preds.new_tensor(2).log_()
 
-    point_kernels = linear_kernel(preds[:, next_points])
+    point_kernels = kernel(preds[:, next_points])
     point_kernels.log_()
     point_kernels = point_kernels.unsqueeze(2)
 
