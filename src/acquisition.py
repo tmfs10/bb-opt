@@ -1,6 +1,6 @@
 
 import torch
-import matlab.engine
+import matlab
 
 
 def init_pes(args, eng, obj, n_init_samples, n_opt_samples, x_min, x_max):
