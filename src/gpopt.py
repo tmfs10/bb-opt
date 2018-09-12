@@ -1,6 +1,6 @@
 
 import matlab.engine
-import acquisition as ack
+import gp_acquisition as ack
 
 def gpopt_pes(n_init_samples, n_opt_samples, n_features, x_min, x_max, predictor_model, num_batches):
     eng = matlab.engine.start_matlab()
