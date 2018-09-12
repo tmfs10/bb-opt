@@ -181,9 +181,11 @@ def optimize(
     verbose: bool = False,
     exp: Optional = None,
     acquisition_args: Optional[dict] = None,
+    n_batches: int = -1,
 ) -> np.ndarray:
 
     acquisition_args = acquisition_args or {}
+    n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
 
     if isinstance(labels, pd.Series):
         labels = labels.values
@@ -210,7 +212,7 @@ def optimize(
         sampled_idx = set()
         fraction_best_sampled = []
 
-        for step in range(int(np.ceil(len(labels) / batch_size))):
+        for step in range(n_batches):
             acquire_samples = acquisition_func(
                 model,
                 inputs,
@@ -256,7 +258,9 @@ def optimize(
                 batch_size,
             )
 
-        assert (len(sampled_idx) == len(labels)) or (fraction_best == 1.0)
+        assert (len(sampled_idx) == min(len(labels), batch_size * n_batches)) or (
+            fraction_best == 1.0
+        )
 
     except KeyboardInterrupt:
         pass
@@ -470,7 +474,7 @@ def acquire_batch_hsic_mean_std(
         all_hsics = []
 
         for next_points in torch.tensor(list(acquirable_idx)).split(n_points_parallel):
-            hsics = compute_point_hsics(preds, next_points, kernel, *batch_stats)
+            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
             idx = hsics.argmin()
             hsic = hsic_coeff * hsics[idx]
             idx = next_points[idx]
@@ -514,7 +518,13 @@ def acquire_batch_hsic_pdts(
 ) -> List[int]:
 
     acquirable_idx = acquire_batch_pdts(
-        model, inputs, sampled_idx, int(batch_size * pdts_multiplier), exp, kernel
+        model,
+        inputs,
+        sampled_labels,
+        sampled_idx,
+        int(batch_size * pdts_multiplier),
+        exp,
+        kernel,
     )
 
     n_preds = int(preds_multiplier * batch_size)
