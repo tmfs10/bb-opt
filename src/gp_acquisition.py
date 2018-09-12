@@ -19,6 +19,22 @@ def init_pes(is_cuda, eng, obj, n_init_samples, n_opt_samples, x_min, x_max):
 
     return x_samples, y_samples, l, sigma, sigma0
 
+def init_pes(is_cuda, eng, obj, x_init_samples, n_opt_samples):
+    eng.addpath('pes_matlab/sourceFiles', eng.path())
+    x_samples = matlab.double(x_init_samples)
+    y_samples = []
+    for i in range(n_init_samples):
+        y_samples += [obj(np.asarray(x_samples[i]))]
+    y_samples = matlab.double(y_samples)
+
+    if is_cuda:
+        x_samples = eng.gpuArray(x_samples, nargout=1)
+        y_samples = eng.gpuArray(y_samples, nargout=1)
+
+    l, sigma, sigma0 = eng.sampleHypers(x_samples, y_samples, n_opt_samples, nargout=3)
+
+    return x_samples, y_samples, l, sigma, sigma0
+
 def pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y_samples, l, sigma, sigma0):
     # sample from global minimum
     m, hessian = eng.sampleMinimum(n_opt_samples, x_samples, y_samples, l, sigma, sigma0, x_min, x_max, n_features, nargout=2)
