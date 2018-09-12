@@ -93,6 +93,13 @@ def main():
     parser.add_argument("--hsic_metric", default="mu / sigma - hsic")
     parser.add_argument("--preds_multiplier", type=float, default=2.5)
     parser.add_argument("--pdts_multiplier", type=float, default=2.0)
+    parser.add_argument(
+        "-nb",
+        "--n_batches",
+        type=int,
+        default=-1,
+        help="Run until this many batches have been acquired. -1 (default) means to train until the entire dataset has been acquired.",
+    )
     args = parser.parse_args()
 
     model_key = args.model_key
@@ -125,6 +132,7 @@ def main():
             "dataset": args.dataset,
             "batch_size": args.batch_size,
             "n_epochs": args.n_epochs,
+            "n_batches": args.n_batches,
             "n_hidden": 100,
         }
     )
@@ -166,6 +174,7 @@ def main():
         verbose=True,
         exp=exp,
         acquisition_args=acquisition_args,
+        n_batches=args.n_batches,
     )
 
 
