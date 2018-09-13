@@ -49,12 +49,12 @@ def pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y
     x_samples = eng.cat(1, x_samples, optimum, nargout=1)
     y_samples = eng.cat(1, x_samples, obj(np.asarray(optimum)), nargout=1)
     l, sigma, sigma0 = eng.sampleHypers(x_samples, y_samples, n_opt_samples, nargout=3)
-
-	KernelMatrixInv = []
+    
+    KernelMatrixInv = []
     for j in range(n_opt_samples):
         l_tr = eng.transpose(l[j, :], nargout=1)
-		KernelMatrix = eng.computeKmm(x_samples, l_tr, sigma[j], sigma0[j], nargout=1)
-		KernelMatrixInv += [eng.chol2invchol(KernelMatrix, nargout=1)]
+        KernelMatrix = eng.computeKmm(x_samples, l_tr, sigma[j], sigma0[j], nargout=1)
+        KernelMatrixInv += [eng.chol2invchol(KernelMatrix, nargout=1)]
 
     optimum = eng.globalOptimizationWrapper(x_min, x_max, guesses, x_samples, y_samples, KernelMatrixInv, l, sigma, nargout=1)
 
