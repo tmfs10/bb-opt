@@ -24,6 +24,7 @@ from bb_opt.src.bayesian_opt import (
     train_model_uniform,
     train_model_nn,
     train_model_bnn,
+    partial_train_model_bnn,
 )
 from bb_opt.src.hsic import dimwise_mixrq_kernels, dimwise_mixrbf_kernels
 from bb_opt.src.utils import get_path
@@ -64,6 +65,18 @@ train_functions = {
     "pi": train_model_bnn,
 }
 
+partial_train_functions = {
+    "uniform": train_model_uniform,
+    "nn": None,
+    "bnn": partial_train_model_bnn,
+    "pdts": partial_train_model_bnn,
+    "hsic_ms": partial_train_model_bnn,
+    "hsic_pdts": partial_train_model_bnn,
+    "mves": partial_train_model_bnn,
+    "es": partial_train_model_bnn,
+    "pi": partial_train_model_bnn,
+}
+
 
 def main():
     parser = ArgumentParser()
@@ -100,6 +113,20 @@ def main():
         default=-1,
         help="Run until this many batches have been acquired. -1 (default) means to train until the entire dataset has been acquired.",
     )
+    parser.add_argument(
+        "-r",
+        "--retrain",
+        type=int,
+        default=1,
+        help="Retrain after this many batches acquired.",
+    )
+    parser.add_argument(
+        "-p",
+        "--partial_steps",
+        type=int,
+        default=10,
+        help="Train for this many steps on new data when not full retraining.",
+    )
     args = parser.parse_args()
 
     model_key = args.model_key
@@ -125,6 +152,7 @@ def main():
         auto_param_logging=False,
         parse_args=False,
     )
+
     exp.log_multiple_params(
         {
             "model_key": model_key,
@@ -133,6 +161,8 @@ def main():
             "batch_size": args.batch_size,
             "n_epochs": args.n_epochs,
             "n_batches": args.n_batches,
+            "retrain": args.retrain,
+            "partial_steps": args.partial_steps,
             "n_hidden": 100,
         }
     )
@@ -145,9 +175,9 @@ def main():
         if model_key not in ("es", "mves"):
             # just because, for now at least, we report HSIC during PDTS acquisition,
             # even though the HSIC doesn't affect the result
-            acquisition_args[
-                "preds_multiplier"
-            ] = args.preds_multiplier  # n_preds = preds_mult * batch_size
+
+            # n_preds = preds_mult * batch_size
+            acquisition_args["preds_multiplier"] = args.preds_multiplier
 
     if model_key == "hsic_ms":
         acquisition_args["hsic_coeff"] = args.hsic_coeff
@@ -175,6 +205,10 @@ def main():
         exp=exp,
         acquisition_args=acquisition_args,
         n_batches=args.n_batches,
+        retrain_every=args.retrain,
+        partial_train_steps=args.partial_steps,
+        partial_train_func=partial_train_functions[model_key],
+        save_key=save_key,
     )
 
 

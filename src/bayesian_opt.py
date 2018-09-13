@@ -27,10 +27,12 @@ from bb_opt.src.hsic import (
     compute_point_hsics,
     total_hsic,
 )
+from bb_opt.src.utils import get_path
 
 
 N_HIDDEN = 100
 NON_LINEARITY = "ReLU"
+SVI = None
 
 InputType = torch.Tensor
 LabelType = torch.Tensor
@@ -182,6 +184,10 @@ def optimize(
     exp: Optional = None,
     acquisition_args: Optional[dict] = None,
     n_batches: int = -1,
+    retrain_every: int = 1,
+    partial_train_steps: int = 10,
+    partial_train_func: Optional[Callable] = None,
+    save_key: str = "",
 ) -> np.ndarray:
 
     acquisition_args = acquisition_args or {}
@@ -250,13 +256,22 @@ def optimize(
             if fraction_best == 1.0:
                 break
 
-            train_model(
-                model,
-                inputs[list(sampled_idx)],
-                labels[list(sampled_idx)],
-                n_epochs,
-                batch_size,
-            )
+            if (step + 1) % retrain_every == 0:
+                train_model(
+                    model,
+                    inputs[list(sampled_idx)],
+                    labels[list(sampled_idx)],
+                    n_epochs,
+                    batch_size,
+                )
+            else:
+                if partial_train_func:
+                    partial_train_func(
+                        model,
+                        inputs[list(acquire_samples)],
+                        labels[list(acquire_samples)],
+                        partial_train_steps,
+                    )
 
         assert (len(sampled_idx) == min(len(labels), batch_size * n_batches)) or (
             fraction_best == 1.0
@@ -265,7 +280,12 @@ def optimize(
     except KeyboardInterrupt:
         pass
 
-    return np.array(fraction_best_sampled)
+    if save_key:
+        save_fname = get_path(__file__, "..", "..", "models", save_key)
+        pyro.get_param_store().save(f"{save_fname}.params")
+        optimizer.save(f"{save_fname}.opt")
+
+    return model, SVI
 
 
 def get_model_uniform(*args, **kwargs):
@@ -494,10 +514,12 @@ def acquire_batch_hsic_mean_std(
         acquirable_idx.remove(best_idx)
 
         all_hsics = np.concatenate(all_hsics)
-        exp.log_multiple_metrics(
-            {"hsic_mean": np.mean(all_hsics), "hsic_std": np.std(all_hsics)},
-            step=len(sampled_idx) + len(batch),
-        )
+
+        if exp:
+            exp.log_multiple_metrics(
+                {"hsic_mean": np.mean(all_hsics), "hsic_std": np.std(all_hsics)},
+                step=len(sampled_idx) + len(batch),
+            )
 
         if not acquirable_idx:
             break
@@ -560,14 +582,16 @@ def acquire_batch_hsic_pdts(
         acquirable_idx.remove(best_idx)
 
         all_hsics = np.concatenate(all_hsics)
-        exp.log_multiple_metrics(
-            {
-                "hsic_mean": np.mean(all_hsics),
-                "hsic_std": np.std(all_hsics),
-                "hsic_min": min_hsic,
-            },
-            step=len(sampled_idx) + len(batch),
-        )
+
+        if exp:
+            exp.log_multiple_metrics(
+                {
+                    "hsic_mean": np.mean(all_hsics),
+                    "hsic_std": np.std(all_hsics),
+                    "hsic_min": min_hsic,
+                },
+                step=len(sampled_idx) + len(batch),
+            )
 
         if not acquirable_idx:
             break
@@ -614,14 +638,15 @@ def acquire_batch_mves(
 
     batch = all_idx[:batch_size].tolist()
 
-    exp.log_multiple_metrics(
-        {
-            "hsic_mean": np.mean(all_hsics),
-            "hsic_std": np.std(all_hsics),
-            "hsic_max": np.max(all_hsics),
-        },
-        step=len(sampled_idx) + len(batch),
-    )
+    if exp:
+        exp.log_multiple_metrics(
+            {
+                "hsic_mean": np.mean(all_hsics),
+                "hsic_std": np.std(all_hsics),
+                "hsic_max": np.max(all_hsics),
+            },
+            step=len(sampled_idx) + len(batch),
+        )
 
     assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
     return batch
@@ -646,7 +671,8 @@ def acquire_batch_es(
     with torch.no_grad():
         preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
 
-    max_dist = inputs[preds.argmax(dim=1)]
+    max_idx = preds.argmax(dim=1)
+    max_dist = inputs[max_idx]
 
     batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
 
@@ -663,16 +689,28 @@ def acquire_batch_es(
     sorted_idx = np.argsort(all_hsics)
     all_idx = all_idx[sorted_idx]
 
-    batch = all_idx[:batch_size].tolist()
+    batch = all_idx[-batch_size:].tolist()
 
-    exp.log_multiple_metrics(
-        {
-            "hsic_mean": np.mean(all_hsics),
-            "hsic_std": np.std(all_hsics),
-            "hsic_max": np.max(all_hsics),
-        },
-        step=len(sampled_idx) + len(batch),
-    )
+    mode_count = (max_idx == max_idx.mode()[0]).sum().item()
+    selected_count = (max_idx == batch[0]).sum().item()
+
+    if exp:
+        exp.log_multiple_metrics(
+            {
+                "mode_fraction": mode_count / n_preds,
+                "best_selected_fraction": selected_count / n_preds,
+            },
+            step=len(sampled_idx) + len(batch),
+        )
+
+        exp.log_multiple_metrics(
+            {
+                "hsic_mean": np.mean(all_hsics),
+                "hsic_std": np.std(all_hsics),
+                "hsic_max": np.max(all_hsics),
+            },
+            step=len(sampled_idx) + len(batch),
+        )
 
     assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
     return batch
@@ -707,6 +745,7 @@ def acquire_batch_pi(
 
 
 def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
+    global SVI
     bnn_model, guide = model
     optimizer = pyro.optim.Adam({})
     pyro.clear_param_store()
@@ -715,7 +754,18 @@ def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
         n_steps = 10000000000000
     else:
         n_steps = int(len(inputs) / batch_size * n_epochs)
+    SVI = svi
     train(svi, n_steps, inputs, labels)
+
+
+def partial_train_model_bnn(model, inputs, labels, n_steps: int):
+    global SVI
+    if SVI is None:
+        bnn_model, guide = model
+        optimizer = pyro.optim.Adam({})
+        svi = pyro.infer.SVI(bnn_model, guide, optimizer, loss=pyro.infer.Trace_ELBO())
+        SVI = svi
+    train(SVI, n_steps, inputs, labels)
 
 
 def get_early_stopping(
