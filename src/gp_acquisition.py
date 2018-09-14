@@ -62,16 +62,27 @@ def pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y
 
     return x_samples, y_samples, guesses, l, sigma, sigma0
 
-def init_mes(is_cuda, eng, obj, x_min, x_max, init_x, init_y):
+def init_mes(eng, init_x, init_y):
     eng.addpath('mes_matlab', eng.path())
+    eng.addpath('mes_matlab/utils', eng.path())
+    eng.addpath('mes_matlab/acFuns', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/dist', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/diag', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/gp', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/optim', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/mc', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/misc', eng.path())
+    eng.addpath('mes_matlab/GPstuff-4.4/xunit', eng.path())
 
     xx = init_x
     yy = init_y
     guesses = xx
     guessvals = yy
 
+    temp = matlab.double([])
+
     options = {
-            'savefilenm': matlab.double(),
+            'savefilenm': temp,
             'bo_method': 'Add-MES-G',
             'n_max_samples': 5,
             'n_hyper_samples': 10,
