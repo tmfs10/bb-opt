@@ -27,6 +27,7 @@ from bb_opt.src.hsic import (
     compute_point_hsics,
     total_hsic,
 )
+from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src.utils import get_path
 
 
@@ -609,47 +610,20 @@ def acquire_batch_mves(
     n_points_parallel: int = 100,
     exp: Optional = None,
     kernel: Optional[Callable] = None,
+    mi_estimator: str = "HSIC",
 ) -> List[int]:
-
-    acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
-
-    n_preds = 1000
-    bnn_model, guide = model
-
-    with torch.no_grad():
-        preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
-
-    max_dist = preds.max(dim=1)[0]
-
-    batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
-
-    all_hsics = []
-    all_idx = list(acquirable_idx)
-
-    for next_points in torch.tensor(all_idx).split(n_points_parallel):
-        hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
-        all_hsics.append(hsics.cpu().numpy())
-
-    all_hsics = np.concatenate(all_hsics)
-    all_idx = np.array(all_idx)
-
-    sorted_idx = np.argsort(all_hsics)
-    all_idx = all_idx[sorted_idx]
-
-    batch = all_idx[:batch_size].tolist()
-
-    if exp:
-        exp.log_multiple_metrics(
-            {
-                "hsic_mean": np.mean(all_hsics),
-                "hsic_std": np.std(all_hsics),
-                "hsic_max": np.max(all_hsics),
-            },
-            step=len(sampled_idx) + len(batch),
-        )
-
-    assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
-    return batch
+    return acquire_batch_es(
+        model,
+        inputs,
+        sampled_labels,
+        sampled_idx,
+        batch_size,
+        n_points_parallel,
+        exp,
+        kernel,
+        mi_estimator,
+        max_value_es=True,
+    )
 
 
 def acquire_batch_es(
@@ -661,6 +635,8 @@ def acquire_batch_es(
     n_points_parallel: int = 100,
     exp: Optional = None,
     kernel: Optional[Callable] = None,
+    mi_estimator: str = "HSIC",
+    max_value_es: bool = False,
 ) -> List[int]:
 
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
@@ -671,48 +647,64 @@ def acquire_batch_es(
     with torch.no_grad():
         preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
 
-    max_idx = preds.argmax(dim=1)
-    max_dist = inputs[max_idx]
+    if max_value_es:
+        max_dist = preds.max(dim=1)[0]
+    else:
+        max_pred_idx = preds.argmax(dim=1)
+        max_dist = inputs[max_idx]
 
-    batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
+    all_mi = []
+    all_idx = np.array(list(acquirable_idx))
 
-    all_hsics = []
-    all_idx = list(acquirable_idx)
+    if mi_estimator == "HSIC":
+        batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
 
-    for next_points in torch.tensor(all_idx).split(n_points_parallel):
-        hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
-        all_hsics.append(hsics.cpu().numpy())
+        for next_points in torch.tensor(all_idx).split(n_points_parallel):
+            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
+            all_mi.append(hsics.cpu().numpy())
 
-    all_hsics = np.concatenate(all_hsics)
-    all_idx = np.array(all_idx)
+        all_mi = np.concatenate(all_mi)
+    elif mi_estimator == "LNC":
+        if not max_value_es:
+            assert False, "LNC not supported for ES, only MVES."
 
-    sorted_idx = np.argsort(all_hsics)
-    all_idx = all_idx[sorted_idx]
+        max_dist = max_dist.cpu().numpy()
+        preds = preds.cpu().numpy()
 
-    batch = all_idx[-batch_size:].tolist()
+        for idx in all_idx:
+            all_mi.append(estimate_mi(np.stack((max_dist, preds[:, idx]))))
 
-    mode_count = (max_idx == max_idx.mode()[0]).sum().item()
-    selected_count = (max_idx == batch[0]).sum().item()
+        all_mi = np.array(all_mi)
+    else:
+        assert False, f"Unrecognized MI estimation method {mi_estimator}."
+
+    sorted_idx = np.argsort(all_mi)
+    sorted_idx = all_idx[sorted_idx]
+
+    batch = sorted_idx[-batch_size:].tolist()
 
     if exp:
+        if not max_value_es:
+            mode_count = (max_idx == max_idx.mode()[0]).sum().item()
+            selected_count = (max_idx == batch[0]).sum().item()
+
+            exp.log_multiple_metrics(
+                {
+                    "mode_fraction": mode_count / n_preds,
+                    "best_selected_fraction": selected_count / n_preds,
+                },
+                step=len(sampled_idx) + len(batch),
+            )
+
         exp.log_multiple_metrics(
-            {
-                "mode_fraction": mode_count / n_preds,
-                "best_selected_fraction": selected_count / n_preds,
-            },
+            {"mi_mean": all_mi.mean(), "mi_std": all_mi.std(), "mi_max": all_mi.max()},
             step=len(sampled_idx) + len(batch),
         )
 
-        exp.log_multiple_metrics(
-            {
-                "hsic_mean": np.mean(all_hsics),
-                "hsic_std": np.std(all_hsics),
-                "hsic_max": np.max(all_hsics),
-            },
-            step=len(sampled_idx) + len(batch),
-        )
-
-    assert len(batch) in [batch_size, len(acquirable_idx)], len(batch)
+    assert len(batch) in [
+        batch_size,
+        len(acquirable_idx),
+    ], f"Bad batch length {len(batch)} for batch size {batch_size}."
     return batch
 
 

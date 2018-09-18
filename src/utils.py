@@ -6,7 +6,9 @@ import pickle
 from typing import Dict, Tuple, Sequence, Union, Callable, Optional
 from rdkit import Chem
 from rdkit.Chem import Descriptors, QED
-import sascorer
+
+# import sascorer
+import pyro
 
 
 def load_fraction_best(average: bool = True):
@@ -106,18 +108,32 @@ def random_points(bounds: np.ndarray, ndim: int, n_points: int) -> np.ndarray:
 def get_path(*path_segments):
     return os.path.realpath(os.path.join(*path_segments))
 
+
 def logp(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
     return Descriptors.MolLogP(m, add_hs)
+
 
 def qed(smiles_mol):
     m = Chem.MolFromSmiles(smiles_mol)
     return QED.qed(m)
 
+
 def sas(smiles_mol):
     m = Chem.MolFromSmiles(smiles_mol)
     return sascorer.calculateScore(m)
 
+
 def all_scores(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
     return Descriptors.MolLogP(m, add_hs), QED.qed(m), sascorer.calculateScore(m)
+
+
+def save_pyro_model(base_path: str, optimizer):
+    pyro.get_param_store().save(f"{base_path}.params")
+    optimizer.save(f"{base_path}.opt")
+
+
+def load_pyro_model(base_path: str, optimizer):
+    pyro.get_param_store().load(f"{base_path}.params")
+    optimizer.load(f"{base_path}.opt")

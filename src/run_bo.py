@@ -127,10 +127,14 @@ def main():
         default=10,
         help="Train for this many steps on new data when not full retraining.",
     )
+    parser.add_argument(
+        "-mi", "--mi_estimator", default="HSIC", help="One of {HSIC, LNC}"
+    )
     args = parser.parse_args()
 
     model_key = args.model_key
     save_key = args.save_key or model_key
+    mi_estimator = args.mi_estimator
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device_num)
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -163,14 +167,18 @@ def main():
             "n_batches": args.n_batches,
             "retrain": args.retrain,
             "partial_steps": args.partial_steps,
+            "mi_estimator": mi_estimator,
             "n_hidden": 100,
         }
     )
 
     acquisition_args = {}
     if model_key in ["es", "mves", "hsic_ms", "hsic_pdts", "pdts"]:
-        kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
-        acquisition_args["kernel"] = args.kernel
+        acquisition_args["mi_estimator"] = mi_estimator
+
+        if mi_estimator == "HSIC":
+            kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
+            acquisition_args["kernel"] = args.kernel
 
         if model_key not in ("es", "mves"):
             # just because, for now at least, we report HSIC during PDTS acquisition,
