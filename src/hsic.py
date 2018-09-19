@@ -3,7 +3,7 @@ import sys
 from typing import Sequence, Callable, Optional
 
 
-def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=1.0):
+def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     """Mixture of RBF kernels between each dimension of X.
 
     If X is shape (n, d), returns shape (n, n, d).
@@ -19,9 +19,7 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=1.0):
 
     sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
 
-    print(sqdists.shape, bws.shape)
     parts = torch.exp(sqdists / (-2 * bws ** 2))
-    print(parts.shape, weights.shape)
     return torch.einsum("w,wijd->ijd", (weights, parts))
 
 
@@ -70,7 +68,7 @@ def linear_kernel(x: torch.Tensor, c: float = 1):
     return x.unsqueeze(0) * x.unsqueeze(1) + c
 
 
-def distance_kernel(x: torch.Tensor):
+def dimwise_distance_kernels(x: torch.Tensor):
     """
     :param x: n x d for n samples from d RVs
     """
