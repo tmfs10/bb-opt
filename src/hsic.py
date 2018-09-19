@@ -13,12 +13,15 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=1.0):
     """
     assert X.ndimension() == 2
 
-    bws = torch.tensor(bws, dtype=X.dtype)
-    wts = ((1./len(bws) if wts is None else wts) * torch.ones(bws.shape)).type(X.type())
+    bws = X.new_tensor(bws).view(-1, 1, 1, 1)
+    weights = weights or 1 / len(bws)
+    weights = weights * X.new_ones(len(bws))
 
-    sqdists = (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
+    sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
 
-    parts = torch.exp(sqdists.unsqueeze(0) / (-2 * bws ** 2))
+    print(sqdists.shape, bws.shape)
+    parts = torch.exp(sqdists / (-2 * bws ** 2))
+    print(parts.shape, weights.shape)
     return torch.einsum("w,wijd->ijd", (weights, parts))
 
 

@@ -167,7 +167,6 @@ def main():
             "n_batches": args.n_batches,
             "retrain": args.retrain,
             "partial_steps": args.partial_steps,
-            "mi_estimator": mi_estimator,
             "n_hidden": 100,
         }
     )

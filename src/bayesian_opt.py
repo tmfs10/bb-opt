@@ -257,7 +257,7 @@ def optimize(
             if fraction_best == 1.0:
                 break
 
-            if (step + 1) % retrain_every == 0:
+            if step % retrain_every == 0:
                 train_model(
                     model,
                     inputs[list(sampled_idx)],
@@ -789,8 +789,8 @@ def train(
     inputs,
     labels,
     verbose: bool = False,
-    max_patience: int = 5,
-    n_steps_early_stopping: int = 1000,
+    max_patience: int = 3,
+    n_steps_early_stopping: int = 300,
 ):
     losses = []
     early_stopping = get_early_stopping(max_patience)
