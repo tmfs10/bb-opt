@@ -15,6 +15,8 @@ from pyro.distributions import (
     InverseAutoregressiveFlow,
     TorchDistribution,
     Bernoulli,
+    Laplace,
+    Gamma,
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
@@ -40,6 +42,13 @@ LabelType = torch.Tensor
 ModelType = Callable[[InputType], LabelType]
 
 
+def ExtendedGamma(shape, scale, ndimension=0):
+    device = 'cuda' if scale.is_cuda else 'cpu'
+    beta = 1/scale
+    sign = pyro.sample('signX', Bernoulli(torch.tensor(0.5, device=device)))
+    sign = sign*2-1
+    return sign*pyro.sample('egX', Gamma(shape, beta).independent(ndimension))
+
 def normal_priors(
     model: torch.nn.Module, mean: float = 0., std: float = 1.
 ) -> Dict[str, TorchDistribution]:
@@ -52,6 +61,31 @@ def normal_priors(
 
     return priors
 
+def laplace_priors(
+    model: torch.nn.Module, mean: float = 0., b: float = 1.
+) -> Dict[str, TorchDistribution]:
+    priors = {}
+    for name, param in model.named_parameters():
+        priors[name] = Laplace(
+            torch.full_like(param, fill_value=mean),
+            torch.full_like(param, fill_value=b),
+        ).independent(param.ndimension())
+
+    return priors
+
+def extended_gamma_priors(
+    model: torch.nn.Module, mean: float = 0., std: float = 1.
+) -> Dict[str, TorchDistribution]:
+    priors = {}
+    for name, param in model.named_parameters():
+        def fn (*args, **kwargs):
+            return ExtendedGamma(
+                    torch.full_like(param, fill_value=mean),
+                    torch.full_like(param, fill_value=std),
+                    param.ndimension()
+                    )
+        priors[name] = fn
+    return priors
 
 class SpikeSlabNormal(TorchDistribution):
     def __init__(self, param, std1: float = 0.03, std2: float = 2, alpha: float = 0.7):
@@ -116,6 +150,41 @@ def normal_variationals(
             location, torch.nn.Softplus()(log_scale)
         ).independent(param.ndimension())
     return variational_dists
+
+
+def laplace_variationals(
+    model: torch.nn.Module, mean: float = 0., b: float = 1.
+) -> Dict[str, TorchDistribution]:
+    variational_dists = {}
+    for name, param in model.named_parameters():
+        location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
+        log_scale = pyro.param(
+            f"g_{name}_log_scale", torch.randn_like(param) + np.log(np.exp(b) - 1)
+        )
+        variational_dists[name] = Laplace(
+            location, 
+            torch.nn.Softplus()(log_scale)
+        ).independent(param.ndimension())
+    return variational_dists
+
+
+def extended_gamma_variationals(
+    model: torch.nn.Module, mean: float = 0., std: float = 1.
+) -> Dict[str, TorchDistribution]:
+    variational_dists = {}
+    for name, param in model.named_parameters():
+        location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
+        log_scale = pyro.param(
+            f"g_{name}_log_scale", torch.randn_like(param) + np.log(np.exp(std) - 1)
+        )
+        def fn(*args, **kwargs):
+            return ExtendedGamma(
+                    location, 
+                    torch.nn.Softplus()(log_scale),
+                    param.ndimension()
+                    )
+
+        variational_dists[name] = fn
 
 
 def iaf_variationals(
@@ -388,6 +457,49 @@ def get_model_bnn(
 
     priors = lambda: normal_priors(model, prior_mean, prior_std)
     variational_dists = lambda: normal_variationals(model, prior_mean, prior_std)
+
+    bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
+    guide = make_guide(model, variational_dists)
+    return bnn_model, guide
+
+def get_model_bnn_laplace(
+    n_inputs: int = 512,
+    batch_size: int = 200,
+    prior_mean: float = 0,
+    prior_std: float = 0.05,
+    device=None,
+):
+    device = device or "cpu"
+    model = nn.Sequential(
+        nn.Linear(n_inputs, N_HIDDEN),
+        getattr(nn, NON_LINEARITY)(),
+        nn.Linear(N_HIDDEN, 1),
+    ).to(device)
+
+    priors = lambda: laplace_priors(model, prior_mean, prior_std)
+    variational_dists = lambda: laplace_variationals(model, prior_mean, prior_std)
+
+    bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
+    guide = make_guide(model, variational_dists)
+    return bnn_model, guide
+
+
+def get_model_bnn_extended_gamma(
+    n_inputs: int = 512,
+    batch_size: int = 200,
+    prior_mean: float = 0,
+    prior_std: float = 0.05,
+    device=None,
+):
+    device = device or "cpu"
+    model = nn.Sequential(
+        nn.Linear(n_inputs, N_HIDDEN),
+        getattr(nn, NON_LINEARITY)(),
+        nn.Linear(N_HIDDEN, 1),
+    ).to(device)
+
+    priors = lambda: extended_gamma_priors(model, prior_mean, prior_std)
+    variational_dists = lambda: extended_gamma_variationals(model, prior_mean, prior_std)
 
     bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
     guide = make_guide(model, variational_dists)
@@ -737,6 +849,21 @@ def acquire_batch_es(
         len(acquirable_idx),
     ], f"Bad batch length {len(batch)} for batch size {batch_size}."
     return batch
+
+
+def acquire_batch_via_grad(
+        model_list : List[nn.Module],
+        input_shape : List[int],
+        seed : torch.tensor = None,
+        n_points_parallel : int = 100,
+        batch_size : int = 100,
+        ack_fn : str = "HSIC",
+        device : str = "cuda",
+)-> torch.tensor:
+    if seed is None:
+        input_tensor = torch.randn(input_shape, device=device, requires_grad=True)
+    else:
+        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
 
 
 def acquire_batch_pi(
