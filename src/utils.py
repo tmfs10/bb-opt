@@ -137,3 +137,23 @@ def save_pyro_model(base_path: str, optimizer):
 def load_pyro_model(base_path: str, optimizer):
     pyro.get_param_store().load(f"{base_path}.params")
     optimizer.load(f"{base_path}.opt")
+
+def train_val_test_split(n, split, shuffle=True):
+
+    if type(n) == int:
+        idx = np.arange(n)
+    else:
+        idx = n
+
+    if shuffle:
+        np.random.shuffle(idx)
+
+    if split[0] < 1:
+        assert sum(split) <= 1.
+        train_end = int(n*split[0])
+        val_end = train_end + int(n*split[1])
+    else:
+        train_end = split[0]
+        val_end = train_end + split[1]
+
+    return idx[:train_end], idx[train_end:val_end], idx[val_end:]
