@@ -376,7 +376,7 @@ def get_model_bnn(
     n_inputs: int = 512,
     batch_size: int = 200,
     prior_mean: float = 0,
-    prior_std: float = 0.05,
+    prior_std: float = 1.0,
     device=None,
 ):
     device = device or "cpu"
@@ -641,7 +641,7 @@ def acquire_batch_es(
 
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
-    n_preds = 1000
+    n_preds = 250
     bnn_model, guide = model
 
     with torch.no_grad():
@@ -653,35 +653,71 @@ def acquire_batch_es(
         max_pred_idx = preds.argmax(dim=1)
         max_dist = inputs[max_idx]
 
-    all_mi = []
-    all_idx = np.array(list(acquirable_idx))
+    max_dist = max_dist.unsqueeze(1)
+    acquirable_idx = list(acquirable_idx)
+    all_idx = np.array(acquirable_idx)
+    batch = []
 
     if mi_estimator == "HSIC":
-        batch_stats = precompute_batch_hsic_stats(max_dist.unsqueeze(1), kernel=kernel)
+        max_batch_dist = max_dist
 
-        for next_points in torch.tensor(all_idx).split(n_points_parallel):
-            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
-            all_mi.append(hsics.cpu().numpy())
+        for _ in range(batch_size):
+            all_mi = total_hsic_batched(max_batch_dist, preds, kernel)
+            best_idx = acquirable_idx[all_mi.argmax().item()]
+            acquirable_idx.remove(best_idx)
+            batch.append(best_idx)
+            max_batch_dist = torch.cat(
+                (max_batch_dist, preds[:, best_idx : best_idx + 1]), dim=-1
+            )
 
-        all_mi = np.concatenate(all_mi)
+            if exp:
+                exp.log_multiple_metrics(
+                    {
+                        "mi_mean": all_mi.mean().item(),
+                        "mi_std": all_mi.std().item(),
+                        "mi_max": all_mi.max().item(),
+                    },
+                    step=len(sampled_idx) + len(batch),
+                )
     elif mi_estimator == "LNC":
         if not max_value_es:
             assert False, "LNC not supported for ES, only MVES."
 
-        max_dist = max_dist.cpu().numpy()
+        max_batch_dist = max_dist.cpu().numpy()
         preds = preds.cpu().numpy()
 
-        for idx in all_idx:
-            all_mi.append(estimate_mi(np.stack((max_dist, preds[:, idx]))))
+        for _ in range(batch_size):
+            all_mi = []
 
-        all_mi = np.array(all_mi)
+            for idx in all_idx:
+                all_mi.append(
+                    estimate_mi(
+                        np.concatenate(
+                            (max_batch_dist, preds[:, idx : idx + 1]), axis=-1
+                        ).T
+                    )
+                )
+
+            all_mi = np.array(all_mi)
+
+            best_idx = acquirable_idx[all_mi.argmax()]
+            acquirable_idx.remove(best_idx)
+            batch.append(best_idx)
+            max_batch_dist = np.concatenate(
+                (max_batch_dist, preds[:, best_idx : best_idx + 1]), axis=-1
+            )
+
+            if exp:
+                exp.log_multiple_metrics(
+                    {
+                        "mi_mean": all_mi.mean(),
+                        "mi_std": all_mi.std(),
+                        "mi_max": all_mi.max(),
+                    },
+                    step=len(sampled_idx) + len(batch),
+                )
     else:
         assert False, f"Unrecognized MI estimation method {mi_estimator}."
-
-    sorted_idx = np.argsort(all_mi)
-    sorted_idx = all_idx[sorted_idx]
-
-    batch = sorted_idx[-batch_size:].tolist()
 
     if exp:
         if not max_value_es:
@@ -695,11 +731,6 @@ def acquire_batch_es(
                 },
                 step=len(sampled_idx) + len(batch),
             )
-
-        exp.log_multiple_metrics(
-            {"mi_mean": all_mi.mean(), "mi_std": all_mi.std(), "mi_max": all_mi.max()},
-            step=len(sampled_idx) + len(batch),
-        )
 
     assert len(batch) in [
         batch_size,

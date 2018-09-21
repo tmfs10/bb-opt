@@ -196,3 +196,27 @@ def compute_point_hsics(
 
     hsics = torch.exp(-a) * (torch.exp(l1 + a) - torch.exp(l2 + a) + torch.exp(l3 + a))
     return hsics
+
+
+def total_hsic_batched(
+    rv_samples1: torch.Tensor,
+    rv_samples2: torch.Tensor,
+    kernel,
+    n_points_parallel: int = 50,
+) -> torch.Tensor:
+    """
+    :param rv_samples1: n_samples x n_variables1 [x n_features if kernel supports this]
+    :param rv_samples2: n_samples x n_variables2 [x n_features if kernel supports this]
+    :param kernel:
+    :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
+    :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
+    """
+    n_variables = rv_samples2.shape[1]
+    all_hsics = rv_samples1.new_empty(n_variables)
+    batch_stats = precompute_batch_hsic_stats(rv_samples1, kernel=kernel)
+
+    for next_points in torch.tensor(list(range(n_variables))).split(n_points_parallel):
+        hsics = compute_point_hsics(rv_samples2, next_points, *batch_stats, kernel)
+        all_hsics[next_points] = hsics
+
+    return all_hsics
