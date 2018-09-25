@@ -202,6 +202,7 @@ def total_hsic_batched(
     rv_samples1: torch.Tensor,
     rv_samples2: torch.Tensor,
     kernel,
+    acquirable_idx: Optional[List[int]] = None,
     n_points_parallel: int = 50,
 ) -> torch.Tensor:
     """
@@ -215,7 +216,9 @@ def total_hsic_batched(
     all_hsics = rv_samples1.new_empty(n_variables)
     batch_stats = precompute_batch_hsic_stats(rv_samples1, kernel=kernel)
 
-    for next_points in torch.tensor(list(range(n_variables))).split(n_points_parallel):
+    acquirable_idx = acquirable_idx or list(range(n_variables))
+
+    for next_points in torch.tensor(acquirable_idx).split(n_points_parallel):
         hsics = compute_point_hsics(rv_samples2, next_points, *batch_stats, kernel)
         all_hsics[next_points] = hsics
 

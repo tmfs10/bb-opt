@@ -43,11 +43,12 @@ ModelType = Callable[[InputType], LabelType]
 
 
 def ExtendedGamma(shape, scale, ndimension=0):
-    device = 'cuda' if scale.is_cuda else 'cpu'
-    beta = 1/scale
-    sign = pyro.sample('signX', Bernoulli(torch.tensor(0.5, device=device)))
-    sign = sign*2-1
-    return sign*pyro.sample('egX', Gamma(shape, beta).independent(ndimension))
+    device = "cuda" if scale.is_cuda else "cpu"
+    beta = 1 / scale
+    sign = pyro.sample("signX", Bernoulli(torch.tensor(0.5, device=device)))
+    sign = sign * 2 - 1
+    return sign * pyro.sample("egX", Gamma(shape, beta).independent(ndimension))
+
 
 def normal_priors(
     model: torch.nn.Module, mean: float = 0., std: float = 1.
@@ -61,6 +62,7 @@ def normal_priors(
 
     return priors
 
+
 def laplace_priors(
     model: torch.nn.Module, mean: float = 0., b: float = 1.
 ) -> Dict[str, TorchDistribution]:
@@ -73,19 +75,23 @@ def laplace_priors(
 
     return priors
 
+
 def extended_gamma_priors(
     model: torch.nn.Module, mean: float = 0., std: float = 1.
 ) -> Dict[str, TorchDistribution]:
     priors = {}
     for name, param in model.named_parameters():
-        def fn (*args, **kwargs):
+
+        def fn(*args, **kwargs):
             return ExtendedGamma(
-                    torch.full_like(param, fill_value=mean),
-                    torch.full_like(param, fill_value=std),
-                    param.ndimension()
-                    )
+                torch.full_like(param, fill_value=mean),
+                torch.full_like(param, fill_value=std),
+                param.ndimension(),
+            )
+
         priors[name] = fn
     return priors
+
 
 class SpikeSlabNormal(TorchDistribution):
     def __init__(self, param, std1: float = 0.03, std2: float = 2, alpha: float = 0.7):
@@ -162,8 +168,7 @@ def laplace_variationals(
             f"g_{name}_log_scale", torch.randn_like(param) + np.log(np.exp(b) - 1)
         )
         variational_dists[name] = Laplace(
-            location, 
-            torch.nn.Softplus()(log_scale)
+            location, torch.nn.Softplus()(log_scale)
         ).independent(param.ndimension())
     return variational_dists
 
@@ -177,12 +182,11 @@ def extended_gamma_variationals(
         log_scale = pyro.param(
             f"g_{name}_log_scale", torch.randn_like(param) + np.log(np.exp(std) - 1)
         )
+
         def fn(*args, **kwargs):
             return ExtendedGamma(
-                    location, 
-                    torch.nn.Softplus()(log_scale),
-                    param.ndimension()
-                    )
+                location, torch.nn.Softplus()(log_scale), param.ndimension()
+            )
 
         variational_dists[name] = fn
 
@@ -462,6 +466,7 @@ def get_model_bnn(
     guide = make_guide(model, variational_dists)
     return bnn_model, guide
 
+
 def get_model_bnn_laplace(
     n_inputs: int = 512,
     batch_size: int = 200,
@@ -499,7 +504,9 @@ def get_model_bnn_extended_gamma(
     ).to(device)
 
     priors = lambda: extended_gamma_priors(model, prior_mean, prior_std)
-    variational_dists = lambda: extended_gamma_variationals(model, prior_mean, prior_std)
+    variational_dists = lambda: extended_gamma_variationals(
+        model, prior_mean, prior_std
+    )
 
     bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
     guide = make_guide(model, variational_dists)
@@ -763,18 +770,17 @@ def acquire_batch_es(
         max_dist = preds.max(dim=1)[0]
     else:
         max_pred_idx = preds.argmax(dim=1)
-        max_dist = inputs[max_idx]
+        max_dist = inputs[max_pred_idx]
 
     max_dist = max_dist.unsqueeze(1)
     acquirable_idx = list(acquirable_idx)
-    all_idx = np.array(acquirable_idx)
     batch = []
 
     if mi_estimator == "HSIC":
         max_batch_dist = max_dist
 
         for _ in range(batch_size):
-            all_mi = total_hsic_batched(max_batch_dist, preds, kernel)
+            all_mi = total_hsic_batched(max_batch_dist, preds, kernel, acquirable_idx)
             best_idx = acquirable_idx[all_mi.argmax().item()]
             acquirable_idx.remove(best_idx)
             batch.append(best_idx)
@@ -801,7 +807,7 @@ def acquire_batch_es(
         for _ in range(batch_size):
             all_mi = []
 
-            for idx in all_idx:
+            for idx in acquirable_idx:
                 all_mi.append(
                     estimate_mi(
                         np.concatenate(
@@ -852,14 +858,14 @@ def acquire_batch_es(
 
 
 def acquire_batch_via_grad(
-        model_list : List[nn.Module],
-        input_shape : List[int],
-        seed : torch.tensor = None,
-        n_points_parallel : int = 100,
-        batch_size : int = 100,
-        ack_fn : str = "HSIC",
-        device : str = "cuda",
-)-> torch.tensor:
+    model_list: List[nn.Module],
+    input_shape: List[int],
+    seed: torch.tensor = None,
+    n_points_parallel: int = 100,
+    batch_size: int = 100,
+    ack_fn: str = "HSIC",
+    device: str = "cuda",
+) -> torch.tensor:
     if seed is None:
         input_tensor = torch.randn(input_shape, device=device, requires_grad=True)
     else:
