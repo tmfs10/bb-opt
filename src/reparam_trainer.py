@@ -1,11 +1,15 @@
 
 import torch
+import sys
 import torch.nn as nn
 import torch.distributions as tdist
 
-def gaussian_kl(mean, std):
+def gaussian_kl(mean, std, prior_std, device):
     var = std**2
-    return -0.5 * torch.sum((1+torch.log(var)) - mean**2 - var)
+    prior_var = torch.tensor(prior_std**2, device=device)
+    k = mean.shape[0]
+    return 0.5 * torch.sum( var * 1./prior_var + 1./prior_var*(mean**2) - k - torch.log(var) + k*torch.log(prior_var) )
+    #return 0.5 * torch.sum((1+torch.log(var)) - mean**2 - var)
 
 def init_train(params, model_parameters, X, Y):
     assert X.shape[0] == Y.shape[0]
@@ -18,7 +22,35 @@ def init_train(params, model_parameters, X, Y):
 
     return batches, optim
 
-def compute_loss(params, X, Y, optim, model, qz, e):
+def expand_to_sample(X, num_samples):
+    X = X.unsqueeze(1)
+    X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
+    return X
+
+def predict_no_resize(X, model, qz, e, device='cuda'):
+    model = model.to(device)
+    X = X.to(device)
+    qz = qz.to(device)
+    e = e.to(device)
+
+    num_samples = e.shape[0]
+    assert num_samples > 0
+    N = X.shape[0]
+    z = qz(e)
+    z = z.repeat([N, 1])
+
+    X = expand_to_sample(X, num_samples)
+    X = torch.cat([X, z], dim=1)
+    output = model(X)
+
+    return output
+
+def predict(X, model, qz, e, device='cuda'):
+    num_samples = e.shape[0]
+    output = predict_no_resize(X, model, qz, e, device)
+    return output.detach().view(-1, num_samples, 2)
+
+def compute_loss(params, X, Y, model, qz, e):
     N = X.shape[0]
     num_samples = params.num_samples
     batch_size = params.batch_size
@@ -43,38 +75,39 @@ def compute_loss(params, X, Y, optim, model, qz, e):
 
         bX = X[bs:be]
         bY = Y[bs:be]
-    
-        z = qz(e)
-        z = z.repeat([bN, 1])
-
         bX = bX.to(params.device)
         bY = bY.to(params.device)
 
-        bX = bX.unsqueeze(1)
-        bX = bX.repeat([1] + [num_samples] + [1]*(len(bX.shape)-1)).view([-1]+list(bX.shape[2:]))
-        bY = bY.unsqueeze(1)
-        bY = bY.repeat([1] + [num_samples] + [1]*(len(bY.shape)-1)).view([-1]+list(bY.shape[2:]))
+        bY = expand_to_sample(bY, num_samples)
 
-        bX = torch.cat([bX, z], dim=1)
-
-        output = model(bX)
+        output = predict_no_resize(X, model, qz, e)
         mu = output[:, 0]
         std = output[:, 1]
 
         assert mu.shape[0] == std.shape[0]
 
-        output_dist = params.output_dist_fn(mu, 1)
+        if params.output_dist_std > 0:
+            std[:] = params.output_dist_std
+        output_dist = params.output_dist_fn(mu, std)
 
-        log_prob_loss += -torch.sum(output_dist.log_prob(bY)/num_samples)
-        kl_loss += gaussian_kl(qz.mu_z, qz.std_z)
-        loss += log_prob_loss + kl_loss
+        log_prob_loss += -torch.mean(output_dist.log_prob(bY))/num_batches
+        #log_prob_loss += torch.mean((bY-mu)**2)/num_batches
+        loss += log_prob_loss
         muYhat += [mu]
         stdYhat += [std]
+    kl_loss += gaussian_kl(qz.mu_z, qz.std_z, params.prior_std, params.device)
+    loss += kl_loss
 
-    muYhat = torch.stack(muYhat, dim=0)
-    stdYhat = torch.stack(stdYhat, dim=0)
+    muYhat = torch.cat(muYhat, dim=0)
+    stdYhat = torch.cat(stdYhat, dim=0)
     return loss, log_prob_loss.item(), kl_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
 
+def generate_prior_samples(num_samples, e_dist, device='cuda'):
+    e = []
+    for si in range(num_samples):
+        e += [e_dist.sample().to(device)]
+    e = torch.stack(e, dim=0)
+    return e
 
 def train(params, X, Y, model, qz, e_dist):
     assert X.shape[0] == Y.shape[0]
@@ -94,14 +127,14 @@ def train(params, X, Y, model, qz, e_dist):
             bX = X[bs:be]
             bY = Y[bs:be]
 
-            e = []
-            for si in range(params.num_samples):
-                e += [e_dist.sample()]
-            e = torch.stack(e, dim=0)
+            e = generate_prior_samples(params.num_samples, e_dist)
+            loss, log_prob_loss, kl_loss, _, _ = reparam.compute_loss(params, bX, bY, model, qz, e)
+            train_losses += [log_prob_loss]
+            train_kl_losses += [kl_loss]
 
-            loss, _, _, _, _ = compute_loss(params, bX, bY, optim, model, qz, e)
-
-
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
     return mu_z, std_z
 
 
