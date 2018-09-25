@@ -2,6 +2,16 @@ import torch
 import sys
 from typing import Sequence, Callable, Optional
 
+def sqdist(X):
+    """
+    X is of shape (n, d, k)
+    return is of shape (n, n, d)
+    """
+    if X.ndimension() == 2:
+        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2)
+    else:
+        assert X.ndimension() == 3
+        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
 
 def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     """Mixture of RBF kernels between each dimension of X.
@@ -17,7 +27,8 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     weights = weights or 1 / len(bws)
     weights = weights * X.new_ones(len(bws))
 
-    sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+    #sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+    sqdists = sqdist(X).unsqueeze(0)
 
     parts = torch.exp(sqdists / (-2 * bws ** 2))
     return torch.einsum("w,wijd->ijd", (weights, parts))
