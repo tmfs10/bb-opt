@@ -202,7 +202,7 @@ def total_hsic_batched(
     rv_samples1: torch.Tensor,
     rv_samples2: torch.Tensor,
     kernel,
-    acquirable_idx: Optional[List[int]] = None,
+    acquirable_idx: Optional[Sequence[int]] = None,
     n_points_parallel: int = 50,
 ) -> torch.Tensor:
     """
