@@ -1,6 +1,7 @@
 import torch
 import sys
-from typing import Sequence, Callable, Optional
+from typing import Sequence, Callable, Optional, Union
+
 
 def sqdist(X):
     """
@@ -8,18 +9,20 @@ def sqdist(X):
     return is of shape (n, n, d)
     """
     if X.ndimension() == 2:
-        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2)
+        return (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
     else:
         assert X.ndimension() == 3
         return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
 
+
 def sqdist(X1, X2):
     assert X1.ndimension() == X2.ndimension()
     if X1.ndimension() == 2:
-        return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2)
+        return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
     else:
         assert X1.ndimension() == 3
         return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
+
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     bws = dist_matrix.new_tensor(bws).view(-1, 1, 1, 1)
@@ -89,7 +92,7 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     weights = weights or 1 / len(bws)
     weights = weights * X.new_ones(len(bws))
 
-    #sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+    # sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
     sqdists = sqdist(X).unsqueeze(0)
 
     parts = torch.exp(sqdists / (-2 * bws ** 2))
@@ -195,6 +198,44 @@ def total_hsic(kernels, logspace=True):
         return a.exp() * ((l1 - a).exp() - (l2 - a).exp() + (l3 - a).exp())
 
 
+def total_hsic_parallel(kernels):
+    """
+    kernels should be shape (m, n, n, d) to test for total
+    independence among d variables with n paired samples for m sets.
+    """
+    shp = kernels.shape
+    assert len(shp) == 3
+    assert shp[1] == shp[2], "%s == %s" % (str(shp[0]), str(shp[1]))
+
+    m = shp[0]
+    n = kernels.new_tensor(shp[1])
+    d = kernels.new_tensor(shp[3])
+
+    # t1: 1/n^2      sum_a  sum_b  prod_i K_ab^i
+    # t2: -2/n^(d+1) sum_a  prod_i sum_b  K_ab^i
+    # t3: 1/n^(2d)   prod_i sum_a  sum_b  K_ab^i
+
+    log_n = torch.log(n)
+    log_2 = torch.log(kernels.new_tensor(2))
+    log_kernels = kernels.log_()  # TODO: just take directly?
+    log_sum_b = log_kernels.logsumexp(dim=2)
+
+    l1 = log_kernels.sum(dim=3).logsumexp(dim=2).logsumexp(dim=1) - 2 * log_n
+    l2 = log_sum_b.sum(dim=3).logsumexp(dim=1) + log_2 - (d + 1) * log_n
+    l3 = log_sum_b.logsumexp(dim=1).sum() - 2 * d * log_n
+
+    assert l1.ndimension() == 2
+    assert l2.ndimension() == 2
+    assert l3.ndimension() == 2
+
+    # total_hsic = exp(l1) - exp(l2) + exp(l3)
+    #   = exp(-a) (exp(l1 + a) - exp(l2 + a) + exp(l3 + a)) for any a
+    # can't use logsumexp for this directly because we subtract the l2 term
+    l = torch.cat([l1, l2, l3], dim=1)
+    a = torch.max(l, dim=1)
+    return a.exp() * ((l1 - a).exp() - (l2 - a).exp() + (l3 - a).exp())
+
+
 def sum_pairwise_hsic(kernels):
     """Sum of (biased) estimators of pairwise independence.
 
@@ -221,14 +262,18 @@ def sum_pairwise_hsic(kernels):
 
 
 def precompute_batch_hsic_stats(
-    preds: torch.Tensor,
+    preds: Union[torch.Tensor, Sequence[torch.Tensor]],
     batch: Optional[Sequence[int]] = None,
     kernel: Callable = dimwise_mixrq_kernels,
 ) -> Sequence[torch.Tensor]:
-    if batch:
-        preds = preds[:, batch]
+    if not isinstance(preds, Sequence):
+        preds = [preds]
 
-    batch_kernels = kernel(preds)
+    if batch:
+        preds = [pred[:, batch] for pred in preds]
+
+    batch_kernels = [kernel(pred) for pred in preds]
+    batch_kernels = torch.cat(batch_kernels, dim=-1)
     batch_kernels.log_()
     batch_kernels = batch_kernels.unsqueeze(-1)
 
@@ -240,7 +285,7 @@ def precompute_batch_hsic_stats(
 
 
 def compute_point_hsics(
-    preds: torch.Tensor,
+    preds: Union[torch.Tensor, Sequence[torch.Tensor]],
     next_points: Sequence[int],
     batch_sum_b: torch.Tensor,
     batch_l1_sum: torch.Tensor,
@@ -248,11 +293,15 @@ def compute_point_hsics(
     batch_l3_sum: torch.Tensor,
     kernel: Callable = dimwise_mixrq_kernels,
 ) -> torch.Tensor:
-    log_n = preds.new_tensor(len(batch_sum_b)).log_()
-    d = preds.new_tensor(batch_sum_b.shape[1] + 1)
-    log_2 = preds.new_tensor(2).log_()
+    if not isinstance(preds, Sequence):
+        preds = [preds]
 
-    point_kernels = kernel(preds[:, next_points])
+    log_n = preds[0].new_tensor(len(batch_sum_b)).log_()
+    d = preds[0].new_tensor(batch_sum_b.shape[1] + 1)
+    log_2 = preds[0].new_tensor(2).log_()
+
+    point_kernels = [kernel(pred[:, next_points]) for pred in preds]
+    point_kernels = torch.cat(point_kernels, dim=-1)
     point_kernels.log_()
     point_kernels = point_kernels.unsqueeze(2)
 
@@ -272,21 +321,31 @@ def compute_point_hsics(
 
 
 def total_hsic_batched(
-    rv_samples1: torch.Tensor,
-    rv_samples2: torch.Tensor,
+    rv_samples1: Union[torch.Tensor, Sequence[torch.Tensor]],
+    rv_samples2: Union[torch.Tensor, Sequence[torch.Tensor]],
     kernel,
     acquirable_idx: Optional[Sequence[int]] = None,
     n_points_parallel: int = 50,
 ) -> torch.Tensor:
     """
     :param rv_samples1: n_samples x n_variables1 [x n_features if kernel supports this]
+      a Sequence of tensors of this shape is allowed so that we can still compute HSIC
+      even if n_features is different for some of the variables
     :param rv_samples2: n_samples x n_variables2 [x n_features if kernel supports this]
+      a Sequence of tensors of this shape is allowed so that we can still compute HSIC
+      even if n_features is different for some of the variables
     :param kernel:
     :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
     :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
     """
-    n_variables = rv_samples2.shape[1]
-    all_hsics = rv_samples1.new_empty(n_variables)
+    if not isinstance(rv_samples1, Sequence):
+        rv_samples1 = [rv_samples1]
+
+    if not isinstance(rv_samples2, Sequence):
+        rv_samples2 = [rv_samples2]
+
+    n_variables = rv_samples2[0].shape[1]
+    all_hsics = rv_samples1[0].new_empty(n_variables)
     batch_stats = precompute_batch_hsic_stats(rv_samples1, kernel=kernel)
 
     acquirable_idx = acquirable_idx or list(range(n_variables))
