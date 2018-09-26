@@ -29,6 +29,7 @@ from bb_opt.src.hsic import (
     compute_point_hsics,
     total_hsic,
 )
+import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src.utils import get_path
 
@@ -851,20 +852,114 @@ def acquire_batch_es(
     return batch
 
 
-def acquire_batch_via_grad(
-        model_list : List[nn.Module],
+
+def hsic_mves_loss(
+        params,
+        X : torch.tensor, # (num_samples, ack_batch_size)
+        opt_values_kernel_matrix : torch.tensor,
+        kernel_fn,
+):
+    assert X.ndimension() == 2
+    num_samples = X.shape[0]
+    ack_batch_size = X.shape[1]
+
+    assert opt_values_kernel_matrix.shape[0] == num_samples
+    assert opt_values_kernel_matrix.shape[1] == num_samples
+
+    if opt_values_kernel_matrix.ndimension() == 2:
+        opt_values_kernel_matrix = opt_values_kernel_matrix.unsqueeze(-1)
+    assert opt_values_kernel_matrix.ndimension() == 3
+    assert opt_values_kernel_matrix.shape[2] == 1
+
+    new_batch_matrix = kernel_fn(X, X) # return is of shape (n=num_samples, n, 1)
+    kernels = torch.cat([X, opt_values_kernel_matrix], dim=-1)
+
+    return -hsic.total_hsic(kernels)
+
+def acquire_batch_via_grad_mves(
+        params,
+        model_ensemble : nn.Module,
+        opt_values : torch.tensor,
         input_shape : List[int],
         seed : torch.tensor = None,
-        n_points_parallel : int = 100,
-        batch_size : int = 100,
-        ack_fn : str = "HSIC",
         device : str = "cuda",
 )-> torch.tensor:
+
+    ack_batch_size = params.ack_batch_size
     if seed is None:
-        input_tensor = torch.randn(input_shape, device=device, requires_grad=True)
+        input_tensor = torch.randn([ack_batch_size]+input_shape, device=device, requires_grad=True)
     else:
+        assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
 
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    kernel_fn = getattr(hsic, 'two_vec_' + params.mves_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_values, opt_values) # return is of shape (n=num_samples, n, 1)
+
+    for step_iter in params.input_opt_num_iter:
+        preds = model_ensemble(input_tensor) # output should be (num_samples, ack_batch_size)
+        loss = hsic_mves_loss(params, input_tensor, opt_kernel_matrix, kernel_fn)
+        
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return input_tensor
+
+
+def acquire_batch_via_grad_ei(
+        params,
+        model_ensemble : nn.Module,
+        input_shape : List[int],
+        seed : torch.tensor = None,
+        device : str = "cuda",
+)-> torch.tensor:
+
+    ack_batch_size = params.ack_batch_size
+    if seed is None:
+        input_tensor = torch.randn([ack_batch_size]+input_shape, device=device, requires_grad=True)
+    else:
+        assert seed.shape[0] == ack_batch_size
+        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
+
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    kernel_fn = getattr(hsic, 'two_vec_' + params.mves_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_values, opt_values) # return is of shape (n=num_samples, n, 1)
+
+    for step_iter in params.input_opt_num_iter:
+        preds = model_ensemble(input_tensor) # output should be (num_samples, ack_batch_size)
+        loss = -torch.mean(preds)
+        
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return input_tensor
+
+
+def optimize_model_input(
+        params,
+        input_shape,
+        model_ensemble,
+        seed=None,
+):
+    ack_num_model_samples = params.ack_num_model_samples
+    if seed is None:
+        input_tensor = torch.randn([ack_num_model_samples]+input_shape, device=device, requires_grad=True)
+    else:
+        assert seed.shape[0] == ack_num_model_samples
+        input_tensor = torch.tensor(seed, device=device, requires_grad=True).unsqueeze(0)
+
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    for step_iter in params.input_opt_num_iter:
+        preds = model_ensemble(input_tensor)
+        loss = -torch.sum(pred)
+        
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return input_tensor
 
 def acquire_batch_pi(
     model,
