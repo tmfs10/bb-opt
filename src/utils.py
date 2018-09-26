@@ -191,3 +191,11 @@ def jointplot(
     ax.set_axis_labels(*axis_labels)
     ax.ax_marg_x.set_title(title)
     return ax
+
+
+def collated_expand(X, num_samples):
+    X = X.unsqueeze(1)
+    X = X.repeat([1] + [num_samples] + [1] * (len(X.shape) - 2)).view(
+        [-1] + list(X.shape[2:])
+    )
+    return X

@@ -1,64 +1,107 @@
 
+import tensorflow as tf
+import keras
+import numpy as np
+
+import hsic
 import torch
 import torch.nn as nn
-import matlab.engine
-import gp_acquisition as ack
-import numpy as np
 
 from chemvae_keras import vae_utils
 from chemvae_keras import mol_utils as mu
 
-def chemvae_gpopt_pes(is_cuda, zinc250k, directory, n_init_samples, n_opt_samples, obj):
-    assert n_init_samples < len(zinc250k)
+import utils
+
+
+def get_activation(act):
+    act = act.lower()
+    if act == 'relu':
+        return nn.ReLU
+    elif act == 'sigmoid':
+        return nn.Sigmoid
+    elif act == 'tanh':
+        return nn.Tanh
+
+class PropertyPredictor(nn.Module):
+
+    def __init__(self, params):
+        self.params = params
+        activation = get_activation(params.prop_activation)
+
+        num_inputs = params.prop_pred_num_input_features + params.prop_pred_num_random_inputs
+        net = [nn.Linear(num_inputs, params.prop_pred_num_hidden), activation()]
+        if params.prop_pred_dropout > 0:
+            net += [nn.Dropout(params.prop_pred_dropout)]
+
+        if params.prop_pred_depth > 1:
+            num_inputs = params.prop_pred_num_hidden
+            for p_i in range(1, params.prop_pred_depth):
+                num_outputs = int(params.prop_pred_num_hidden * (params.prop_pred_growth_factor**p_i))
+                prop_mid = nn.Linear(num_inputs, num_outputs)
+
+                net += [prop_mid, activation()]
+                if params.prop_pred_dropout > 0:
+                    net += [nn.Dropout(params.prop_pred_dropout)]
+                if params.prop_batchnorm:
+                    net += [nn.BatchNorm1d(num_outputs)]
+
+                num_inputs = num_outputs
+
+        net += [nn.Linear(num_inputs, 3)]
+        self.net = nn.ModuleList(net)
+
+    def forward(self, x, z):
+        num_samples = z.shape[0]
+        N = x.shape[0]
+
+        x = expand_to_sample(x, num_samples)
+        z = z.repeat([N, 1])
+
+        x = torch.cat([x, z], dim=1)
+
+        for h in self.net:
+            x = h(x)
+        return x
+
+def load_zinc250k(score_fn = lambda x : x[0]):
+    filename = '/cluster/sj1/bb_opt/chemical_vae/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv'
+    zinc250k = [[], []]
+    with open(filename) as f:
+        next(f)
+        for line in f:
+            line = [k.strip() for k in line.strip().split('\t')]
+            zinc250k[0] += [line[0]]
+            zinc250k[1] += [[float(k) for k in line[1:]]]
+    zinc250k[1] = np.array(zinc250k, dtype=np.float32)
+
+    zinc_prop_dir = '/cluster/sj1/bb_opt/chemical_vae/models/zinc_properties'
     vae = vae_utils.VAEUtils(directory=directory)
 
-    zinc250k.sort(key=lambda k: obj(k[1]))
-    smiles = []
-    for smiles_string, props in zinc250k:
-        smiles += [vae.smiles_to_hot(mu.canon_smiles(smiles_string), canonize_smiles=True)]
+    sort_idx = np.argsort([score_fn(k) for k in zinc250k[1]])
+    zinc250k[0] = [zinc250k[0][i] for i in sort_idx]
+    zinc250k[1] = zinc250k[1][sort_idx, :]
 
-    x_samples = np.asarray([vae.encode[k] for k in smiles[:n_init_samples]], dtype=np.float32)
-    predictor_model = lambda x : obj(vae.predict_prop_Z(x[np.newaxis, :])[0])
-    nvars = x_samples.shape[1]
-    x_min = np.ones(nvars)*-1
-    x_max = np.ones(nvars)
+    smiles_one_hot = []
+    for i in range(len(zinc250k[0])):
+        smiles_string = zinc250k[0][i]
+        props = zinc250k[1][i]
+        if i % 10000 == 0:
+            print("done {:d}K samples".format(i//1000))
+        smiles_one_hot += [vae.smiles_to_hot(mu.canon_smiles(smiles_string), canonize_smiles=True)]
 
-    eng = matlab.engine.start_matlab()
+    smiles_z = [vae.encode(k)[0] for k in smiles_one_hot]
 
-    x_samples, y_samples, l, sigma, sigma0 = ack.init_pes(is_cuda, eng, predictor_model, x_samples, n_opt_samples, x_min, x_max)
+    return zinc250k, vae, smiles_one_hot, smiles_z
 
-    for i in range(num_batches):
-        x_samples, y_samples, guesses, l, sigma, sigma0 = ack.pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y_samples, l, sigma, sigma0)
+def load_zinc(num_to_load=0):
+    filename = '/cluster/sj1/bb_opt/data/zinc/10_p0.smi'
 
-    eng.quit()
+    zinc = []
+    with open(filename) as f:
+        for line in f:
+            if num_to_load > 0 and len(zinc) >= num_to_load:
+                break
+            line = line.strip()
+            zinc += [line]
 
-    return np.asarray(x_samples), np.asarray(y_samples), np.asarray(guesses)
-
-def chemvae_gpopt_mes(is_cuda, zinc250k, directory, n_init_samples, n_opt_samples, score_fn):
-    assert n_init_samples < len(zinc250k)
-    vae = vae_utils.VAEUtils(directory=directory)
-
-    zinc250k.sort(key=lambda k: score_fn(k[1]))
-    smiles = []
-    for smiles_string, props in zinc250k:
-        smiles += [vae.smiles_to_hot(mu.canon_smiles(smiles_string), canonize_smiles=True)]
-
-    x_samples = [vae.encode(k)[0] for k in smiles[:n_init_samples]]
-    predictor_model = lambda x : score_fn(vae.predict_prop_Z(x[np.newaxis, :])[0])
-    nvars = x_samples[0].shape[-1]
-    x_min = matlab.double([-1]*nvars)
-    x_max = matlab.double([1]*nvars)
-
-    y_samples = matlab.double([predictor_model(k) for k in x_samples])
-    x_samples = matlab.double([k.tolist() for k in x_samples])
-
-    eng = matlab.engine.start_matlab()
-
-    x_samples, y_samples, l, sigma, sigma0 = ack.init_mes(eng, x_samples, y_samples)
-
-    for i in range(num_batches):
-        x_samples, y_samples, guesses, l, sigma, sigma0 = ack.pes(eng, obj, n_opt_samples, n_features, x_min, x_max, x_samples, guesses, y_samples, l, sigma, sigma0)
-
-    eng.quit()
-
-    return np.asarray(x_samples), np.asarray(y_samples), np.asarray(guesses)
+    return zinc

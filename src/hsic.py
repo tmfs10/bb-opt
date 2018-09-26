@@ -3,6 +3,82 @@ import sys
 from typing import Sequence, Callable, Optional, Union
 
 
+def sqdist(X):
+    """
+    X is of shape (n, d, k) or (n, d)
+    return is of shape (n, n, d)
+    """
+    if X.ndimension() == 2:
+        return (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
+    else:
+        assert X.ndimension() == 3
+        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
+
+
+def sqdist(X1, X2):
+    assert X1.ndimension() == X2.ndimension()
+    if X1.ndimension() == 2:
+        return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
+    else:
+        assert X1.ndimension() == 3
+        return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
+
+
+def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+    bws = dist_matrix.new_tensor(bws).view(-1, 1, 1, 1)
+    weights = weights or 1 / len(bws)
+    weights = weights * dist_matrix.new_ones(len(bws))
+
+    parts = torch.exp(dist_matrix / (-2 * bws ** 2))
+    return torch.einsum("w,wijd->ijd", (weights, parts))
+
+
+def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
+    alphas = dist_matrix.new_tensor(alphas).view(-1, 1, 1, 1)
+    weights = weights or 1.0 / len(alphas)
+    weights = weights * dist_matrix.new_ones(len(alphas))
+
+    logs = torch.log1p(sqdists / (2 * alphas))
+    #     assert torch.isfinite(logs).all()
+    return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
+
+
+def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+    if X1.ndimension() == 1:
+        X1 = X1.unsqueeze(-1).unsqueeze(-1)
+    elif X1.ndimension() == 2:
+        X1 = X1.unsqueeze(1)
+
+    if X2.ndimension() == 1:
+        X2 = X2.unsqueeze(-1).unsqueeze(-1)
+    elif X2.ndimension() == 2:
+        X2 = X2.unsqueeze(1)
+
+    assert X1.ndimension() == 3
+    assert X2.ndimension() == 3
+
+    dist_matrix = sqdist(X1, X2).unsqueeze(0)
+    return mixrbf_kernels(dist_matrix, bws, weights)
+
+
+def two_vec_mixrq_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+    if X1.ndimension() == 1:
+        X1 = X1.unsqueeze(-1).unsqueeze(-1)
+    elif X1.ndimension() == 2:
+        X1 = X1.unsqueeze(1)
+
+    if X2.ndimension() == 1:
+        X2 = X2.unsqueeze(-1).unsqueeze(-1)
+    elif X2.ndimension() == 2:
+        X2 = X2.unsqueeze(1)
+
+    assert X1.ndimension() == 3
+    assert X2.ndimension() == 3
+
+    dist_matrix = sqdist(X1, X2).unsqueeze(0)
+    return mixrq_kernels(dist_matrix, bws, weights)
+
+
 def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     """Mixture of RBF kernels between each dimension of X.
 
@@ -11,13 +87,13 @@ def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     Kernel is sum_i wt_i exp(- (x - y)^2 / (2 bw^2)).
     If wts is not passed, uses 1 for each alpha.
     """
-    assert X.ndimension() == 2
 
     bws = X.new_tensor(bws).view(-1, 1, 1, 1)
     weights = weights or 1 / len(bws)
     weights = weights * X.new_ones(len(bws))
 
-    sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+    # sqdists = ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).unsqueeze(0)
+    sqdists = sqdist(X).unsqueeze(0)
 
     parts = torch.exp(sqdists / (-2 * bws ** 2))
     return torch.einsum("w,wijd->ijd", (weights, parts))

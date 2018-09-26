@@ -27,7 +27,7 @@ def expand_to_sample(X, num_samples):
     X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
     return X
 
-def predict_no_resize(X, model, qz, e, device='cuda'):
+def predict_no_resize(X, model, qz, e, device='cuda', return_z=False):
     model = model.to(device)
     X = X.to(device)
     qz = qz.to(device)
@@ -43,7 +43,10 @@ def predict_no_resize(X, model, qz, e, device='cuda'):
     X = torch.cat([X, z], dim=1)
     output = model(X)
 
-    return output
+    if return_z:
+        return output, z
+    else:
+        return output
 
 def predict(X, model, qz, e, device='cuda'):
     num_samples = e.shape[0]
@@ -92,6 +95,7 @@ def compute_loss(params, X, Y, model, qz, e):
 
         log_prob_loss += -torch.mean(output_dist.log_prob(bY))/num_batches
         #log_prob_loss += torch.mean((bY-mu)**2)/num_batches
+
         loss += log_prob_loss
         muYhat += [mu]
         stdYhat += [std]
