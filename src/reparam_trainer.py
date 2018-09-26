@@ -9,10 +9,11 @@ import numpy as np
 import utils
 
 def gaussian_kl(mean, std, prior_std, device):
+    assert std.ndimension() == 1
     var = std**2
     prior_var = torch.tensor(prior_std**2, device=device)
     k = mean.shape[0]
-    return 0.5 * torch.sum( var * 1./prior_var + 1./prior_var*(mean**2) - k - torch.log(var) + k*torch.log(prior_var) )
+    return 0.5 * (torch.sum(var * 1./prior_var) + 1./prior_var*torch.sum(mean**2) - k + torch.sum(-torch.log(var) + torch.log(prior_var)))
     #return 0.5 * torch.sum((1+torch.log(var)) - mean**2 - var)
 
 def init_train(params, model_parameters, X, Y):
@@ -71,7 +72,7 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
     stdYhat = []
     log_prob_loss = 0
     kl_loss = 0
-    hsic_loss = 0
+    hsic_loss = torch.tensor(0., device=params.device)
     loss = 0
     for bi in range(num_batches):
         bs = batches[bi]
@@ -102,11 +103,22 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
 
         if do_hsic:
             assert z is not None
-            z_kernels = hsic.two_vec_mixrq_kernels(z, z)
+            z_kernels = hsic.two_vec_mixrq_kernels(z, z) # (n, n, 1)
 
-            random_d = np.random.choice(N, size=5)
-            #mu2 = mu.view(N, num_samples).transpose()
-            #mu_kernels = hsic.dimwise_mixrq_kernels(mu2)
+            m = 5
+            random_d = torch.tensor(np.random.choice(N, size=m), device=device)
+
+            if m < N:
+                mu2 = mu.view(N, num_samples)[random_d].transpose(0, 1)
+            else:
+                mu2 = mu.view(N, num_samples).transpose(0, 1)
+                mu_kernels = hsic.dimwise_mixrq_kernels(mu2).permute([2, 0, 1]).unsqueeze(-1) # (n, n, N, 1)
+            z_kernels = z_kernels.unsqueeze(0).repeat([m, 1, 1, 1]) # (m, n, n, 1)
+            kernels = torch.cat([mu_kernels, z_kernels], dim=-1)
+            total_hsic = torch.mean(hsic.total_hsic_parallel(kernels))
+            hsic_loss += total_hsic/num_batches
+
+            """
             for di in random_d:
                 s = di*num_samples
                 e = (di+1)*num_samples
@@ -116,6 +128,7 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
                 total_hsic = hsic.total_hsic(kernels)
                 #hsic_loss_vec[di] = total_hsic
                 hsic_loss += total_hsic/(num_batches*len(random_d))
+            """
 
         loss += -hsic_lambda*hsic_loss
         loss += log_prob_loss
@@ -127,10 +140,7 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
 
     muYhat = torch.cat(muYhat, dim=0)
     stdYhat = torch.cat(stdYhat, dim=0)
-    if do_hsic:
-        return loss, log_prob_loss.item(), kl_loss.item(), hsic_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
-    else:
-        return loss, log_prob_loss.item(), kl_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
+    return loss, log_prob_loss.item(), kl_loss.item(), hsic_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
 
 def generate_prior_samples(num_samples, e_dist, device='cuda'):
     e = []
@@ -158,7 +168,7 @@ def train(params, X, Y, model, qz, e_dist):
             bY = Y[bs:be]
 
             e = generate_prior_samples(params.num_samples, e_dist)
-            loss, log_prob_loss, kl_loss, _, _ = reparam.compute_loss(params, bX, bY, model, qz, e)
+            loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, bX, bY, model, qz, e)
             train_losses += [log_prob_loss]
             train_kl_losses += [kl_loss]
 
