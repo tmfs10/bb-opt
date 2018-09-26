@@ -105,14 +105,14 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
             assert z is not None
             z_kernels = hsic.two_vec_mixrq_kernels(z, z) # (n, n, 1)
 
-            m = 5
-            random_d = torch.tensor(np.random.choice(N, size=m), device=device)
+            m = N
+            random_d = torch.tensor(np.random.choice(N, size=m), device=params.device)
 
             if m < N:
-                mu2 = mu.view(N, num_samples)[random_d].transpose(0, 1)
+                mu2 = mu.view(N, num_samples)[random_d, :].transpose(0, 1)
             else:
                 mu2 = mu.view(N, num_samples).transpose(0, 1)
-                mu_kernels = hsic.dimwise_mixrq_kernels(mu2).permute([2, 0, 1]).unsqueeze(-1) # (n, n, N, 1)
+            mu_kernels = hsic.dimwise_mixrq_kernels(mu2).permute([2, 0, 1]).unsqueeze(-1) # (m, n, n, 1)
             z_kernels = z_kernels.unsqueeze(0).repeat([m, 1, 1, 1]) # (m, n, n, 1)
             kernels = torch.cat([mu_kernels, z_kernels], dim=-1)
             total_hsic = torch.mean(hsic.total_hsic_parallel(kernels))
