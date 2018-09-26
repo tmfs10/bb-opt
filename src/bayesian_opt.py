@@ -20,7 +20,18 @@ from pyro.distributions import (
 )
 import matplotlib.pyplot as plt
 import seaborn as sns
-from typing import Union, Tuple, Optional, Callable, Dict, Set, List, Any, Iterable
+from typing import (
+    Union,
+    Tuple,
+    Optional,
+    Callable,
+    Dict,
+    Set,
+    List,
+    Any,
+    Iterable,
+    Sequence,
+)
 import pickle
 from bb_opt.src.hsic import (
     dimwise_mixrq_kernels,
@@ -28,9 +39,10 @@ from bb_opt.src.hsic import (
     precompute_batch_hsic_stats,
     compute_point_hsics,
     total_hsic,
+    total_hsic_batched,
 )
 from bb_opt.src.knn_mi import estimate_mi
-from bb_opt.src.utils import get_path
+from bb_opt.src.utils import get_path, save_checkpoint
 
 
 N_HIDDEN = 100
@@ -262,9 +274,11 @@ def optimize(
     partial_train_steps: int = 10,
     partial_train_func: Optional[Callable] = None,
     save_key: str = "",
+    acquisition_func_greedy: Optional[Callable] = None,
 ) -> np.ndarray:
 
     acquisition_args = acquisition_args or {}
+    acquisition_func_greedy = acquisition_func_greedy or acquisition_func
     n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
 
     if isinstance(labels, pd.Series):
@@ -293,7 +307,27 @@ def optimize(
         fraction_best_sampled = []
 
         for step in range(n_batches):
-            acquire_samples = acquisition_func(
+            if step == 0:
+                acquire_samples = acquire_batch_uniform(
+                    model,
+                    inputs,
+                    labels[list(sampled_idx)],
+                    sampled_idx,
+                    batch_size,
+                    exp=exp,
+                )
+            else:
+                acquire_samples = acquisition_func(
+                    model,
+                    inputs,
+                    labels[list(sampled_idx)],
+                    sampled_idx,
+                    batch_size,
+                    exp=exp,
+                    **acquisition_args,
+                )
+
+            acquire_samples_greedy = acquisition_func_greedy(
                 model,
                 inputs,
                 labels[list(sampled_idx)],
@@ -302,15 +336,21 @@ def optimize(
                 exp=exp,
                 **acquisition_args,
             )
+
+            greedy_sampled_idx = sampled_idx.copy()
             sampled_idx.update(acquire_samples)
-            fraction_best = len(best_idx.intersection(sampled_idx)) / len(best_idx)
+            greedy_sampled_idx.update(acquire_samples_greedy)
+
+            fraction_best = len(best_idx.intersection(greedy_sampled_idx)) / len(
+                best_idx
+            )
             fraction_best_sampled.append(fraction_best)
 
             if verbose:
                 print(f"{step} {fraction_best:.3f}")
 
             if exp:
-                sampled_labels = labels[list(sampled_idx)]
+                sampled_labels = labels[list(greedy_sampled_idx)]
                 sampled_sum_best = (
                     sampled_labels.sort()[0][-n_top_k_percent:].sum().item()
                 )
@@ -347,17 +387,21 @@ def optimize(
                         partial_train_steps,
                     )
 
+            if save_key:
+                save_fname = get_path(
+                    __file__, "..", "..", "models_nathan", save_key, step
+                )
+
+                if "de" in save_key:
+                    save_checkpoint(f"{save_fname}.pth", model)
+                elif "bnn" in save_key:
+                    pyro.get_param_store().save(f"{save_fname}.params")
+
         assert (len(sampled_idx) == min(len(labels), batch_size * n_batches)) or (
             fraction_best == 1.0
         )
-
     except KeyboardInterrupt:
         pass
-
-    if save_key:
-        save_fname = get_path(__file__, "..", "..", "models", save_key)
-        pyro.get_param_store().save(f"{save_fname}.params")
-        optimizer.save(f"{save_fname}.opt")
 
     return model, SVI
 
@@ -513,21 +557,32 @@ def get_model_bnn_extended_gamma(
     return bnn_model, guide
 
 
-def acquire_batch_bnn_greedy(
+def acquire_batch_ei(
     model,
     inputs: InputType,
     sampled_labels: LabelType,
     sampled_idx: Set[int],
     batch_size: int,
-    n_bnn_samples: int = 50,
     exp: Optional = None,
+    n_bnn_samples: int = 50,
+    **unused_kwargs,
 ) -> List[int]:
-    bnn_model, guide = model
-    preds = bnn_predict(guide, inputs, n_samples=n_bnn_samples)
-    preds = preds.mean(axis=0)
-    sorted_idx = np.argsort(preds)
-    sorted_idx = [i for i in sorted_idx if i not in sampled_idx]
-    acquire_samples = sorted_idx[-batch_size:]  # sorted smallest first
+    if isinstance(model, Sequence):  # bnn
+        bnn_model, guide = model
+        preds = bnn_predict(guide, inputs, n_samples=n_bnn_samples)
+        preds = preds.mean(axis=0)
+        sorted_idx = np.argsort(preds)
+        sorted_idx = [i for i in sorted_idx if i not in sampled_idx]
+        acquire_samples = sorted_idx[-batch_size:]  # sorted smallest first
+    else:  # deep ensemble
+        with torch.no_grad():
+            means, variances = model(inputs, individual_predictions=False)
+
+        acquire_samples = [
+            i for i in means.sort(descending=True)[1].tolist() if i not in sampled_idx
+        ]
+        acquire_samples = acquire_samples[:batch_size]
+
     return acquire_samples
 
 
@@ -730,6 +785,7 @@ def acquire_batch_mves(
     exp: Optional = None,
     kernel: Optional[Callable] = None,
     mi_estimator: str = "HSIC",
+    n_max_dist_points: int = 1,
 ) -> List[int]:
     return acquire_batch_es(
         model,
@@ -742,6 +798,7 @@ def acquire_batch_mves(
         kernel,
         mi_estimator,
         max_value_es=True,
+        n_max_dist_points=n_max_dist_points,
     )
 
 
@@ -756,23 +813,29 @@ def acquire_batch_es(
     kernel: Optional[Callable] = None,
     mi_estimator: str = "HSIC",
     max_value_es: bool = False,
+    n_max_dist_points: int = 1,
 ) -> List[int]:
 
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
-    n_preds = 250
-    bnn_model, guide = model
+    if isinstance(model, Sequence):
+        n_preds = 250
+        bnn_model, guide = model
 
-    with torch.no_grad():
-        preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+        with torch.no_grad():
+            preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+    else:
+        with torch.no_grad():
+            means, variances = model(inputs)
+        preds = means
+        n_preds = len(means)
 
     if max_value_es:
-        max_dist = preds.max(dim=1)[0]
+        max_dist = preds.sort(dim=1, descending=True)[0][:, :n_max_dist_points]
     else:
-        max_pred_idx = preds.argmax(dim=1)
-        max_dist = inputs[max_pred_idx]
+        max_idx = preds.sort(dim=1, descending=True)[1][:, :n_max_dist_points]
+        max_dist = inputs[max_idx]
 
-    max_dist = max_dist.unsqueeze(1)
     acquirable_idx = list(acquirable_idx)
     batch = []
 
@@ -784,9 +847,17 @@ def acquire_batch_es(
             best_idx = acquirable_idx[all_mi.argmax().item()]
             acquirable_idx.remove(best_idx)
             batch.append(best_idx)
-            max_batch_dist = torch.cat(
-                (max_batch_dist, preds[:, best_idx : best_idx + 1]), dim=-1
-            )
+
+            if not max_value_es:
+                # the input distribution has vector samples instead of scalars,
+                # so we can't combine everything into one tensor
+
+                if isinstance(max_batch_dist, list):
+                    max_batch_dist[1] = torch.cat(
+                        (max_batch_dist[1], preds[:, best_idx : best_idx + 1]), dim=-1
+                    )
+                else:  # set things up the first time
+                    max_batch_dist = [max_batch_dist, preds[:, best_idx : best_idx + 1]]
 
             if exp:
                 exp.log_multiple_metrics(
@@ -839,8 +910,8 @@ def acquire_batch_es(
 
     if exp:
         if not max_value_es:
-            mode_count = (max_idx == max_idx.mode()[0]).sum().item()
-            selected_count = (max_idx == batch[0]).sum().item()
+            mode_count = (max_idx[:, 0] == max_idx[:, 0].mode()[0]).sum().item()
+            selected_count = (max_idx[:, 0] == batch[0]).sum().item()
 
             exp.log_multiple_metrics(
                 {

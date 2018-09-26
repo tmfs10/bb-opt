@@ -14,7 +14,7 @@ from bb_opt.src.bayesian_opt import (
     get_model_bnn,
     acquire_batch_uniform,
     acquire_batch_nn_greedy,
-    acquire_batch_bnn_greedy,
+    acquire_batch_ei,
     acquire_batch_pdts,
     acquire_batch_hsic_mean_std,
     acquire_batch_hsic_pdts,
@@ -26,6 +26,7 @@ from bb_opt.src.bayesian_opt import (
     train_model_bnn,
     partial_train_model_bnn,
 )
+from bb_opt.src.deep_ensemble import get_model_deep_ensemble, train_model_deep_ensemble
 from bb_opt.src.hsic import dimwise_mixrq_kernels, dimwise_mixrbf_kernels
 from bb_opt.src.utils import get_path
 
@@ -33,18 +34,13 @@ models = {
     "uniform": get_model_uniform,
     "nn": get_model_nn,
     "bnn": get_model_bnn,
-    "pdts": get_model_bnn,
-    "hsic_ms": get_model_bnn,
-    "hsic_pdts": get_model_bnn,
-    "mves": get_model_bnn,
-    "es": get_model_bnn,
-    "pi": get_model_bnn,
+    "de": get_model_deep_ensemble,
 }
 
 acquisition_functions = {
     "uniform": acquire_batch_uniform,
     "nn": acquire_batch_nn_greedy,
-    "bnn": acquire_batch_bnn_greedy,
+    "ei": acquire_batch_ei,
     "pdts": acquire_batch_pdts,
     "hsic_ms": acquire_batch_hsic_mean_std,
     "hsic_pdts": acquire_batch_hsic_pdts,
@@ -57,30 +53,23 @@ train_functions = {
     "uniform": train_model_uniform,
     "nn": train_model_nn,
     "bnn": train_model_bnn,
-    "pdts": train_model_bnn,
-    "hsic_ms": train_model_bnn,
-    "hsic_pdts": train_model_bnn,
-    "mves": train_model_bnn,
-    "es": train_model_bnn,
-    "pi": train_model_bnn,
+    "de": train_model_deep_ensemble,
 }
 
 partial_train_functions = {
     "uniform": train_model_uniform,
     "nn": None,
     "bnn": partial_train_model_bnn,
-    "pdts": partial_train_model_bnn,
-    "hsic_ms": partial_train_model_bnn,
-    "hsic_pdts": partial_train_model_bnn,
-    "mves": partial_train_model_bnn,
-    "es": partial_train_model_bnn,
-    "pi": partial_train_model_bnn,
+    "de": None,
 }
 
 
 def main():
     parser = ArgumentParser()
-    parser.add_argument("model_key", help="One of {uniform, nn, bnn, pdts, hsic}")
+    parser.add_argument("model_key", help="One of {uniform, nn, bnn, de}")
+    parser.add_argument(
+        "af_key", help="One of {pdts, pi, hsic_ms, hsic_pdts, es, mves}"
+    )
     parser.add_argument("project", help="One of {malaria, dna_binding}")
     parser.add_argument(
         "--dataset",
@@ -90,7 +79,7 @@ def main():
     parser.add_argument(
         "-s",
         "--save_key",
-        help="Key used in the saved dictionary of results [default = `model_key`]",
+        help="Key used in the saved dictionary of results [default = `model_key` + `af_key`]",
     )
     parser.add_argument("-d", "--device_num", type=int, default=0)
     parser.add_argument("-b", "--batch_size", type=int, default=200)
@@ -130,10 +119,19 @@ def main():
     parser.add_argument(
         "-mi", "--mi_estimator", default="HSIC", help="One of {HSIC, LNC}"
     )
+    parser.add_argument("-nes", "--n_points_es", type=int, default=1)
+    parser.add_argument("-nde", "--n_ensemble_models", type=int, default=5)
+    parser.add_argument(
+        "-gk",
+        "--greedy_af_key",
+        help="AF key to use when being exploitative on the final batch.",
+    )
     args = parser.parse_args()
 
     model_key = args.model_key
-    save_key = args.save_key or model_key
+    af_key = args.af_key
+    greedy_af_key = args.greedy_af_key or af_key
+    save_key = args.save_key or "_".join((model_key, af_key))
     mi_estimator = args.mi_estimator
     os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.device_num)
@@ -160,6 +158,8 @@ def main():
     exp.log_multiple_params(
         {
             "model_key": model_key,
+            "af_key": af_key,
+            "greedy_af_key": greedy_af_key,
             "save_key": save_key,
             "dataset": args.dataset,
             "batch_size": args.batch_size,
@@ -172,25 +172,28 @@ def main():
     )
 
     acquisition_args = {}
-    if model_key in ["es", "mves", "hsic_ms", "hsic_pdts", "pdts"]:
+    if af_key in ["es", "mves", "hsic_ms", "hsic_pdts", "pdts"]:
         acquisition_args["mi_estimator"] = mi_estimator
 
         if mi_estimator == "HSIC":
             kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
             acquisition_args["kernel"] = args.kernel
 
-        if model_key not in ("es", "mves"):
+        if af_key not in ("es", "mves"):
             # just because, for now at least, we report HSIC during PDTS acquisition,
             # even though the HSIC doesn't affect the result
 
             # n_preds = preds_mult * batch_size
             acquisition_args["preds_multiplier"] = args.preds_multiplier
 
-    if model_key == "hsic_ms":
+    if af_key in ("es", "mves"):
+        acquisition_args["n_max_dist_points"] = args.n_points_es
+
+    if af_key == "hsic_ms":
         acquisition_args["hsic_coeff"] = args.hsic_coeff
         acquisition_args["metric"] = args.hsic_metric
 
-    if model_key == "hsic_pdts":
+    if af_key == "hsic_pdts":
         acquisition_args["pdts_multiplier"] = args.pdts_multiplier
 
     exp.log_multiple_params(acquisition_args)
@@ -200,7 +203,7 @@ def main():
 
     optimize(
         models[model_key],
-        acquisition_functions[model_key],
+        acquisition_functions[af_key],
         train_functions[model_key],
         inputs,
         labels,
@@ -216,6 +219,7 @@ def main():
         partial_train_steps=args.partial_steps,
         partial_train_func=partial_train_functions[model_key],
         save_key=save_key,
+        acquisition_func_greedy=acquisition_functions[greedy_af_key],
     )
 
 
