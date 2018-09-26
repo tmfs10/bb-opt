@@ -198,6 +198,44 @@ def total_hsic(kernels, logspace=True):
         return a.exp() * ((l1 - a).exp() - (l2 - a).exp() + (l3 - a).exp())
 
 
+def total_hsic_parallel(kernels):
+    """
+    kernels should be shape (m, n, n, d) to test for total
+    independence among d variables with n paired samples for m sets.
+    """
+    shp = kernels.shape
+    assert len(shp) == 3
+    assert shp[1] == shp[2], "%s == %s" % (str(shp[0]), str(shp[1]))
+
+    m = shp[0]
+    n = kernels.new_tensor(shp[1])
+    d = kernels.new_tensor(shp[3])
+
+    # t1: 1/n^2      sum_a  sum_b  prod_i K_ab^i
+    # t2: -2/n^(d+1) sum_a  prod_i sum_b  K_ab^i
+    # t3: 1/n^(2d)   prod_i sum_a  sum_b  K_ab^i
+
+    log_n = torch.log(n)
+    log_2 = torch.log(kernels.new_tensor(2))
+    log_kernels = kernels.log_()  # TODO: just take directly?
+    log_sum_b = log_kernels.logsumexp(dim=2)
+
+    l1 = log_kernels.sum(dim=3).logsumexp(dim=2).logsumexp(dim=1) - 2 * log_n
+    l2 = log_sum_b.sum(dim=3).logsumexp(dim=1) + log_2 - (d + 1) * log_n
+    l3 = log_sum_b.logsumexp(dim=1).sum() - 2 * d * log_n
+
+    assert l1.ndimension() == 2
+    assert l2.ndimension() == 2
+    assert l3.ndimension() == 2
+
+    # total_hsic = exp(l1) - exp(l2) + exp(l3)
+    #   = exp(-a) (exp(l1 + a) - exp(l2 + a) + exp(l3 + a)) for any a
+    # can't use logsumexp for this directly because we subtract the l2 term
+    l = torch.cat([l1, l2, l3], dim=1)
+    a = torch.max(l, dim=1)
+    return a.exp() * ((l1 - a).exp() - (l2 - a).exp() + (l3 - a).exp())
+
+
 def sum_pairwise_hsic(kernels):
     """Sum of (biased) estimators of pairwise independence.
 
