@@ -32,7 +32,7 @@ def expand_to_sample(X, num_samples):
     X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
     return X
 
-def predict_no_resize(X, model, qz, e, device='cuda', return_z=False):
+def predict_no_resize(X, model, qz, e, device='cuda'):
     model = model.to(device)
     X = X.to(device)
     qz = qz.to(device)
@@ -42,14 +42,14 @@ def predict_no_resize(X, model, qz, e, device='cuda', return_z=False):
     assert num_samples > 0
     N = X.shape[0]
     z = qz(e)
-    output, z = model(X, z, return_z)
+    output = model(X, z)
 
-    return output, z
+    return output
 
 
 def predict(X, model, qz, e, device='cuda'):
     num_samples = e.shape[0]
-    output, z = predict_no_resize(X, model, qz, e, device)
+    output = predict_no_resize(X, model, qz, e, device)
     return output.detach().view(-1, num_samples, 2)
 
 
@@ -86,9 +86,9 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
 
         bY = utils.collated_expand(bY, num_samples)
 
-        output, z = predict_no_resize(X, model, qz, e, return_z=do_hsic)
-        if z is not None:
-            z = z[:num_samples]
+        output = predict_no_resize(X, model, qz, e)
+        z = e
+        assert z.shape[0] == num_samples
         mu = output[:, 0]
         std = output[:, 1]
 

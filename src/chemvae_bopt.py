@@ -50,7 +50,7 @@ class PropertyPredictor(nn.Module):
         net += [nn.Linear(num_inputs, 3)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z, return_z=False, resize_at_end=False):
+    def forward(self, x, z, resize_at_end=False):
         assert x.ndimension() == 2
         num_samples = z.shape[0]
         N = x.shape[0]
@@ -64,10 +64,7 @@ class PropertyPredictor(nn.Module):
 
         if resize_at_end:
             x = x.view([N, num_samples]).transpose()
-        if return_z:
-            return x, z
-        else:
-            return x, None
+        return x
 
 def load_zinc250k(score_fn = lambda x : x[0]):
     filename = '/cluster/sj1/bb_opt/chemical_vae/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv'
