@@ -157,3 +157,8 @@ def train_val_test_split(n, split, shuffle=True):
         val_end = train_end + split[1]
 
     return idx[:train_end], idx[train_end:val_end], idx[val_end:]
+
+def collated_expand(X, num_samples):
+    X = X.unsqueeze(1)
+    X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
+    return X
