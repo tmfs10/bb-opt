@@ -44,12 +44,12 @@ def predict_no_resize(X, model, qz, e, device='cuda'):
     z = qz(e)
     output = model(X, z)
 
-    return output
+    return output, z
 
 
 def predict(X, model, qz, e, device='cuda'):
     num_samples = e.shape[0]
-    output = predict_no_resize(X, model, qz, e, device)
+    output, z = predict_no_resize(X, model, qz, e, device)
     return output.detach().view(-1, num_samples, 2)
 
 
@@ -86,8 +86,7 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
 
         bY = utils.collated_expand(bY, num_samples)
 
-        output = predict_no_resize(X, model, qz, e)
-        z = e
+        output, z = predict_no_resize(X, model, qz, e)
         assert z.shape[0] == num_samples
         mu = output[:, 0]
         std = output[:, 1]
