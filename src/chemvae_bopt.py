@@ -50,18 +50,24 @@ class PropertyPredictor(nn.Module):
         net += [nn.Linear(num_inputs, 3)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z):
+    def forward(self, x, z, return_z=False, resize_at_end=False):
+        assert x.ndimension() == 2
         num_samples = z.shape[0]
         N = x.shape[0]
 
-        x = expand_to_sample(x, num_samples)
+        x = utils.collated_expand(x, num_samples)
         z = z.repeat([N, 1])
-
         x = torch.cat([x, z], dim=1)
 
         for h in self.net:
             x = h(x)
-        return x
+
+        if resize_at_end:
+            x = x.view([N, num_samples]).transpose()
+        if return_z:
+            return x, z
+        else:
+            return x, None
 
 def load_zinc250k(score_fn = lambda x : x[0]):
     filename = '/cluster/sj1/bb_opt/chemical_vae/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv'
