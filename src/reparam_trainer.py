@@ -3,6 +3,10 @@ import torch
 import sys
 import torch.nn as nn
 import torch.distributions as tdist
+import random
+import hsic
+import numpy as np
+import utils
 
 def gaussian_kl(mean, std, prior_std, device):
     var = std**2
@@ -37,26 +41,23 @@ def predict_no_resize(X, model, qz, e, device='cuda', return_z=False):
     assert num_samples > 0
     N = X.shape[0]
     z = qz(e)
-    z = z.repeat([N, 1])
+    output, z = model(X, z, return_z)
 
-    X = expand_to_sample(X, num_samples)
-    X = torch.cat([X, z], dim=1)
-    output = model(X)
+    return output, z
 
-    if return_z:
-        return output, z
-    else:
-        return output
 
 def predict(X, model, qz, e, device='cuda'):
     num_samples = e.shape[0]
-    output = predict_no_resize(X, model, qz, e, device)
+    output, z = predict_no_resize(X, model, qz, e, device)
     return output.detach().view(-1, num_samples, 2)
 
-def compute_loss(params, X, Y, model, qz, e):
+
+def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
+    do_hsic = hsic_lambda > 1e-9
     N = X.shape[0]
     num_samples = params.num_samples
     batch_size = params.batch_size
+    assert num_samples == e.shape[0]
 
     if N > batch_size:
         N = X.shape[0]
@@ -70,6 +71,7 @@ def compute_loss(params, X, Y, model, qz, e):
     stdYhat = []
     log_prob_loss = 0
     kl_loss = 0
+    hsic_loss = 0
     loss = 0
     for bi in range(num_batches):
         bs = batches[bi]
@@ -81,9 +83,11 @@ def compute_loss(params, X, Y, model, qz, e):
         bX = bX.to(params.device)
         bY = bY.to(params.device)
 
-        bY = expand_to_sample(bY, num_samples)
+        bY = utils.collated_expand(bY, num_samples)
 
-        output = predict_no_resize(X, model, qz, e)
+        output, z = predict_no_resize(X, model, qz, e, return_z=do_hsic)
+        if z is not None:
+            z = z[:num_samples]
         mu = output[:, 0]
         std = output[:, 1]
 
@@ -96,15 +100,37 @@ def compute_loss(params, X, Y, model, qz, e):
         log_prob_loss += -torch.mean(output_dist.log_prob(bY))/num_batches
         #log_prob_loss += torch.mean((bY-mu)**2)/num_batches
 
+        if do_hsic:
+            assert z is not None
+            z_kernels = hsic.two_vec_mixrq_kernels(z, z)
+
+            random_d = np.random.choice(N, size=5)
+            #mu2 = mu.view(N, num_samples).transpose()
+            #mu_kernels = hsic.dimwise_mixrq_kernels(mu2)
+            for di in random_d:
+                s = di*num_samples
+                e = (di+1)*num_samples
+                mu2 = mu[s:e]
+                mu_kernels = hsic.two_vec_mixrq_kernels(mu2, mu2)
+                kernels = torch.cat([mu_kernels, z_kernels], dim=-1)
+                total_hsic = hsic.total_hsic(kernels)
+                #hsic_loss_vec[di] = total_hsic
+                hsic_loss += total_hsic/(num_batches*len(random_d))
+
+        loss += -hsic_lambda*hsic_loss
         loss += log_prob_loss
         muYhat += [mu]
         stdYhat += [std]
+
     kl_loss += gaussian_kl(qz.mu_z, qz.std_z, params.prior_std, params.device)
     loss += kl_loss
 
     muYhat = torch.cat(muYhat, dim=0)
     stdYhat = torch.cat(stdYhat, dim=0)
-    return loss, log_prob_loss.item(), kl_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
+    if do_hsic:
+        return loss, log_prob_loss.item(), kl_loss.item(), hsic_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
+    else:
+        return loss, log_prob_loss.item(), kl_loss.item(), muYhat.view(N, -1), stdYhat.view(N, -1)
 
 def generate_prior_samples(num_samples, e_dist, device='cuda'):
     e = []

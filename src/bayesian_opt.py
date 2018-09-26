@@ -859,7 +859,6 @@ def acquire_batch_es(
 
 
 def hsic_mves_loss(
-        params,
         X : torch.tensor, # (num_samples, ack_batch_size)
         opt_values_kernel_matrix : torch.tensor,
         kernel_fn,
@@ -902,14 +901,26 @@ def acquire_batch_via_grad_mves(
     opt_kernel_matrix = kernel_fn(opt_values, opt_values) # return is of shape (n=num_samples, n, 1)
 
     for step_iter in params.input_opt_num_iter:
-        preds = model_ensemble(input_tensor) # output should be (num_samples, ack_batch_size)
-        loss = hsic_mves_loss(params, input_tensor, opt_kernel_matrix, kernel_fn)
+        preds = model_ensemble(input_tensor, resize_at_end=True) # output should be (num_samples, ack_batch_size)
+        loss = hsic_mves_loss(input_tensor, opt_kernel_matrix, kernel_fn)
         
         optim.zero_grad()
         loss.backward()
         optim.step()
 
     return input_tensor
+
+def acquire_batch_mves_sid(
+        params,
+        model_ensemble : nn.Module,
+        opt_values : torch.tensor,
+        inputs : torch.tensor,
+        device : str = "cuda",
+)-> torch.tensor:
+
+    ack_batch_size = params.ack_batch_size
+    preds = model_ensemble(inputs, resize_at_end=True) # output should be (num_samples, ack_batch_size)
+    max_pred_idx = set(preds.argmax(1).detach().cpu().numpy())
 
 
 def acquire_batch_via_grad_ei(
@@ -927,12 +938,12 @@ def acquire_batch_via_grad_ei(
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
 
-    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    optim = torch.optim.Adam([input_tensor], lr=params.batch_opt_lr)
     kernel_fn = getattr(hsic, 'two_vec_' + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values) # return is of shape (n=num_samples, n, 1)
 
-    for step_iter in params.input_opt_num_iter:
-        preds = model_ensemble(input_tensor) # output should be (num_samples, ack_batch_size)
+    for step_iter in params.batch_opt_num_iter:
+        preds = model_ensemble(input_tensor) # output should be (num_samples*ack_batch_size)
         loss = -torch.mean(preds)
         
         optim.zero_grad()
