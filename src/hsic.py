@@ -35,7 +35,7 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     weights = weights or 1.0 / len(alphas)
     weights = weights * dist_matrix.new_ones(len(alphas))
 
-    logs = torch.log1p(sqdists / (2 * alphas))
+    logs = torch.log1p(dist_matrix / (2 * alphas))
     #     assert torch.isfinite(logs).all()
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
