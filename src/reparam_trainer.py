@@ -1,12 +1,23 @@
 
-import torch
 import sys
+import torch
 import torch.nn as nn
+from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import random
 import hsic
 import numpy as np
 import utils
+
+
+class GaussianQz(nn.Module):
+    def __init__(self, num_latent, prior_std=1):
+        super(GaussianQz, self).__init__()
+        self.mu_z = Parameter(torch.zeros(num_latent))
+        self.std_z = Parameter(torch.ones(num_latent)*prior_std)
+        
+    def forward(self, e):
+        return self.mu_z.unsqueeze(0) + e*self.std_z.unsqueeze(0)
 
 def gaussian_kl(mean, std, prior_std, device):
     assert std.ndimension() == 1
@@ -51,6 +62,12 @@ def predict(X, model, qz, e, device='cuda'):
     num_samples = e.shape[0]
     output, z = predict_no_resize(X, model, qz, e, device)
     return output.detach().view(-1, num_samples, 2)
+
+
+def generate_ensemble_from_stochastic_net(model, z):
+    def forward(x, resize_at_end=False):
+        return model(x, z, resize_at_end)
+    return forward
 
 
 def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
