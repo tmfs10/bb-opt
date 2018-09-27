@@ -954,17 +954,16 @@ def hsic_mves_loss(
 
 def acquire_batch_via_grad_mves(
     params,
-    model_ensemble: nn.Module,
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
     opt_values: torch.tensor,
     input_shape: List[int],
     seed: torch.tensor = None,
-    device: str = "cuda",
 ) -> torch.tensor:
 
     ack_batch_size = params.ack_batch_size
     if seed is None:
         input_tensor = torch.randn(
-            [ack_batch_size] + input_shape, device=device, requires_grad=True
+            [ack_batch_size] + input_shape, device=params.device, requires_grad=True
         )
     else:
         assert seed.shape[0] == ack_batch_size
@@ -988,40 +987,41 @@ def acquire_batch_via_grad_mves(
 
 def acquire_batch_mves_sid(
         params,
-        model_ensemble : nn.Module,
+        model_ensemble: Callable[[torch.tensor], torch.tensor],
         opt_values : torch.tensor,
         inputs : torch.tensor,
         device : str = "cuda",
 )-> torch.tensor:
 
     ack_batch_size = params.ack_batch_size
-    preds = model_ensemble(inputs, resize_at_end=True) # output should be (num_samples, ack_batch_size)
+    preds = model_ensemble(inputs, resize_at_end=True) # (ack_batch_size, num_samples)
+    preds = preds.tranpose(0, 1)
     max_pred_idx = set(preds.argmax(1).detach().cpu().numpy())
 
 
 def acquire_batch_via_grad_ei(
     params,
-    model_ensemble: nn.Module,
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
     input_shape: List[int],
     seed: torch.tensor = None,
-    device: str = "cuda",
 ) -> torch.tensor:
 
     ack_batch_size = params.ack_batch_size
     if seed is None:
         input_tensor = torch.randn(
-            [ack_batch_size] + input_shape, device=device, requires_grad=True
+            [ack_batch_size] + input_shape, device=params.device, requires_grad=True
         )
     else:
         assert seed.shape[0] == ack_batch_size
-        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
+        input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
 
     optim = torch.optim.Adam([input_tensor], lr=params.batch_opt_lr)
     kernel_fn = getattr(hsic, 'two_vec_' + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values) # return is of shape (n=num_samples, n, 1)
 
     for step_iter in params.batch_opt_num_iter:
-        preds = model_ensemble(input_tensor, resize_at_end=True) # output should be (num_samples*ack_batch_size)
+        preds = model_ensemble(input_tensor, resize_at_end=True) # (ack_batch_size, num_samples)
+        preds = preds.tranpose(0, 1)
         loss = -torch.mean(preds)
 
         optim.zero_grad()
@@ -1031,22 +1031,34 @@ def acquire_batch_via_grad_ei(
     return input_tensor
 
 
-def optimize_model_input(params, input_shape, model_ensemble, seed=None):
-    ack_num_model_samples = params.ack_num_model_samples
+def optimize_model_input(
+    params, 
+    input_shape, 
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    seed=None,
+    hsic_diversity_lambda=0.
+):
+    ack_num_good_points = params.ack_num_good_points
     if seed is None:
         input_tensor = torch.randn(
-            [ack_num_model_samples] + input_shape, device=device, requires_grad=True
+            [ack_num_good_points] + input_shape, device=device, requires_grad=True
         )
     else:
-        assert seed.shape[0] == ack_num_model_samples
-        input_tensor = torch.tensor(seed, device=device, requires_grad=True).unsqueeze(
-            0
-        )
+        assert seed.ndimension() == 2
+        assert seed.shape[0] == ack_num_good_points
+        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
 
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     for step_iter in params.input_opt_num_iter:
-        preds = model_ensemble(input_tensor)
-        loss = -torch.sum(pred)
+        preds = model_ensemble(input_tensor) # (ack_batch_size, num_samples)
+        preds = preds.transpose(0, 1)
+
+        loss = -torch.mean(pred)
+
+        if hsic_diversity_lambda > 1e-9 and ack_num_good_points > 1:
+            kernels = hsic.dimwise_mixrq_kernels(preds)
+            total_hsic = hsic.total_hsic(kernels)
+            loss += hsic_diversity_lambda*total_hsic
 
         optim.zero_grad()
         loss.backward()
