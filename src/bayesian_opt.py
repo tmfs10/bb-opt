@@ -991,22 +991,19 @@ def acquire_batch_via_grad_mves(
 
 def acquire_batch_mves_sid(
         params,
-        model_ensemble: Callable[[torch.tensor], torch.tensor],
         opt_values : torch.tensor,
-        inputs : torch.tensor, # (num_points,)
+        preds : torch.tensor, # (num_samples, num_candidate_points)
+        skip_idx,
         mves_compute_batch_size,
         do_mean=False,
         device : str = "cuda",
 )-> torch.tensor:
 
-    preds = model_ensemble(inputs, resize_at_end=True) # (ack_batch_size, num_samples)
-    preds = preds.tranpose(0, 1)
     max_pred_idx = set(preds.argmax(1).detach().cpu().numpy())
 
     print('num_max_pred_idx:', len(max_pred_idx))
 
-    num_candidate_points = inputs.shape[0]
-    assert num_candidate_points == preds.shape[1]
+    num_candidate_points = preds.shape[1]
     num_samples = preds.shape[0]
 
     opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
@@ -1055,9 +1052,15 @@ def acquire_batch_mves_sid(
 
             total_hsic = hsic.total_hsic_paralle(kernels)
             assert total_hsic.ndimension() == 1
-            best_cur_idx = total_hsic.argmax()
+            sorted_idx = total_hsic.cpu().numpy().argsort()
 
-            if best_idx is None or best_hsic < total_hsic:
+            best_cur_idx = None
+            for idx in sorted_idx[::-1]:
+                if idx not in skip_idx:
+                    best_cur_idx = idx
+                    break
+
+            if not (best_cur_idx is None) and (best_idx is None or best_hsic < total_hsic):
                 best_idx = idx[best_cur_idx]
                 best_idx_dist_matrix = dist_matrix[best_cur_idx:best_cur_idx+1]
                 best_hsic = total_hsic
