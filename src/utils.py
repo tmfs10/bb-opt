@@ -199,3 +199,16 @@ def collated_expand(X, num_samples):
         [-1] + list(X.shape[2:])
     )
     return X
+
+def jointplot(predicted, true, title: str=""):
+    if isinstance(predicted, torch.Tensor):
+        predicted = predicted.detach().cpu().numpy()
+
+    if isinstance(true, torch.Tensor):
+        true = true.detach().cpu().numpy()
+
+    ax = sns.jointplot(predicted, true, s=3, alpha=0.5)
+    #ax = sns.regplot(predicted, true)
+    ax.set_axis_labels('Predicted', 'True')
+    ax.ax_marg_x.set_title(title)
+    return ax
