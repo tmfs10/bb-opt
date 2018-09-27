@@ -3,7 +3,7 @@ import sys
 from typing import Sequence, Callable, Optional, Union
 
 
-def sqdist(X):
+def sqdist(X, do_mean=False, collect=True):
     """
     X is of shape (n, d, k) or (n, d)
     return is of shape (n, n, d)
@@ -12,17 +12,27 @@ def sqdist(X):
         return (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
     else:
         assert X.ndimension() == 3
-        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
+        if not collect:
+            return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2) # (n, n, d, k)
+        if do_mean:
+            return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).mean(-1)
+        else:
+            return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
 
 
-def sqdist(X1, X2):
+def sqdist(X1, X2, do_mean=False, collect=True):
     assert X1.ndimension() == X2.ndimension()
     if X1.ndimension() == 2:
         return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
     else:
         # (n, d, k)
         assert X1.ndimension() == 3
-        return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).sum(-1)
+        if not collect:
+            return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2) # (n, n, d, k)
+        if do_mean:
+            return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).mean(-1)
+        else:
+            return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).sum(-1)
 
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
@@ -44,7 +54,7 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
 
-def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
     if X1.ndimension() == 1:
         X1 = X1.unsqueeze(-1).unsqueeze(-1)
     elif X1.ndimension() == 2:
@@ -58,11 +68,11 @@ def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=Non
     assert X1.ndimension() == 3
     assert X2.ndimension() == 3
 
-    dist_matrix = sqdist(X1, X2).unsqueeze(0)
+    dist_matrix = sqdist(X1, X2, do_mean).unsqueeze(0)
     return mixrbf_kernels(dist_matrix, bws, weights)
 
 
-def two_vec_mixrq_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+def two_vec_mixrq_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
     if X1.ndimension() == 1:
         X1 = X1.unsqueeze(-1).unsqueeze(-1)
     elif X1.ndimension() == 2:
@@ -76,7 +86,7 @@ def two_vec_mixrq_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None
     assert X1.ndimension() == 3
     assert X2.ndimension() == 3
 
-    dist_matrix = sqdist(X1, X2).unsqueeze(0)
+    dist_matrix = sqdist(X1, X2, do_mean).unsqueeze(0)
 
     # (n, n, 1)
     return mixrq_kernels(dist_matrix, bws, weights)
