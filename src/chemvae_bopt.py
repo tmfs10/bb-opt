@@ -23,9 +23,46 @@ def get_activation(act):
     elif act == 'tanh':
         return nn.Tanh
 
+class PropertyPredictorPaper(nn.Module):
+
+    def __init__(self, params):
+        super(PropertyPredictorPaper, self).__init__()
+        self.params = params
+        activation = get_activation(params.prop_activation)
+
+        num_inputs = params.prop_pred_num_input_features + params.prop_pred_num_random_inputs
+        net = [nn.Linear(num_inputs, 1000), activation()]
+        net += [nn.Dropout(0.2)]
+        net += [nn.Linear(1000, 1000), activation()]
+        net += [nn.Dropout(0.2)]
+        net += [nn.Linear(1000, 1)]
+
+        self.net = nn.ModuleList(net)
+
+    def forward(self, x, z, resize_at_end=False):
+        assert x.ndimension() == 2
+        num_samples = z.shape[0]
+        N = x.shape[0]
+
+        x = utils.collated_expand(x, num_samples)
+        z = z.repeat([N, 1])
+        x = torch.cat([x, z], dim=1)
+
+        for h in self.net:
+            x = h(x)
+
+        if resize_at_end:
+            x = x.view([N, num_samples]).transpose(0, 1)
+        return x
+
+    def input_shape(self):
+        return [self.params.prop_pred_num_input_features]
+
+
 class PropertyPredictor(nn.Module):
 
     def __init__(self, params):
+        super(PropertyPredictor, self).__init__()
         self.params = params
         activation = get_activation(params.prop_activation)
 
@@ -48,31 +85,40 @@ class PropertyPredictor(nn.Module):
 
                 num_inputs = num_outputs
 
-        net += [nn.Linear(num_inputs, 3)]
+        net += [nn.Linear(num_inputs, 1)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z, resize_at_end=False):
+    def forward(self, x, z, resize_at_end=False, all_pairs=True):
         assert x.ndimension() == 2
         num_samples = z.shape[0]
         N = x.shape[0]
 
-        x = utils.collated_expand(x, num_samples)
-        z = z.repeat([N, 1])
-        x = torch.cat([x, z], dim=1)
+        if all_pairs:
+            x = utils.collated_expand(x, num_samples)
+            z = z.repeat([N, 1])
+            x = torch.cat([x, z], dim=1)
 
-        for h in self.net:
-            x = h(x)
+            for h in self.net:
+                x = h(x)
 
-        if resize_at_end:
-            x = x.view([N, num_samples]).transpose()
-        return x
+            if resize_at_end:
+                x = x.view([N, num_samples]).transpose(0, 1)
+            return x
+        else:
+            assert num_samples == N
+            x = torch.cat([x, z], dim=1)
+
+            for h in self.net:
+                x = h(x)
+            return x
 
     def input_shape(self):
-        return self.params.prop_pred_num_input_features
+        return [self.params.prop_pred_num_input_features]
 
 
 def train(
         params,
+        num_latent_samples,
         data,
         model,
         qz,
@@ -88,13 +134,18 @@ def train(
 
     train_X, train_Y, val_X, val_Y = data
 
-    N = train_inputs.shape[0]
+    N = train_X.shape[0]
     num_batches = N//params.train_batch_size
+    print("training:")
+    print(str(N) + " samples")
+    print(str(params.train_batch_size) + " batch_size")
+    print(str(num_batches) + " num_batches")
+    print(str(params.num_epochs) + " num_epochs")
 
     model_parameters = []
     for m in [model, qz]:
         model_parameters += list(m.parameters())
-    batches, optim = reparam.init_train(params, model_parameters, train_inputs, train_labels)
+    batches, optim = reparam.init_train(params.train_batch_size, params.train_lr, model_parameters, train_X, train_Y)
 
     progress = tnrange(params.num_epochs)
 
@@ -108,8 +159,8 @@ def train(
             bY = train_Y[bs:be]
 
             for k in range(1):
-                e = reparam.generate_prior_samples(params.num_samples, e_dist)
-                loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, bX, bY, model, qz, e, hsic_lambda=params.hsic_train_lambda)
+                e = reparam.generate_prior_samples(num_latent_samples, e_dist)
+                loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, params.train_batch_size, num_latent_samples, bX, bY, model, qz, e, hsic_lambda=params.hsic_train_lambda)
 
                 losses += [log_prob_loss]
                 kl_losses += [kl_loss]
@@ -119,33 +170,46 @@ def train(
                 loss.backward()
                 optim.step()
 
-        e = reparam.generate_prior_samples(params.num_samples, e_dist)
+        e = reparam.generate_prior_samples(num_latent_samples, e_dist)
         preds = reparam.predict(train_X, model, qz, e)[:, :, 0].mean(1)
-        assert preds.shape == train_labels.shape, str(preds.shape) + " == " + str(train_labels.shape)
+        assert preds.shape == train_Y.shape, str(preds.shape) + " == " + str(train_Y.shape)
 
-        corrs.append(kendalltau(preds, train_labels)[0])
+        corrs.append(kendalltau(preds, train_Y)[0])
 
         preds = reparam.predict(val_X, model, qz, e)[:, :, 0].mean(1)
-        assert preds.shape == val_labels.shape
+        assert preds.shape == val_Y.shape
 
-        val_corr = kendalltau(preds, val_labels)[0]
+        val_corr = kendalltau(preds, val_Y)[0]
 
         val_corrs.append(val_corr)
         progress.set_description(f"Corr: {val_corr:.3f}")
-        progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1]})
+        progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1], 'train_corr' : corrs[-1]})
 
     return losses, kl_losses, hsic_losses, val_losses, corrs, val_corrs
 
 
-def acquire_properties(encoded, vae, device='cuda'):
-    batch_size = encoded.shape[0]
-    decoded = vae.decode(encoded)
-    smiles = vae.hot_to_smiles(decoded, strip=True)
+def z_to_smiles(vae, z, decode_attempts=1000, noise_norm=1.0):
+    Z = np.tile(z, (decode_attempts, 1))
+    Z = vae.perturb_z(Z, noise_norm)
+    X = vae.decode(Z)
+    smiles = [k for k in vae.hot_to_smiles(X, strip=True) if mu.good_smiles(k)]
+    return smiles
+
+
+def acquire_properties(encoded, vae, decode_attempts=1000, noise=0.1, device='cuda'):
+    assert isinstance(encoded, np.ndarray)
+    smiles = z_to_smiles(vae, encoded, decode_attempts=decode_attempts, noise_norm=noise)
+    batch_size = len(smiles)
 
     props = torch.zeros([batch_size, 3], device=device)
-    assert len(smiles) == batch_size
+    props = []
     for i in range(batch_size):
-        props[i][:] = utils.all_scores(smiles[i])
+        try:
+            scores = utils.all_scores(smiles[i])
+            props += [scores]
+        except Exception as ex:
+            print(ex)
+    props = torch.tensor(props, device=device)
     return props
 
 
@@ -160,12 +224,14 @@ def load_zinc250k(num_to_load=0, score_fn=None, batch_size=128):
             zinc250k[1] += [[float(k) for k in line[1:]]]
     zinc250k[1] = np.array(zinc250k[1], dtype=np.float32)
     assert zinc250k[1].shape[1] == 3
-    labels = np.array([score_fn(k) for k in zinc250k[1]])
+    labels = None
 
     if score_fn is not None:
+        labels = np.array([score_fn(k) for k in zinc250k[1]])
         sort_idx = np.argsort(labels)
         zinc250k[0] = [zinc250k[0][i] for i in sort_idx]
         zinc250k[1] = zinc250k[1][sort_idx, :]
+        labels = labels[sort_idx]
 
     if num_to_load > 0:
         zinc250k[0] = zinc250k[0][:num_to_load]
@@ -200,7 +266,6 @@ def load_zinc250k(num_to_load=0, score_fn=None, batch_size=128):
         bs = be
     smiles_z = np.concatenate(smiles_z, axis=0)
     assert len(smiles_z.shape) == 2, str(smiles_z.shape)
-    print(smiles_z.shape)
 
     print("processed encoded representation")
 
