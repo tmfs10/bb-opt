@@ -3,8 +3,6 @@
 
 import torch
 import torch.nn.functional as F
-from .global_constants import _eps
-from . import global_constants as gl
 
 
 def recon_loss(x, x_recon):
@@ -38,7 +36,7 @@ def sq_sum(t):
     return 2 * torch.sum(t**2)
 
 def tensor_all(x):
-    return (1-(x.type(gl.LongTensor))).sum().item() < 1e-5
+    return (1-(x.long())).sum().item() < 1e-5
 
 def tensor_any(x):
     return x.sum().item() > 1e-5
