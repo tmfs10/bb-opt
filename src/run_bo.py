@@ -27,6 +27,7 @@ from bb_opt.src.bayesian_opt import (
     partial_train_model_bnn,
 )
 from bb_opt.src.deep_ensemble import get_model_deep_ensemble, train_model_deep_ensemble
+from bb_opt.src.reparam_trainer import get_model_reparam, train_model_reparam
 from bb_opt.src.hsic import mixrq_kernels, mixrbf_kernels
 from bb_opt.src.utils import get_path
 
@@ -35,6 +36,7 @@ models = {
     "nn": get_model_nn,
     "bnn": get_model_bnn,
     "de": get_model_deep_ensemble,
+    "reparam": get_model_reparam,
 }
 
 acquisition_functions = {
@@ -54,6 +56,7 @@ train_functions = {
     "nn": train_model_nn,
     "bnn": train_model_bnn,
     "de": train_model_deep_ensemble,
+    "reparam": train_model_reparam,
 }
 
 partial_train_functions = {
@@ -61,6 +64,7 @@ partial_train_functions = {
     "nn": None,
     "bnn": partial_train_model_bnn,
     "de": None,
+    "reparam": None,
 }
 
 
