@@ -27,7 +27,7 @@ from bb_opt.src.bayesian_opt import (
     partial_train_model_bnn,
 )
 from bb_opt.src.deep_ensemble import get_model_deep_ensemble, train_model_deep_ensemble
-from bb_opt.src.hsic import dimwise_mixrq_kernels, dimwise_mixrbf_kernels
+from bb_opt.src.hsic import mixrq_kernels, mixrbf_kernels
 from bb_opt.src.utils import get_path
 
 models = {
@@ -176,7 +176,7 @@ def main():
         acquisition_args["mi_estimator"] = mi_estimator
 
         if mi_estimator == "HSIC":
-            kernels = {"rq": dimwise_mixrq_kernels, "rbf": dimwise_mixrbf_kernels}
+            kernels = {"rq": mixrq_kernels, "rbf": mixrbf_kernels}
             acquisition_args["kernel"] = args.kernel
 
         if af_key not in ("es", "mves"):
