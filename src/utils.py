@@ -1,3 +1,4 @@
+
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import axes3d
 import seaborn as sns
@@ -149,7 +150,6 @@ def load_pyro_model(base_path: str, optimizer):
 
 
 def train_val_test_split(n, split, shuffle=True):
-
     if type(n) == int:
         idx = np.arange(n)
     else:
@@ -207,16 +207,3 @@ def collated_expand(X, num_samples):
         [-1] + list(X.shape[2:])
     )
     return X
-
-def jointplot(predicted, true, title: str=""):
-    if isinstance(predicted, torch.Tensor):
-        predicted = predicted.detach().cpu().numpy()
-
-    if isinstance(true, torch.Tensor):
-        true = true.detach().cpu().numpy()
-
-    ax = sns.jointplot(predicted, true, s=3, alpha=0.5)
-    #ax = sns.regplot(predicted, true)
-    ax.set_axis_labels('Predicted', 'True')
-    ax.ax_marg_x.set_title(title)
-    return ax
