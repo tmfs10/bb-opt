@@ -39,20 +39,10 @@ class PropertyPredictorPaper(nn.Module):
 
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z, resize_at_end=False):
-        assert x.ndimension() == 2
-        num_samples = z.shape[0]
-        N = x.shape[0]
-
-        x = utils.collated_expand(x, num_samples)
-        z = z.repeat([N, 1])
+    def forward(self, x, z):
         x = torch.cat([x, z], dim=1)
-
         for h in self.net:
             x = h(x)
-
-        if resize_at_end:
-            x = x.view([N, num_samples]).transpose(0, 1)
         return x
 
     def input_shape(self):
@@ -88,29 +78,11 @@ class PropertyPredictor(nn.Module):
         net += [nn.Linear(num_inputs, 1)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z, resize_at_end=False, all_pairs=True):
-        assert x.ndimension() == 2
-        num_samples = z.shape[0]
-        N = x.shape[0]
-
-        if all_pairs:
-            x = utils.collated_expand(x, num_samples)
-            z = z.repeat([N, 1])
-            x = torch.cat([x, z], dim=1)
-
-            for h in self.net:
-                x = h(x)
-
-            if resize_at_end:
-                x = x.view([N, num_samples]).transpose(0, 1)
-            return x
-        else:
-            assert num_samples == N
-            x = torch.cat([x, z], dim=1)
-
-            for h in self.net:
-                x = h(x)
-            return x
+    def forward(self, x, z):
+        x = torch.cat([x, z], dim=1)
+        for h in self.net:
+            x = h(x)
+        return x
 
     def input_shape(self):
         return [self.params.prop_pred_num_input_features]
