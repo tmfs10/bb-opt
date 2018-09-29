@@ -22,9 +22,9 @@ def sqdist(X1, X2=None, do_mean=False, collect=True):
                 return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
             else:
                 sq = ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2)
-                assert not ops.is_inf(sq)
-                assert not ops.is_nan(sq)
-                assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
+                #assert not ops.is_inf(sq)
+                #assert not ops.is_nan(sq)
+                #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
                 return sq.sum(-1)
     else:
         assert X1.ndimension() == X2.ndimension()
@@ -43,20 +43,20 @@ def sqdist(X1, X2=None, do_mean=False, collect=True):
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
-    assert (dist_matrix.view(-1) <= 0).sum() == 0
+    #assert (dist_matrix.view(-1) <= 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
     bws = dist_matrix.new_tensor(bws).view(-1, 1, 1, 1)
     weights = weights or 1 / len(bws)
     weights = weights * dist_matrix.new_ones(len(bws))
 
     parts = torch.exp(dist_matrix / (-2 * bws ** 2))
-    assert (parts.view(-1) <= 0).sum() == 0
+    #assert (parts.view(-1) <= 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, parts))
 
 
 def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
-    assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
+    #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
     alphas = dist_matrix.new_tensor(alphas).view(-1, 1, 1, 1)
     weights = weights or 1.0 / len(alphas)
@@ -66,7 +66,7 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     #     assert torch.isfinite(logs).all()
     assert not ops.is_inf(logs)
     assert not ops.is_nan(logs)
-    assert (logs.contiguous().view(-1) < 0).sum() == 0
+    #assert (logs.contiguous().view(-1) < 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
 
