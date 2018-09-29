@@ -42,10 +42,10 @@ def tensor_any(x):
     return x.sum().item() > 1e-5
 
 def is_inf(x):
-    return tensor_all(x == float('inf'))
+    return tensor_any(x == float('inf')) and tensor_any(x == -float('inf'))
 
 def is_nan(x):
-    return tensor_all(x != x)
+    return tensor_any(x != x)
 
 def is_finite(x):
     return tensor_all((x != float('inf')) * (x == x))
