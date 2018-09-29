@@ -7,9 +7,14 @@ import torch.distributions as tdist
 import random
 import hsic
 import numpy as np
-import utils
 import ops
 
+def collated_expand(X, num_samples):
+    X = X.unsqueeze(1)
+    X = X.repeat([1] + [num_samples] + [1] * (len(X.shape) - 2)).view(
+        [-1] + list(X.shape[2:])
+    )
+    return X
 
 class GaussianQz(nn.Module):
     def __init__(self, num_latent, prior_std=1):
@@ -44,31 +49,100 @@ def expand_to_sample(X, num_samples):
     X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
     return X
 
-def predict_no_resize(X, model, qz, e, device='cuda'):
+def predict_no_resize(X, model, qz, e, device='cuda', output_device='cuda', batch_size=0, expansion_size=0, all_pairs=True):
     model = model.to(device)
-    X = X.to(device)
     qz = qz.to(device)
+    X = X.to(device)
     e = e.to(device)
 
     num_samples = e.shape[0]
     assert num_samples > 0
     N = X.shape[0]
     z = qz(e)
-    output = model(X, z)
 
+    num_samples = z.shape[0]
+    N = X.shape[0]
+
+    if batch_size == 0:
+        if all_pairs:
+            X = collated_expand(X, num_samples)
+            z2 = z.repeat([N, 1])
+        else:
+            assert N == num_samples
+            z2 = z
+        output = model(X, z2)
+    else:
+        assert batch_size > 0
+
+        if not all_pairs:
+            num_total = X.shape[0]
+            num_batches = num_total//batch_size + 1
+            output = []
+            for bi in range(num_batches):
+                bs = bi*batch_size
+                be = min((bi+1)*batch_size, num_total)
+                output += [model(X[bs:be], z[bs:be]).detach().to(output_device)]
+            output = torch.cat(output, dim=0)
+        else:
+            if expansion_size == 0:
+                X = collated_expand(X, num_samples)
+                z2 = z.repeat([N, 1])
+
+                num_total = X.shape[0]
+                num_batches = num_total//batch_size + 1
+
+                output = []
+                for bi in range(num_batches):
+                    bs = bi*batch_size
+                    be = min((bi+1)*batch_size, num_total)
+
+                    if be <= bs:
+                        continue
+
+                    output += [model(X[bs:be], z2[bs:be]).detach().to(output_device)]
+                output = torch.cat(output, dim=0)
+            else:
+                num_expansion_batches = N//expansion_size + 1
+
+                output = []
+                for ebi in range(num_expansion_batches):
+                    ebs = ebi*expansion_size
+                    ebe = min((ebi+1)*expansion_size, N)
+
+                    if ebe <= ebs:
+                        continue
+
+                    N2 = ebe-ebs
+
+                    X2 = collated_expand(X[ebs:ebe], num_samples)
+                    z2 = z.repeat([N2, 1])
+
+                    num_total = X2.shape[0]
+                    num_batches = num_total//batch_size + 1
+
+                    for bi in range(num_batches):
+                        bs = bi*batch_size
+                        be = min((bi+1)*batch_size, num_total)
+
+                        if be <= bs:
+                            continue
+                        output += [model(X2[bs:be], z2[bs:be]).detach().to(output_device)]
+                output = torch.cat(output, dim=0)
     return output, z
 
 
-def predict(X, model, qz, e, device='cuda'):
+def predict(X, model, qz, e, device='cuda', output_device='cuda', batch_size=0, expansion_size=0, all_pairs=True):
     num_samples = e.shape[0]
-    output, z = predict_no_resize(X, model, qz, e, device)
+    output, z = predict_no_resize(X, model, qz, e, device=device, batch_size=batch_size, output_device=output_device, expansion_size=expansion_size, all_pairs=all_pairs)
     output_non_batch_shape = list(output.shape[1:])
-    return output.detach().view([-1, num_samples] + output_non_batch_shape)
+    output = output.detach().view([-1, num_samples] + output_non_batch_shape)
+    assert output.shape[1] == num_samples
+    return output
 
 
-def generate_ensemble_from_stochastic_net(model, z):
+def generate_ensemble_from_stochastic_net(model, qz, e):
     def forward(x, *args, **kwargs):
-        return model(x, z, *args, **kwargs)
+        return predict(x, model, qz, e, *args, **kwargs)
     return forward
 
 
@@ -101,7 +175,7 @@ def compute_loss(params, batch_size, num_samples, X, Y, model, qz, e, hsic_lambd
         bX = bX.to(params.device)
         bY = bY.to(params.device)
 
-        bY = utils.collated_expand(bY, num_samples)
+        bY = collated_expand(bY, num_samples)
 
         output, z = predict_no_resize(X, model, qz, e)
         assert z.shape[0] == num_samples
