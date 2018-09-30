@@ -55,6 +55,7 @@ def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
 
 
 def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
+    # input is (n, n, d), output is also (n, n, d)
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
     #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
