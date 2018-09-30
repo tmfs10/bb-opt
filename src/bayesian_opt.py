@@ -44,6 +44,7 @@ from bb_opt.src.hsic import (
 )
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
+import ops
 
 def get_path(*path_segments):
     return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
@@ -1009,6 +1010,7 @@ def ei_diversity_selection_hsic(
     skip_idx_ei,
     num_ei=100,
     device = 'cuda',
+    ucb=False,
 ):
     ack_batch_size = params.ack_batch_size
     kernel_fn = getattr(hsic, params.mves_kernel_fn)
@@ -1034,14 +1036,23 @@ def ei_diversity_selection_hsic(
     normalizer = torch.log(hsic.total_hsic(self_kernel_matrix)) 
 
     all_dist_matrix = hsic.sqdist(preds) # (n, n, m)
-    self_kernel_matrix = kernel_fn(all_dist_matrix).permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
+    all_kernel_matrix = kernel_fn(all_dist_matrix) # (n, n, m)
+    self_kernel_matrix = all_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
     hsic_var = hsic.total_hsic_parallel(self_kernel_matrix)
     hsic_logvar = torch.log(hsic_var).view(-1)
 
     while len(chosen_idx) < ack_batch_size:
-        dist_matrix = all_dist_matrix + batch_dist_matrix
-        kernel_matrix = kernel_fn(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
-        hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
+        if ucb:
+            dist_matrix = all_dist_matrix + batch_dist_matrix
+            kernel_matrix = kernel_fn(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
+            hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
+        else:
+            a = len(chosen_idx)
+            m = all_kernel_matrix.shape[-1]
+            kernel_matrix = all_kernel_matrix[:, :, chosen_idx].unsqueeze(-1).repeat([1, 1, 1, m]).permute([3, 0, 1, 2]) # (m, n, n, a)
+            kernel_matrix = torch.cat([kernel_matrix, all_kernel_matrix.permute([2, 0 ,1]).unsqueeze(-1)], dim=-1)
+            hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
+
         normalizer = torch.exp((hsic_logvar + hsic_logvar[chosen_idx].sum())/(len(chosen_idx)+1))
         hsic_corr = hsic_covar/normalizer
 
@@ -1066,6 +1077,9 @@ def ei_diversity_selection_detk(
     skip_idx_ei,
     num_ei=100,
     device = 'cuda',
+    do_correlation=True,
+    add_I=False,
+    do_kernel=True,
 ):
     ack_batch_size = params.ack_batch_size
 
@@ -1080,9 +1094,23 @@ def ei_diversity_selection_detk(
     ei_sortidx = np.array(temp)
     ei = ei[ei_sortidx]
     ei -= ei.min().item()
-    preds = preds[:, ei_sortidx].cpu().numpy()
-    covar_matrix = np.cov(preds)
-    covar_matrix = torch.FloatTensor(covar_matrix, device=device) # (num_candidate_points, num_candidate_points)
+
+    if do_kernel:
+        preds = preds[:, ei_sortidx]
+        kernel_fn = getattr(hsic, params.mves_kernel_fn)
+        dist_matrix = hsic.sqdist(preds.transpose(0, 1).unsqueeze(1)) # (m, m, 1)
+        covar_matrix = kernel_fn(dist_matrix)[:, :, 0] # (m, m)
+    else:
+        preds = preds[:, ei_sortidx].cpu().numpy()
+        covar_matrix = np.cov(preds)
+        covar_matrix = torch.FloatTensor(covar_matrix).to(device) # (num_candidate_points, num_candidate_points)
+
+    if add_I:
+        covar_matrix += torch.eye(covar_matrix.shape[0])
+    if do_correlation:
+        variances = torch.diag(covar_matrix)
+        normalizer = torch.sqrt(variances.unsqueeze(0)*variances.unsqueeze(1))
+        covar_matrix /= normalizer
 
     chosen_org_idx = [ei_sortidx[-1]]
     chosen_idx = [num_ei-1]
@@ -1096,12 +1124,12 @@ def ei_diversity_selection_detk(
                 continue
 
             cur_chosen = torch.LongTensor(chosen_idx+[idx])
-            logdet_matrix = covar_matrix[cur_chosen, :][:, cur_chosen]
-            logdet = torch.logdet(logdet_matrix).item()
+            logdet = torch.logdet(covar_matrix[cur_chosen, :][:, cur_chosen]).item()
             K_values += [logdet]
 
         K_values = np.array(K_values)
-        K_ucb = ei[:-1]*K_values
+
+        K_ucb = ei[:-1]/K_values
         K_ucb_sort_idx = K_ucb.argsort()
 
         choice = ei_sortidx[K_ucb_sort_idx[-1]]
@@ -1112,25 +1140,34 @@ def ei_diversity_selection_detk(
 
 
 def acquire_batch_mves_sid(
-        params,
-        opt_values : torch.tensor,
-        candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
-        skip_idx,
-        mves_compute_batch_size,
-        ack_batch_size,
-        greedy_ordering=False,
-        do_mean=False,
-        device : str = "cuda",
-        true_labels=None,
+    params,
+    opt_values : torch.tensor,
+    candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
+    skip_idx,
+    mves_compute_batch_size,
+    ack_batch_size,
+    greedy_ordering=False,
+    do_mean=False,
+    device : str = "cuda",
+    true_labels=None,
+    pred_weighting=False,
+    normalize=True,
+    divide_by_std=False,
 )-> torch.tensor:
 
     opt_values = opt_values.to(device)
 
     num_candidate_points = candidate_points_preds.shape[1]
     num_samples = candidate_points_preds.shape[0]
+    min_pred = candidate_points_preds.min().to(device)
+    ei = candidate_points_preds.mean(dim=0).to(device)
+    ei = ei-ei.min()+0.1
 
     kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, do_mean=do_mean).detach()  # shape (n=num_samples, n, 1)
+
+    if normalize:
+        opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2])).detach()).view(-1)
     assert opt_kernel_matrix.ndimension() == 3
     assert opt_kernel_matrix.shape[0] == num_samples, str(opt_kernel_matrix.shape) + "[0] == " + str(num_samples)
     assert opt_kernel_matrix.shape[1] == num_samples, str(opt_kernel_matrix.shape) + "[1] == " + str(num_samples)
@@ -1140,7 +1177,7 @@ def acquire_batch_mves_sid(
     batch_idx = set()
     remaining_idx_set = set(range(num_candidate_points))
     remaining_idx_set = remaining_idx_set.difference(skip_idx)
-    batch_dist_matrix = None # (1, num_samples, num_samples)
+    batch_dist_matrix = None # (num_samples, num_samples, 1)
 
     regular_batch_opt_kernel_matrix = opt_kernel_matrix.repeat([mves_compute_batch_size, 1, 1, 1]) # (mves_compute_batch_size, n, n, 1)
     while len(batch_idx) < ack_batch_size:
@@ -1152,11 +1189,11 @@ def acquire_batch_mves_sid(
         best_hsic = None
         
         num_remaining = len(remaining_idx_set)
-        num_batches = num_remaining // mves_compute_batch_size
+        num_batches = num_remaining // mves_compute_batch_size + 1
         remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
         idx_hsic_values = []
 
-        for bi in range(num_batches+1):
+        for bi in range(num_batches):
             bs = bi*mves_compute_batch_size
             be = min((bi+1)*mves_compute_batch_size, num_remaining)
             cur_batch_size = be-bs
@@ -1164,33 +1201,57 @@ def acquire_batch_mves_sid(
                 continue
             idx = remaining_idx[bs:be]
 
-            pred = candidate_points_preds[:, idx].to(device) # (num_samples, mves_compute_batch_size)
+            pred = candidate_points_preds[:, idx].to(device) # (num_samples, cur_batch_size)
             dist_matrix = hsic.sqdist(pred, do_mean=do_mean) # (num_samples, num_samples, cur_batch_size)
+
+            if pred_weighting == 1:
+                predsqrt_matrix = pred-min_pred + 0.1
+                predsqrt_matrix = torch.sqrt(predsqrt_matrix.unsqueeze(0))*torch.sqrt(predsqrt_matrix.unsqueeze(1))
+                assert predsqrt_matrix.shape == dist_matrix.shape
+                dist_matrix /= predsqrt_matrix
+            elif pred_weighting == 2:
+                ei_batch = ei[idx].unsqueeze(0).unsqueeze(0)
+                dist_matrix /= ei_batch
+
             assert dist_matrix.ndimension() == 3
             assert dist_matrix.shape[2] == cur_batch_size, str(dist_matrix.shape) + "[2] == " + str(cur_batch_size)
             assert dist_matrix.shape[0] == num_samples, str(dist_matrix.shape) + "[0] == " + str(num_samples)
             assert dist_matrix.shape[1] == num_samples, str(dist_matrix.shape) + "[1] == " + str(num_samples)
 
-            dist_matrix = dist_matrix.permute([2, 0, 1]) # (cur_batch_size, num_samples, num_samples)
             if batch_dist_matrix is not None:
-                dist_matrix += batch_dist_matrix
+                dist_matrix += batch_dist_matrix # (n, n, m)
+
+            batch_kernel_matrix = getattr(hsic, params.mves_kernel_fn)(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1) # (m, n, n, 1)
+            assert list(batch_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 1], str(batch_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
+
+            if normalize:
+                self_kernel_matrix = batch_kernel_matrix.repeat([1, 1, 1, 2]).detach() # (m, n, n, 2)
+                assert list(self_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 2], str(self_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
+
+                hsic_logvar = torch.log(hsic.total_hsic_parallel(self_kernel_matrix).detach()).view(-1)
+                assert hsic_logvar.shape[0] == cur_batch_size
+                assert not ops.isinf(hsic_logvar)
+                assert not ops.isnan(hsic_logvar)
 
             if cur_batch_size == mves_compute_batch_size:
-                kernels = getattr(hsic, params.mves_kernel_fn)(dist_matrix).detach().unsqueeze(-1)
-                kernels = torch.cat([kernels, regular_batch_opt_kernel_matrix], dim=-1)
+                kernels = torch.cat([batch_kernel_matrix, regular_batch_opt_kernel_matrix], dim=-1)
             else:
                 assert cur_batch_size < mves_compute_batch_size
                 last_batch_opt_kernel_matrix = regular_batch_opt_kernel_matrix[:cur_batch_size]
-                kernels = getattr(hsic, params.mves_kernel_fn)(dist_matrix).detach().unsqueeze(-1)
-                kernels = torch.cat([kernels, last_batch_opt_kernel_matrix], dim=-1)
+                kernels = torch.cat([batch_kernel_matrix, last_batch_opt_kernel_matrix], dim=-1)
 
-            assert kernels.shape[-1] == 2, str(kernels.shape)
-            assert kernels.shape[0] == cur_batch_size, str(kernels.shape)
-            assert kernels.shape[1] == kernels.shape[2], str(kernels.shape) + "[1] == " + str(kernels.shape) + "[2]"
-            assert kernels.shape[1] == num_samples, str(kernels.shape) + "[1] == " + str(num_samples)
+            assert list(kernels.shape) == [cur_batch_size, num_samples, num_samples, 2], str(kernels.shape)
 
             total_hsic = hsic.total_hsic_parallel(kernels)
-            assert total_hsic.ndimension() == 1
+            assert list(total_hsic.shape) == [cur_batch_size], str(total_hsic.shape)
+
+            if normalize:
+                if divide_by_std:
+                    normalizer = torch.exp(0.5 * hsic_logvar + opt_normalizer)
+                else:
+                    normalizer = torch.exp(0.5 * (hsic_logvar + opt_normalizer))
+                total_hsic /= normalizer
+
             sorted_idx = total_hsic.cpu().numpy().argsort()
             del kernels
             gc.collect()
@@ -1201,7 +1262,7 @@ def acquire_batch_mves_sid(
 
             if best_idx is None or best_hsic < total_hsic[best_cur_idx]:
                 best_idx = idx[best_cur_idx].item()
-                best_idx_dist_matrix = dist_matrix[best_cur_idx:best_cur_idx+1].detach()
+                best_idx_dist_matrix = dist_matrix[:, :, best_cur_idx:best_cur_idx+1].detach()
                 best_hsic = total_hsic[best_cur_idx].item()
 
         if greedy_ordering:
