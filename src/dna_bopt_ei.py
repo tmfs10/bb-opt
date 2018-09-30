@@ -18,8 +18,8 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 7:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack batch size> <ei diversity measure>")
+if len(sys.argv) < 8:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack batch size> <ei diversity measure> <ucb>")
     sys.exit(1)
 
 def train_val_test_split(n, split, shuffle=True):
@@ -54,6 +54,7 @@ Params = namedtuple('params', [
     'device',
     'exp_noise_samples',
     'train_lr',
+    'ucb',
     
     'num_train_latent_samples',
     'num_latent_vars',
@@ -93,6 +94,7 @@ params = Params(
     device='cuda',
     num_epochs=int(sys.argv[2]),
     train_lr=float(sys.argv[3]),
+    ucb=float(sys.argv[7]),
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -199,6 +201,8 @@ for ack_iter in range(10):
 
     if "var" in params.ei_diversity:
         ei_sortidx = np.argsort(ei/std)
+    elif "ucb" in params.ei_diversity:
+        ei_sortidx = np.argsort(ei + params.ucb*std)
     else:
         ei_sortidx = np.argsort(ei)
 
