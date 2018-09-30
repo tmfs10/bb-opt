@@ -44,8 +44,14 @@ def tensor_any(x):
 def is_inf(x):
     return tensor_any(x == float('inf')) and tensor_any(x == -float('inf'))
 
+def isinf(x):
+    return is_inf(x)
+
 def is_nan(x):
     return tensor_any(x != x)
+
+def isnan(x):
+    return is_nan(x)
 
 def is_finite(x):
     return tensor_all((x != float('inf')) * (x == x))
