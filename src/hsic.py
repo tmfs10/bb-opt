@@ -1,49 +1,77 @@
 import torch
+import numpy as np
 import sys
 from typing import Sequence, Callable, Optional, Union
+import ops
 
 
-def sqdist(X):
-    """
-    X is of shape (n, d, k) or (n, d)
-    return is of shape (n, n, d)
-    """
-    if X.ndimension() == 2:
-        return (X.unsqueeze(0) - X.unsqueeze(1)) ** 2
+def sqdist(X1, X2=None, do_mean=False, collect=True):
+    if X2 is None:
+        """
+        X is of shape (n, d, k) or (n, d)
+        return is of shape (n, n, d)
+        """
+        if X1.ndimension() == 2:
+            return (X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2
+        else:
+            assert X1.ndimension() == 3, X1.shape
+            if not collect:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
+
+            if do_mean:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                sq = ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2)
+                #assert not ops.is_inf(sq)
+                #assert not ops.is_nan(sq)
+                #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
+                return sq.sum(-1)
     else:
-        assert X.ndimension() == 3
-        return ((X.unsqueeze(0) - X.unsqueeze(1)) ** 2).sum(-1)
-
-
-def sqdist(X1, X2):
-    assert X1.ndimension() == X2.ndimension()
-    if X1.ndimension() == 2:
-        return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
-    else:
-        assert X1.ndimension() == 3
-        return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
+        assert X1.ndimension() == X2.ndimension()
+        if X1.ndimension() == 2:
+            return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
+        else:
+            # (n, d, k)
+            assert X1.ndimension() == 3
+            if not collect:
+                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2) # (n, n, d, k)
+            if do_mean:
+                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).sum(-1)
 
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+    assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
+    #assert (dist_matrix.view(-1) <= 0).sum() == 0
+    dist_matrix = dist_matrix.unsqueeze(0)
     bws = dist_matrix.new_tensor(bws).view(-1, 1, 1, 1)
     weights = weights or 1 / len(bws)
     weights = weights * dist_matrix.new_ones(len(bws))
 
     parts = torch.exp(dist_matrix / (-2 * bws ** 2))
+    #assert (parts.view(-1) <= 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, parts))
 
 
 def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
+    # input is (n, n, d), output is also (n, n, d)
+    assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
+    #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
+    dist_matrix = dist_matrix.unsqueeze(0)
     alphas = dist_matrix.new_tensor(alphas).view(-1, 1, 1, 1)
     weights = weights or 1.0 / len(alphas)
     weights = weights * dist_matrix.new_ones(len(alphas))
 
-    logs = torch.log1p(sqdists / (2 * alphas))
+    logs = torch.log1p(dist_matrix / (2 * alphas))
     #     assert torch.isfinite(logs).all()
+    assert not ops.is_inf(logs)
+    assert not ops.is_nan(logs)
+    #assert (logs.contiguous().view(-1) < 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
 
-def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
     if X1.ndimension() == 1:
         X1 = X1.unsqueeze(-1).unsqueeze(-1)
     elif X1.ndimension() == 2:
@@ -57,26 +85,44 @@ def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=Non
     assert X1.ndimension() == 3
     assert X2.ndimension() == 3
 
-    dist_matrix = sqdist(X1, X2).unsqueeze(0)
+    dist_matrix = sqdist(X1, X2, do_mean)
     return mixrbf_kernels(dist_matrix, bws, weights)
 
 
-def two_vec_mixrq_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
-    if X1.ndimension() == 1:
-        X1 = X1.unsqueeze(-1).unsqueeze(-1)
-    elif X1.ndimension() == 2:
-        X1 = X1.unsqueeze(1)
+def two_vec_mixrq_kernels(X1, X2=None, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
+    if X2 is None:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
 
-    if X2.ndimension() == 1:
-        X2 = X2.unsqueeze(-1).unsqueeze(-1)
-    elif X2.ndimension() == 2:
-        X2 = X2.unsqueeze(1)
+        assert X1.ndimension() == 3
 
-    assert X1.ndimension() == 3
-    assert X2.ndimension() == 3
+        dist_matrix = sqdist(X1, do_mean=do_mean)
+        assert dist_matrix.shape[0] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[1] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[2] == 1, str(dist_matrix.shape)
 
-    dist_matrix = sqdist(X1, X2).unsqueeze(0)
-    return mixrq_kernels(dist_matrix, bws, weights)
+        # (n, n, 1)
+        return mixrq_kernels(dist_matrix, bws, weights)
+    else:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
+
+        if X2.ndimension() == 1:
+            X2 = X2.unsqueeze(-1).unsqueeze(-1)
+        elif X2.ndimension() == 2:
+            X2 = X2.unsqueeze(1)
+
+        assert X1.ndimension() == 3
+        assert X2.ndimension() == 3
+
+        dist_matrix = sqdist(X1, X2=X2, do_mean=do_mean)
+
+        # (n, n, 1)
+        return mixrq_kernels(dist_matrix, bws, weights)
 
 
 def dimwise_mixrbf_kernels(X, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
@@ -203,37 +249,31 @@ def total_hsic_parallel(kernels):
     kernels should be shape (m, n, n, d) to test for total
     independence among d variables with n paired samples for m sets.
     """
+    assert kernels.ndimension() == 4
     shp = kernels.shape
-    assert len(shp) == 3
     assert shp[1] == shp[2], "%s == %s" % (str(shp[0]), str(shp[1]))
 
     m = shp[0]
     n = kernels.new_tensor(shp[1])
     d = kernels.new_tensor(shp[3])
 
-    # t1: 1/n^2      sum_a  sum_b  prod_i K_ab^i
-    # t2: -2/n^(d+1) sum_a  prod_i sum_b  K_ab^i
-    # t3: 1/n^(2d)   prod_i sum_a  sum_b  K_ab^i
-
     log_n = torch.log(n)
     log_2 = torch.log(kernels.new_tensor(2))
-    log_kernels = kernels.log_()  # TODO: just take directly?
+    log_kernels = kernels.log_()
     log_sum_b = log_kernels.logsumexp(dim=2)
 
     l1 = log_kernels.sum(dim=3).logsumexp(dim=2).logsumexp(dim=1) - 2 * log_n
-    l2 = log_sum_b.sum(dim=3).logsumexp(dim=1) + log_2 - (d + 1) * log_n
-    l3 = log_sum_b.logsumexp(dim=1).sum() - 2 * d * log_n
+    l2 = log_sum_b.sum(dim=2).logsumexp(dim=1) + log_2 - (d + 1) * log_n
+    l3 = log_sum_b.logsumexp(dim=1).sum(dim=-1) - 2 * d * log_n
 
-    assert l1.ndimension() == 2
-    assert l2.ndimension() == 2
-    assert l3.ndimension() == 2
+    assert l1.ndimension() == 1
+    assert l2.ndimension() == 1
+    assert l3.ndimension() == 1
 
-    # total_hsic = exp(l1) - exp(l2) + exp(l3)
-    #   = exp(-a) (exp(l1 + a) - exp(l2 + a) + exp(l3 + a)) for any a
-    # can't use logsumexp for this directly because we subtract the l2 term
-    l = torch.cat([l1, l2, l3], dim=1)
-    a = torch.max(l, dim=1)
-    return a.exp() * ((l1 - a).exp() - (l2 - a).exp() + (l3 - a).exp())
+    l = torch.stack([l1, l2, l3], dim=1)
+    assert l.shape[1] == 3
+    a = torch.max(l, dim=1)[0]
+    return torch.exp(a) * (torch.exp(l1 - a) - torch.exp(l2 - a) + torch.exp(l3 - a))
 
 
 def sum_pairwise_hsic(kernels):

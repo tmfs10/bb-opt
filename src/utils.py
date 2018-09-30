@@ -1,3 +1,4 @@
+
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import axes3d
 import seaborn as sns
@@ -7,7 +8,7 @@ import pickle
 from typing import Dict, Tuple, Sequence, Union, Callable, Optional
 from rdkit import Chem
 from rdkit.Chem import Descriptors, QED
-import bb_opt.src.sascorer
+import bb_opt.src.sascorer as sascorer
 import pyro
 import torch
 
@@ -112,22 +113,30 @@ def get_path(*path_segments):
 
 def logp(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
     return Descriptors.MolLogP(m, add_hs)
 
 
 def qed(smiles_mol):
     m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
     return QED.qed(m)
 
 
 def sas(smiles_mol):
     m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
     return sascorer.calculateScore(m)
 
 
 def all_scores(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
-    return Descriptors.MolLogP(m, add_hs), QED.qed(m), sascorer.calculateScore(m)
+    if m is None:
+        return [-100, -100, -100]
+    return [Descriptors.MolLogP(m, add_hs), QED.qed(m), sascorer.calculateScore(m)]
 
 
 def save_pyro_model(base_path: str, optimizer):
@@ -141,7 +150,6 @@ def load_pyro_model(base_path: str, optimizer):
 
 
 def train_val_test_split(n, split, shuffle=True):
-
     if type(n) == int:
         idx = np.arange(n)
     else:
