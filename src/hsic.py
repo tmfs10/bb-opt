@@ -65,8 +65,8 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
 
     logs = torch.log1p(dist_matrix / (2 * alphas))
     #     assert torch.isfinite(logs).all()
-    assert not ops.is_inf(logs)
-    assert not ops.is_nan(logs)
+    #assert not ops.is_inf(logs)
+    #assert not ops.is_nan(logs)
     #assert (logs.contiguous().view(-1) < 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 

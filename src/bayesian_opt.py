@@ -1168,10 +1168,7 @@ def acquire_batch_mves_sid(
 
     if normalize:
         opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2])).detach()).view(-1)
-    assert opt_kernel_matrix.ndimension() == 3
-    assert opt_kernel_matrix.shape[0] == num_samples, str(opt_kernel_matrix.shape) + "[0] == " + str(num_samples)
-    assert opt_kernel_matrix.shape[1] == num_samples, str(opt_kernel_matrix.shape) + "[1] == " + str(num_samples)
-    assert opt_kernel_matrix.shape[-1] == 1
+    assert list(opt_kernel_matrix.shape) == [num_samples, num_samples, 1], str(opt_kernel_matrix.shape) + " == " + str([num_samples, num_samples, 1])
     opt_kernel_matrix = opt_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1) # (1, n, n, 1)
 
     batch_idx = set()
@@ -1213,10 +1210,7 @@ def acquire_batch_mves_sid(
                 ei_batch = ei[idx].unsqueeze(0).unsqueeze(0)
                 dist_matrix /= ei_batch
 
-            assert dist_matrix.ndimension() == 3
-            assert dist_matrix.shape[2] == cur_batch_size, str(dist_matrix.shape) + "[2] == " + str(cur_batch_size)
-            assert dist_matrix.shape[0] == num_samples, str(dist_matrix.shape) + "[0] == " + str(num_samples)
-            assert dist_matrix.shape[1] == num_samples, str(dist_matrix.shape) + "[1] == " + str(num_samples)
+            assert list(dist_matrix.shape) == [num_samples, num_samples, cur_batch_size], str(dist_matrix.shape) + " == " + str([num_samples, num_samples, cur_batch_size])
 
             if batch_dist_matrix is not None:
                 dist_matrix += batch_dist_matrix # (n, n, m)
