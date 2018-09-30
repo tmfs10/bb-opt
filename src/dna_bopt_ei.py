@@ -192,18 +192,27 @@ for ack_iter in range(10):
     preds = preds.transpose(0, 1)
     print("done predictions")
 
+    top_k = max(params.mves_diversity, params.ack_batch_size)
+
     ei = preds.mean(dim=0).view(-1).cpu().numpy()
-    ei_sortidx = np.argsort(ei)
-    if params.ei_diversity == "none":
+    std = preds.std(dim=0).view(-1).cpu().numpy()
+
+    if "var" in params.ei_diversity:
+        ei_sortidx = np.argsort(ei/std)
+    else:
+        ei_sortidx = np.argsort(ei)
+
+    if "none" in params.ei_diversity:
         ei_idx = []
         for idx in ei_sortidx[::-1]:
             if idx not in skip_idx_ei:
                 ei_idx += [idx]
-            if len(ei_idx) >= params.ack_batch_size:
+            if len(ei_idx) >= top_k:
                 break
-    elif params.ei_diversity == "hsic":
+        ei_idx = np.random.choice(ei_idx, params.ack_batch_size).tolist()
+    elif "hsic" in params.ei_diversity:
         ei_idx = bopt.ei_diversity_selection_hsic(params, preds, skip_idx_ei, device=params.device)
-    elif params.ei_diversity == "detk":
+    elif "detk" in params.ei_diversity:
         ei_idx = bopt.ei_diversity_selection_detk(params, preds, skip_idx_ei, device=params.device)
     else:
         assert False, "Not implemented"

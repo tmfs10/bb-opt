@@ -18,8 +18,8 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 6:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size>")
+if len(sys.argv) < 7:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size> <pred_weighting>")
     sys.exit(1)
 
 def train_val_test_split(n, split, shuffle=True):
@@ -41,6 +41,7 @@ def train_val_test_split(n, split, shuffle=True):
 
     return idx[:train_end], idx[train_end:val_end], idx[val_end:]
 
+
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -54,6 +55,7 @@ Params = namedtuple('params', [
     'device',
     'exp_noise_samples',
     'train_lr',
+    'pred_weighting',
     
     'num_train_latent_samples',
     'num_latent_vars',
@@ -72,7 +74,7 @@ Params = namedtuple('params', [
     'ack_num_pdts_points',
     'hsic_diversity_lambda',
     'mves_compute_batch_size',
-    'pdts_diversity',
+    'mves_diversity',
     
     'retrain_num_epochs',
     'retrain_batch_size',
@@ -92,6 +94,7 @@ params = Params(
     device='cuda',
     num_epochs=int(sys.argv[2]),
     train_lr=float(sys.argv[3]),
+    pred_weighting=int(sys.argv[6]),
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -109,8 +112,8 @@ params = Params(
     ack_num_model_samples=100,
     ack_num_pdts_points=40,
     hsic_diversity_lambda=1,
-    mves_compute_batch_size=3000,
-    pdts_diversity=int(sys.argv[1]),
+    mves_compute_batch_size=4000,
+    mves_diversity=int(sys.argv[1]),
     
     retrain_num_epochs=int(sys.argv[4]),
     retrain_batch_size=10,
@@ -163,86 +166,78 @@ train_label_std = train_labels.std()
 train_labels = (train_labels - train_label_mean) / train_label_std
 val_labels = (val_labels - train_label_mean) / train_label_std
 
-train_X_pdts = torch.FloatTensor(train_inputs).to(device)
-train_Y_pdts = torch.FloatTensor(train_labels).to(device)
+train_X_mves = torch.FloatTensor(train_inputs).to(device)
+train_Y_mves = torch.FloatTensor(train_labels).to(device)
 val_X = torch.FloatTensor(val_inputs).to(device)
 val_Y = torch.FloatTensor(val_labels).to(device)
 
 model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
-data = [train_X_pdts, train_Y_pdts, val_X, val_Y]
+data = [train_X_mves, train_Y_mves, val_X, val_Y]
 logging = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
 
-print([k[-1] for k in logging])
-
 e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
+
+print([k[-1] for k in logging])
 
 X = torch.tensor(inputs, device=device)
 Y = torch.tensor(labels, device=device)
 
-model_pdts = model
-qz_pdts = qz
+model_mves = model
+qz_mves = qz
 
-skip_idx_pdts = set(train_idx)
-ack_all_pdts = set()
+skip_idx_mves = set(train_idx)
+ack_all_mves = set()
+e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 for ack_iter in range(10):
-    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_pdts, qz_pdts, e)
+    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
     preds = preds.transpose(0, 1)
     print("done predictions")
 
-    preds[:, list(skip_idx_pdts)] = preds.min()
-    
-    top_k = max(params.pdts_diversity, params.ack_batch_size)
-    sorted_preds_idx = []
-    for i in range(preds.shape[0]):
-        sorted_preds_idx += [np.argsort(preds[i].numpy())]
-    sorted_preds_idx = np.array(sorted_preds_idx)
+    top_k = params.mves_diversity
 
-    pdts_idx = set()
-    counts = np.zeros(sorted_preds_idx.shape[1])
-    for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
-        counts[:] = 0
-        for idx in sorted_preds_idx[:, rank]:
-            counts[idx] += 1
-        counts_idx = counts.argsort()[::-1]
-        j = 0
-        while len(pdts_idx) < top_k and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
-            pdts_idx.update({counts_idx[j]})
-            j += 1
-        if len(pdts_idx) >= top_k:
-            break
-    assert len(pdts_idx) == top_k
-    pdts_idx = np.random.choice(list(pdts_idx), params.ack_batch_size)
+    ei = preds.mean(dim=0).view(-1).cpu().numpy()
+    std = preds.std(dim=0).view(-1).cpu().numpy()
 
-    ack_all_pdts.update(pdts_idx)
-    skip_idx_pdts.update(pdts_idx)
+    ei_sortidx = np.argsort(ei/std)
+    ei_idx = ei_sortidx[-top_k:]
+    best_pred = preds[:, ei_idx]
     
-    ack_pdts = X[pdts_idx]
-    ack_pdts_vals = (Y[pdts_idx]-float(train_label_mean))/float(train_label_std)
+    mves_compute_batch_size = params.mves_compute_batch_size
+    mves_compute_batch_size = 3000
+    ack_batch_size=params.ack_batch_size
+    mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=False, pred_weighting=params.pred_weighting)
+    print('best_hsic:', best_hsic)
+    skip_idx_mves.update(mves_idx)
+    ack_all_mves.update(mves_idx)
+    mves_idx = torch.tensor(list(mves_idx)).to(params.device)
     
-    train_X_pdts = torch.cat([train_X_pdts, ack_pdts], dim=0)
-    train_Y_pdts = torch.cat([train_Y_pdts, ack_pdts_vals], dim=0)
-    data = [train_X_pdts, train_Y_pdts, val_X, val_Y]
+    ack_mves = X[mves_idx]
+    ack_mves_vals = (Y[mves_idx]-float(train_label_mean))/float(train_label_std)
+    
+    train_X_mves = torch.cat([train_X_mves, ack_mves], dim=0)
+    train_Y_mves = torch.cat([train_Y_mves, ack_mves_vals], dim=0)
+    data = [train_X_mves, train_Y_mves, val_X, val_Y]
     logging = dbopt.train(
         params, 
         params.retrain_batch_size, 
-        params.retrain_lr,
+        params.retrain_lr, 
         params.retrain_num_epochs, 
         params.hsic_retrain_lambda, 
         params.num_retrain_latent_samples, 
         data, 
-        model_pdts, 
-        qz_pdts, 
+        model_mves, 
+        qz_mves, 
         e_dist)
 
     print([k[-1] for k in logging])
     
-    e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
-    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_pdts, qz_pdts, e)
+    e = reparam.generate_prior_samples(100, e_dist)
+    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
     preds = preds.transpose(0, 1)
     ei = preds.mean(dim=0).view(-1).cpu().numpy()
     ei_sortidx = np.argsort(ei)[-50:]
-    ack = list(ack_all_pdts.union(list(ei_sortidx)))
+    ack = list(ack_all_mves.union(list(ei_sortidx)))
     best_10 = np.sort(labels[ack])[-10:]
     print(len(ack), best_10.mean(), best_10.max())

@@ -18,8 +18,8 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 8:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size> <mves_greedy?> <compare w old>")
+if len(sys.argv) < 10:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std>")
     sys.exit(1)
 
 def train_val_test_split(n, split, shuffle=True):
@@ -56,6 +56,8 @@ Params = namedtuple('params', [
     'exp_noise_samples',
     'train_lr',
     'compare_w_old',
+    'pred_weighting',
+    'divide_by_std',
     
     'num_train_latent_samples',
     'num_latent_vars',
@@ -96,11 +98,13 @@ params = Params(
     num_epochs=int(sys.argv[2]),
     train_lr=float(sys.argv[3]),
     compare_w_old=int(sys.argv[7]) == 1,
+    pred_weighting=int(sys.argv[8]),
     
     train_batch_size=10,
     num_latent_vars=15,
     num_train_latent_samples=20,
     hsic_train_lambda=20.,
+    divide_by_std=int(sys.argv[9]) == 1,
     
     ack_batch_size=int(sys.argv[5]),
     ack_lr=1e-3,
@@ -197,7 +201,7 @@ for ack_iter in range(10):
     print("done predictions")
 
     if not params.compare_w_old:
-        preds[:, list(skip_idx_mves)] = -1e6
+        preds[:, list(skip_idx_mves)] = preds.min()
     
     top_k = params.mves_diversity
     
@@ -214,9 +218,9 @@ for ack_iter in range(10):
     best_pred = sorted_preds[:, -top_k:]
     
     mves_compute_batch_size = params.mves_compute_batch_size
-    mves_compute_batch_size = 4000
+    mves_compute_batch_size = 3000
     ack_batch_size=params.ack_batch_size
-    mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=params.mves_greedy)
+    mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=params.mves_greedy, pred_weighting=params.pred_weighting, normalize=True, divide_by_std=params.divide_by_std)
     print('best_hsic:', best_hsic)
     skip_idx_mves.update(mves_idx)
     ack_all_mves.update(mves_idx)
