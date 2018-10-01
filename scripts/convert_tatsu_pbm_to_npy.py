@@ -37,7 +37,7 @@ for filename in filenames:
             seq = [base_to_idx[base] for base in line[0]]
             seq_arr += [np.eye(4)[seq].flatten()]
             score_arr += [line[3]]
-        seq_arr = np.array(seq_arr)
-        score_arr = np.array(score_arr)
+        seq_arr = np.array(seq_arr, dtype=np.float32)
+        score_arr = np.array(score_arr, dtype=np.float32)
         np.save(dirpath + '/inputs.npy', seq_arr)
         np.save(dirpath + '/labels.npy', score_arr)
