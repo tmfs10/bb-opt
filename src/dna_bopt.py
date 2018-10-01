@@ -138,4 +138,4 @@ def train(
         progress.set_description(f"Corr: {val_corr:.3f}")
         progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1]})
 
-    return losses, kl_losses, hsic_losses, corrs, val_corrs
+    return [losses, kl_losses, hsic_losses, corrs, val_corrs], optim
