@@ -3,6 +3,7 @@ import sys
 sys.path.append('/cluster/sj1')
 sys.path.append('/cluster/sj1/bb_opt/src')
 
+import os
 import torch
 import torch.nn as nn
 from torch.nn.parameter import Parameter
@@ -18,9 +19,15 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 10:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std>")
+if len(sys.argv) < 15:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std> <data dir> <filename file> <output dir> <suffix>")
     sys.exit(1)
+
+num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, mves_greedy, compare_w_old, pred_weighting, divide_by_std, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
+
+if output_dir[-1] == "/":
+    output_dir = output_dir[:-1]
+output_dir = output_dir + "_" + suffix
 
 def train_val_test_split(n, split, shuffle=True):
     if type(n) == int:
@@ -65,13 +72,8 @@ Params = namedtuple('params', [
     'hsic_train_lambda',
     
     'ack_batch_size',
-    'ack_lr',
-    'num_queries',
-    'batch_opt_lr',
-    'batch_opt_num_iter',
-    'input_opt_lr',
+    'num_acks',
     'mves_kernel_fn',
-    'input_opt_num_iter',
     'ack_num_model_samples',
     'ack_num_pdts_points',
     'hsic_diversity_lambda',
@@ -84,9 +86,6 @@ Params = namedtuple('params', [
     'retrain_lr',
     'hsic_retrain_lambda',
     'num_retrain_latent_samples',
-    
-    'score_fn', # order is logp, qed, sas
-    
 ])
 params = Params(
     output_dist_std=1.,
@@ -95,163 +94,223 @@ params = Params(
     prior_mean=0.,
     prior_std=3.,
     device='cuda',
-    num_epochs=int(sys.argv[2]),
-    train_lr=float(sys.argv[3]),
-    compare_w_old=int(sys.argv[7]) == 1,
-    pred_weighting=int(sys.argv[8]),
+    num_epochs=int(init_train_epochs),
+    train_lr=float(train_lr),
+    compare_w_old=int(compare_w_old) == 1,
+    pred_weighting=int(pred_weighting),
     
     train_batch_size=10,
     num_latent_vars=15,
     num_train_latent_samples=20,
     hsic_train_lambda=20.,
-    divide_by_std=int(sys.argv[9]) == 1,
+    divide_by_std=int(divide_by_std) == 1,
     
-    ack_batch_size=int(sys.argv[5]),
-    ack_lr=1e-3,
-    num_queries=1,
-    batch_opt_lr=1e-3,
-    batch_opt_num_iter=10000,
-    input_opt_lr=1e-3,
+    ack_batch_size=int(ack_batch_size),
+    num_acks=20,
     mves_kernel_fn='mixrq_kernels',
-    input_opt_num_iter=2500,
     ack_num_model_samples=100,
     ack_num_pdts_points=40,
     hsic_diversity_lambda=1,
     mves_compute_batch_size=4000,
-    mves_diversity=int(sys.argv[1]),
-    mves_greedy=int(sys.argv[6]) == 1,
+    mves_diversity=int(num_diversity),
+    mves_greedy=int(mves_greedy) == 1,
     
-    retrain_num_epochs=int(sys.argv[4]),
+    retrain_num_epochs=int(retrain_num_epochs),
     retrain_batch_size=10,
-    retrain_lr=1e-4,
+    retrain_lr=float(retrain_lr),
     hsic_retrain_lambda=20.,
     num_retrain_latent_samples=20,
-    
-    score_fn=lambda x : 5*x[1]-x[2],
 )
 
 n_train = 20
 
-project = "dna_binding"
-dataset = "crx_ref_r1"
+#project = "dna_binding"
+#dataset = "crx_ref_r1"
 
-root = "/cluster/sj1/bb_opt/"
-data_dir = root+"data/"+project+"/"+dataset+"/"
-inputs = np.load(data_dir+"inputs.npy")
-labels = np.load(data_dir+"labels.npy")
+#root = "/cluster/sj1/bb_opt/"
+#data_dir = root+"data/"+project+"/"+dataset+"/"
 
+filenames = [k.strip() for k in open(filename_file).readlines()]
 
-exclude_top = 0.1
+for filename in filenames:
+    filedir = data_dir + "/" + filename + "/"
+    if not os.path.exists(filedir):
+        continue
+    print('doing file:', filedir)
+    inputs = np.load(filedir+"inputs.npy")
+    labels = np.load(filedir+"labels.npy")
 
-idx = np.arange(labels.shape[0])
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
 
-labels_sort_idx = labels.argsort()
-sort_idx2 = labels_sort_idx[:-int(labels.shape[0]*exclude_top)]
-idx = idx[sort_idx2]
+    main_output_dir = output_dir + "/" + filename
 
-train_idx, _, _ = train_val_test_split(idx, split=[n_train, 0])
-train_idx2, _, test_idx2 = train_val_test_split(n_train, split=[0.9, 0])
+    try:
+        os.mkdir(main_output_dir)
+    except OSError as e:
+        pass
 
-test_idx = train_idx[test_idx2]
-train_idx = train_idx[train_idx2]
+    exclude_top = 0.1
 
-train_inputs = inputs[train_idx]
-train_labels = labels[train_idx]
+    idx = np.arange(labels.shape[0])
 
-val_inputs = inputs[test_idx]
-val_labels = labels[test_idx]
+    labels_sort_idx = labels.argsort()
+    sort_idx2 = labels_sort_idx[:-int(labels.shape[0]*exclude_top)]
+    idx = idx[sort_idx2]
 
-labels_sort_idx = labels.argsort()
-top_point_idx = labels_sort_idx[-1]
-top_one_percent_idx = labels_sort_idx[-int(labels.shape[0]*0.01):]
-top_one_percent_sum = labels[top_one_percent_idx].sum()
+    train_idx, _, _ = train_val_test_split(idx, split=[n_train, 0])
+    train_idx2, _, test_idx2 = train_val_test_split(n_train, split=[0.9, 0])
 
-train_label_mean = train_labels.mean()
-train_label_std = train_labels.std()
+    test_idx = train_idx[test_idx2]
+    train_idx = train_idx[train_idx2]
 
-train_labels = (train_labels - train_label_mean) / train_label_std
-val_labels = (val_labels - train_label_mean) / train_label_std
+    train_inputs = inputs[train_idx]
+    train_labels = labels[train_idx]
 
-train_X_mves = torch.FloatTensor(train_inputs).to(device)
-train_Y_mves = torch.FloatTensor(train_labels).to(device)
-val_X = torch.FloatTensor(val_inputs).to(device)
-val_Y = torch.FloatTensor(val_labels).to(device)
+    val_inputs = inputs[test_idx]
+    val_labels = labels[test_idx]
 
-model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
-data = [train_X_mves, train_Y_mves, val_X, val_Y]
-logging = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+    labels_sort_idx = labels.argsort()
+    top_idx = [set(labels_sort_idx[-int(labels.shape[0]*per):].tolist()) for per in [0.01, 0.05, 0.1, 0.2]]
 
-e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
+    print('label stats:', labels.mean(), labels.max(), labels.std())
 
-print([k[-1] for k in logging])
+    train_label_mean = train_labels.mean()
+    train_label_std = train_labels.std()
 
-X = torch.tensor(inputs, device=device)
-Y = torch.tensor(labels, device=device)
+    train_labels = (train_labels - train_label_mean) / train_label_std
+    val_labels = (val_labels - train_label_mean) / train_label_std
 
-model_mves = model
-qz_mves = qz
+    train_X = torch.FloatTensor(train_inputs).to(device)
+    train_Y = torch.FloatTensor(train_labels).to(device)
+    val_X = torch.FloatTensor(val_inputs).to(device)
+    val_Y = torch.FloatTensor(val_labels).to(device)
 
-skip_idx_mves = set(train_idx)
-ack_all_mves = set()
-e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
-for ack_iter in range(10):
-    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
-    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
-    preds = preds.transpose(0, 1)
-    print("done predictions")
+    model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
+    data = [train_X, train_Y, val_X, val_Y]
+    logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
 
-    if not params.compare_w_old:
-        preds[:, list(skip_idx_mves)] = preds.min()
-    
-    top_k = params.mves_diversity
-    
-    sorted_preds_idx = []
-    for i in range(preds.shape[0]):
-        sorted_preds_idx += [np.argsort(preds[i].numpy())]
-    sorted_preds_idx = np.array(sorted_preds_idx)
-    print('diversity:', len(set(sorted_preds_idx[:, -top_k:].flatten())))
-    best_pdts_10 = labels[np.unique(sorted_preds_idx[:, -top_k:])][-10:]
-    print('best_pdts_10:', best_pdts_10.mean(), best_pdts_10.max())
-    
-    sorted_preds = torch.sort(preds, dim=1)[0]    
-    #best_pred = preds.max(dim=1)[0].view(-1)
-    best_pred = sorted_preds[:, -top_k:]
-    
-    mves_compute_batch_size = params.mves_compute_batch_size
-    mves_compute_batch_size = 3000
-    ack_batch_size=params.ack_batch_size
-    mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=params.mves_greedy, pred_weighting=params.pred_weighting, normalize=True, divide_by_std=params.divide_by_std)
-    print('best_hsic:', best_hsic)
-    skip_idx_mves.update(mves_idx)
-    ack_all_mves.update(mves_idx)
-    mves_idx = torch.tensor(list(mves_idx)).to(params.device)
-    
-    ack_mves = X[mves_idx]
-    ack_mves_vals = (Y[mves_idx]-float(train_label_mean))/float(train_label_std)
-    
-    train_X_mves = torch.cat([train_X_mves, ack_mves], dim=0)
-    train_Y_mves = torch.cat([train_Y_mves, ack_mves_vals], dim=0)
-    data = [train_X_mves, train_Y_mves, val_X, val_Y]
-    logging = dbopt.train(
-        params, 
-        params.retrain_batch_size, 
-        params.retrain_lr, 
-        params.retrain_num_epochs, 
-        params.hsic_retrain_lambda, 
-        params.num_retrain_latent_samples, 
-        data, 
-        model_mves, 
-        qz_mves, 
-        e_dist)
+    X = torch.tensor(inputs, device=device)
+    Y = torch.tensor(labels, device=device)
 
-    print([k[-1] for k in logging])
-    
-    e = reparam.generate_prior_samples(100, e_dist)
-    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
-    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
-    preds = preds.transpose(0, 1)
-    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-    ei_sortidx = np.argsort(ei)[-50:]
-    ack = list(ack_all_mves.union(list(ei_sortidx)))
-    best_10 = np.sort(labels[ack])[-10:]
-    print(len(ack), best_10.mean(), best_10.max())
+    print('logging:', [k[-1] for k in logging])
+    logging = [torch.tensor(k) for k in logging]
+
+    torch.save({
+        'model_state_dict': model.state_dict(), 
+        'qz_state_dict': qz.state_dict(),
+        'logging': logging,
+        'optim': optim.state_dict(),
+        'global_params': params._asdict(),
+        }, main_output_dir + "/init_model.pth")
+
+    with open(main_output_dir + "/stats.txt", 'w') as main_f:
+        main_f.write(str([k[-1] for k in logging]) + "\n")
+        for ack_batch_size in [2, 5, 10, 20]:
+            print('doing batch', ack_batch_size)
+            batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
+            try:
+                os.mkdir(batch_output_dir)
+            except OSError as e:
+                pass
+
+            train_X_mves = train_X.clone()
+            train_Y_mves = train_Y.clone()
+
+            model_mves = copy.deepcopy(model)
+            qz_mves = copy.deepcopy(qz)
+
+            skip_idx_mves = set(train_idx)
+            ack_all_mves = set()
+            e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
+
+            with open(batch_output_dir + "/stats.txt", 'w') as f:
+                for ack_iter in range(params.num_acks):
+                    print('doing ack_iter', ack_iter)
+                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                    preds = preds.transpose(0, 1)
+                    #print("done predictions")
+
+                    if not params.compare_w_old:
+                        preds[:, list(skip_idx_mves)] = preds.min()
+                    
+                    top_k = params.mves_diversity
+                    
+                    sorted_preds_idx = []
+                    for i in range(preds.shape[0]):
+                        sorted_preds_idx += [np.argsort(preds[i].numpy())]
+                    sorted_preds_idx = np.array(sorted_preds_idx)
+                    f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
+                    best_pdts_10 = labels[np.unique(sorted_preds_idx[:, -top_k:])][-10:]
+                    f.write('best_pdts_10\t' + str(best_pdts_10.mean()) + "\t" + str(best_pdts_10.max()) + "\n")
+                    
+                    sorted_preds = torch.sort(preds, dim=1)[0]    
+                    #best_pred = preds.max(dim=1)[0].view(-1)
+                    best_pred = sorted_preds[:, -top_k:]
+                    
+                    mves_compute_batch_size = params.mves_compute_batch_size
+                    mves_compute_batch_size = 3000
+                    #ack_batch_size=params.ack_batch_size
+                    mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=params.mves_greedy, pred_weighting=params.pred_weighting, normalize=True, divide_by_std=params.divide_by_std)
+                    f.write('best_hsic\t' + str(best_hsic) + "\n")
+                    skip_idx_mves.update(mves_idx)
+                    ack_all_mves.update(mves_idx)
+                    mves_idx = torch.tensor(list(mves_idx)).to(params.device)
+                    
+                    ack_mves = X[mves_idx]
+                    ack_mves_vals = (Y[mves_idx]-float(train_label_mean))/float(train_label_std)
+                    
+                    train_X_mves = torch.cat([train_X_mves, ack_mves], dim=0)
+                    train_Y_mves = torch.cat([train_Y_mves, ack_mves_vals], dim=0)
+                    data = [train_X_mves, train_Y_mves, val_X, val_Y]
+                    logging, optim = dbopt.train(
+                        params, 
+                        params.retrain_batch_size, 
+                        params.retrain_lr, 
+                        params.retrain_num_epochs, 
+                        params.hsic_retrain_lambda, 
+                        params.num_retrain_latent_samples, 
+                        data, 
+                        model_mves, 
+                        qz_mves, 
+                        e_dist)
+
+                    print('logging:', [k[-1] for k in logging])
+                    f.write(str([k[-1] for k in logging]) + "\n")
+                    logging = [torch.tensor(k) for k in logging]
+
+                    ack_array = np.array(list(ack_all_mves), dtype=np.int32)
+
+                    torch.save({
+                        'model_state_dict': model_mves.state_dict(), 
+                        'qz_state_dict': qz_mves.state_dict(),
+                        'logging': logging,
+                        'optim': optim.state_dict(),
+                        'ack_idx': torch.from_numpy(ack_array),
+                        'ack_labels': torch.from_numpy(labels[ack_array]),
+                        }, batch_output_dir + "/" + str(ack_iter) + ".pth")
+                    
+                    e = reparam.generate_prior_samples(100, e_dist)
+                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                    preds = preds.transpose(0, 1)
+                    ei = preds.mean(dim=0).view(-1).cpu().numpy()
+                    ei_sortidx = np.argsort(ei)[-50:]
+                    ack = list(ack_all_mves.union(list(ei_sortidx)))
+                    best_10 = np.sort(labels[ack])[-10:]
+                    best_batch_size = np.sort(labels[ack])[-ack_batch_size:]
+
+                    idx_frac = [len(ack_all_mves.intersection(k))/len(k) for k in top_idx]
+
+                    s = "\t".join([str(k) for k in [
+                        best_10.mean(), 
+                        best_10.max(), 
+                        best_batch_size.mean(), 
+                        best_batch_size.max(),
+                        str(idx_frac)
+                        ]])
+
+                    print(s)
+                    f.write(s + "\n")
+            main_f.write(str(ack_batch_size) + "\t" + s + "\n")
