@@ -206,7 +206,7 @@ for filename in filenames:
 
     with open(main_output_dir + "/stats.txt", 'w') as main_f:
         main_f.write(str([k[-1] for k in logging]) + "\n")
-        for ack_batch_size in [2, 5, 10, 20]:
+        for ack_batch_size in [20]:
             print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
@@ -226,7 +226,7 @@ for filename in filenames:
 
             with open(batch_output_dir + "/stats.txt", 'w') as f:
                 for ack_iter in range(params.num_acks):
-                    print('doing ack_iter', ack_iter)
+                    print('doing ack_iter', ack_iter, 'for mves with suffix', suffix)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
@@ -237,6 +237,9 @@ for filename in filenames:
                     
                     top_k = params.mves_diversity
                     
+                    ei = preds.mean(dim=0).view(-1).cpu().numpy()
+                    std = preds.std(dim=0).view(-1).cpu().numpy()
+
                     sorted_preds_idx = []
                     for i in range(preds.shape[0]):
                         sorted_preds_idx += [np.argsort(preds[i].numpy())]
@@ -247,7 +250,11 @@ for filename in filenames:
                     
                     sorted_preds = torch.sort(preds, dim=1)[0]    
                     #best_pred = preds.max(dim=1)[0].view(-1)
-                    best_pred = sorted_preds[:, -top_k:]
+                    #best_pred = sorted_preds[:, -top_k:]
+
+                    ei_sortidx = np.argsort(ei)
+                    ei_idx = ei_sortidx[-ack_batch_size*2:]
+                    best_pred = preds[:, ei_idx]
                     
                     mves_compute_batch_size = params.mves_compute_batch_size
                     mves_compute_batch_size = 3000
