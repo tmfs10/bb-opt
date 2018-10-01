@@ -1241,7 +1241,7 @@ def acquire_batch_mves_sid(
 
             if normalize:
                 if divide_by_std:
-                    normalizer = torch.exp(0.5 * hsic_logvar + opt_normalizer)
+                    normalizer = torch.exp(hsic_logvar + 0.5 * opt_normalizer)
                 else:
                     normalizer = torch.exp(0.5 * (hsic_logvar + opt_normalizer))
                 total_hsic /= normalizer
