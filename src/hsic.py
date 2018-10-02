@@ -337,17 +337,15 @@ def total_hsic_with_batch(
     :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
     :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
     """
-    n_new_points = new_points.shape[1]
-    all_hsics = rv_samples.new_empty(n_new_points)
-
-    acquirable_idx = acquirable_idx or list(range(n_new_points))
+    acquirable_idx = acquirable_idx or list(range(new_points.shape[1]))
+    all_hsics = rv_samples.new_empty(len(acquirable_idx))
 
     rv_kernel = kernel(sqdist(rv_samples))
 
     if batch_samples is not None:
         batch_sqdists = sqdist(batch_samples)
 
-    for point_idx in acquirable_idx:
+    for i, point_idx in enumerate(acquirable_idx):
         point_sqdist = sqdist(new_points[:, point_idx : point_idx + 1])
         sqdists = (
             torch.cat((batch_sqdists, point_sqdist), dim=-1)
@@ -356,6 +354,6 @@ def total_hsic_with_batch(
         )
         point_kernel = kernel(sqdists)
         point_kernel = point_kernel.mean(dim=-1).unsqueeze(-1)
-        all_hsics[point_idx] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
+        all_hsics[i] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
 
     return all_hsics
