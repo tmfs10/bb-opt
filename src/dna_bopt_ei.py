@@ -179,26 +179,39 @@ for filename in filenames:
 
     model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
     data = [train_X, train_Y, val_X, val_Y]
-    logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+
+    init_model_path = main_output_dir + "/init_model.pth"
+    loaded = False
+    if os.path.isfile(init_model_path):
+        loaded = True
+        checkpoint = torch.load(init_model_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        qz.load_state_dict(checkpoint['qz_state_dict'])
+        logging = checkpoint["logging"]
+        if "train_idx" in checkpoint:
+            train_idx = checkpoint["train_idx"].numpy()
+    else:
+        logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+        print('logging:', [k[-1] for k in logging])
+        logging = [torch.tensor(k) for k in logging]
+
+        torch.save({
+            'model_state_dict': model.state_dict(), 
+            'qz_state_dict': qz.state_dict(),
+            'logging': logging,
+            'optim': optim.state_dict(),
+            'train_idx': torch.from_numpy(train_idx),
+            'global_params': params._asdict(),
+            }, init_model_path)
 
     X = torch.tensor(inputs, device=device)
     Y = torch.tensor(labels, device=device)
 
-    print('logging:', [k[-1] for k in logging])
-    logging = [torch.tensor(k) for k in logging]
+    with open(main_output_dir + "/stats.txt", 'a') as main_f:
+        if not loaded:
+            main_f.write(str([k[-1] for k in logging]) + "\n")
 
-    torch.save({
-        'model_state_dict': model.state_dict(), 
-        'qz_state_dict': qz.state_dict(),
-        'logging': logging,
-        'optim': optim.state_dict(),
-        'global_params': params._asdict(),
-        }, main_output_dir + "/init_model.pth")
-
-    with open(main_output_dir + "/stats.txt", 'w') as main_f:
-        main_f.write(str([k[-1] for k in logging]) + "\n")
         for ack_batch_size in [2, 5, 10, 20]:
-            print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
                 os.mkdir(batch_output_dir)
@@ -211,12 +224,33 @@ for filename in filenames:
             model_ei = copy.deepcopy(model)
             qz_ei = copy.deepcopy(qz)
 
+            print('doing batch', ack_batch_size)
             skip_idx_ei = set(train_idx)
             ack_all_ei = set()
             e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
-            with open(batch_output_dir + "/stats.txt", 'w') as f:
+            if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
+                print('alread done batch', ack_batch_size)
+                continue
+
+            with open(batch_output_dir + "/stats.txt", 'a') as f:
                 for ack_iter in range(params.num_acks):
+                    batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
+                    if os.path.exists(batch_ack_output_file):
+                        checkpoint = torch.load(batch_ack_output_file)
+                        model_ei.load_state_dict(checkpoint['model_state_dict'])
+                        qz_ei.load_state_dict(checkpoint['qz_state_dict'])
+                        logging = checkpoint['logging']
+
+                        model_parameters = model_ei.parameters() + qz_ei.parameters()
+                        optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
+                        optim = optim.load_state_dict(checkpoint['optim'])
+
+                        ack_idx = list(checkpoint['ack_idx'].numpy())
+                        ack_all_ei.update(ack_idx)
+                        skip_idx_ei.update(ack_idx)
+                        continue
+
                     print('doing ack_iter', ack_iter)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
@@ -289,7 +323,7 @@ for filename in filenames:
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
-                        }, batch_output_dir + "/" + str(ack_iter) + ".pth")
+                        }, batch_ack_output_file)
                     
                     e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)

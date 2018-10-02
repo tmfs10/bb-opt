@@ -20,10 +20,10 @@ import pandas as pd
 import copy
 
 if len(sys.argv) < 15:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std> <data dir> <filename file> <output dir> <suffix>")
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std> <condense> <data dir> <filename file> <output dir> <suffix>")
     sys.exit(1)
 
-num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, mves_greedy, compare_w_old, pred_weighting, divide_by_std, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
+num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, mves_greedy, compare_w_old, pred_weighting, divide_by_std, condense, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
 
 if output_dir[-1] == "/":
     output_dir = output_dir[:-1]
@@ -65,6 +65,7 @@ Params = namedtuple('params', [
     'compare_w_old',
     'pred_weighting',
     'divide_by_std',
+    'condense',
     
     'num_train_latent_samples',
     'num_latent_vars',
@@ -98,6 +99,7 @@ params = Params(
     train_lr=float(train_lr),
     compare_w_old=int(compare_w_old) == 1,
     pred_weighting=int(pred_weighting),
+    condense=int(condense) == 1,
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -188,24 +190,39 @@ for filename in filenames:
 
     model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
     data = [train_X, train_Y, val_X, val_Y]
-    logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+
+    init_model_path = main_output_dir + "/init_model.pth"
+    loaded = False
+    if os.path.isfile(init_model_path):
+        loaded = True
+        checkpoint = torch.load(init_model_path)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        qz.load_state_dict(checkpoint['qz_state_dict'])
+        logging = checkpoint["logging"]
+        if "train_idx" in checkpoint:
+            train_idx = checkpoint["train_idx"].numpy()
+    else:
+        logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+
+        print('logging:', [k[-1] for k in logging])
+        logging = [torch.tensor(k) for k in logging]
+
+        torch.save({
+            'model_state_dict': model.state_dict(), 
+            'qz_state_dict': qz.state_dict(),
+            'logging': logging,
+            'optim': optim.state_dict(),
+            'train_idx': torch.from_numpy(train_idx),
+            'global_params': params._asdict(),
+            }, init_model_path)
 
     X = torch.tensor(inputs, device=device)
     Y = torch.tensor(labels, device=device)
 
-    print('logging:', [k[-1] for k in logging])
-    logging = [torch.tensor(k) for k in logging]
+    with open(main_output_dir + "/stats.txt", 'a') as main_f:
+        if not loaded:
+            main_f.write(str([k[-1] for k in logging]) + "\n")
 
-    torch.save({
-        'model_state_dict': model.state_dict(), 
-        'qz_state_dict': qz.state_dict(),
-        'logging': logging,
-        'optim': optim.state_dict(),
-        'global_params': params._asdict(),
-        }, main_output_dir + "/init_model.pth")
-
-    with open(main_output_dir + "/stats.txt", 'w') as main_f:
-        main_f.write(str([k[-1] for k in logging]) + "\n")
         for ack_batch_size in [20]:
             print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
@@ -224,8 +241,28 @@ for filename in filenames:
             ack_all_mves = set()
             e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
-            with open(batch_output_dir + "/stats.txt", 'w') as f:
+            if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
+                print('alread done batch', ack_batch_size)
+                continue
+
+            with open(batch_output_dir + "/stats.txt", 'a') as f:
                 for ack_iter in range(params.num_acks):
+                    batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
+                    if os.path.exists(batch_ack_output_file):
+                        checkpoint = torch.load(batch_ack_output_file)
+                        model_mves.load_state_dict(checkpoint['model_state_dict'])
+                        qz_mves.load_state_dict(checkpoint['qz_state_dict'])
+                        logging = checkpoint['logging']
+
+                        model_parameters = model_ei.parameters() + qz_ei.parameters()
+                        optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
+                        optim = optim.load_state_dict(checkpoint['optim'])
+
+                        ack_idx = list(checkpoint['ack_idx'].numpy())
+                        ack_all_mves.update(ack_idx)
+                        skip_idx_mves.update(ack_idx)
+                        continue
+
                     print('doing ack_iter', ack_iter, 'for mves with suffix', suffix)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
@@ -252,9 +289,12 @@ for filename in filenames:
                     #best_pred = preds.max(dim=1)[0].view(-1)
                     #best_pred = sorted_preds[:, -top_k:]
 
-                    ei_sortidx = np.argsort(ei)
-                    ei_idx = ei_sortidx[-ack_batch_size*2:]
-                    best_pred = preds[:, ei_idx]
+                    if condense:
+                        ei_sortidx = np.argsort(ei)
+                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        best_pred = torch.cat([preds[:, ei_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
+                    else:
+                        best_pred = sorted_preds[:, -top_k:]
                     
                     mves_compute_batch_size = params.mves_compute_batch_size
                     mves_compute_batch_size = 3000
@@ -296,8 +336,12 @@ for filename in filenames:
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
-                        }, batch_output_dir + "/" + str(ack_iter) + ".pth")
+                        'best_hsic': best_hsic,
+                        'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
+                        'best_pdts': torch.from_numpy(best_pdts_10),
+                        }, batch_ack_output_file)
                     
+                    print('best so far:', labels[ack_array].max())
                     e = reparam.generate_prior_samples(100, e_dist)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
