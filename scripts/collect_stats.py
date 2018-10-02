@@ -5,20 +5,20 @@ import numpy as np
 import torch
 
 
-def get_data_mves(exp_folder, suffix):
-    num_samples = 8
+def get_data_mves(exp_folder, suffix, map_loc="cpu"):
+    num_samples = 10
     stats_mves = {}
     batches = [2, 5, 10, 20]
     for i_sample in range(1, num_samples+1):
         dirpath = exp_folder + "/output_" + suffix + str(i_sample)
         if not os.path.exists(dirpath):
             continue
+        print("reading sample", i_sample)
 
         for filename in os.listdir(dirpath):
             filepath = dirpath + "/" + filename
             if not os.path.isdir(filepath):
                 continue
-            print("reading", filepath)
 
             if filename not in stats_mves:
                 stats_mves[filename] = [ [] for i in range(len(batches))]
@@ -40,7 +40,7 @@ def get_data_mves(exp_folder, suffix):
 
                         i += 1
                         assert i < 20
-                        best_value = torch.load(batch_dir + "/" + str(i) + ".pth")['ack_labels'].max().item()
+                        best_value = torch.load(batch_dir + "/" + str(i) + ".pth", map_location=map_loc)['ack_labels'].max().item()
 
                         assert line[4][0] == "["
                         assert line[4][-1] == "]"
@@ -55,8 +55,8 @@ def get_data_mves(exp_folder, suffix):
             stats_mves[filename][i_batch] = np.array(stats_mves[filename][i_batch], dtype=np.float32)
     return stats_mves
 
-def get_data_ucb(exp_folder):
-    num_samples = 8
+def get_data_ucb(exp_folder, map_loc="cpu"):
+    num_samples = 10
     stats_mves = {}
     batches = [2, 5, 10, 20]
     ucb_coeffs = [0.0, 0.5, 1.0, 2.0, 3.0]
@@ -96,7 +96,7 @@ def get_data_ucb(exp_folder):
                                 continue
                             i += 1
                             assert i < 20
-                            best_value = torch.load(batch_dir + "/" + str(i) + ".pth")['ack_labels'].max().item()
+                            best_value = torch.load(batch_dir + "/" + str(i) + ".pth", map_location=map_loc)['ack_labels'].max().item()
 
                             assert line[4][0] == "["
                             assert line[4][-1] == "]"
