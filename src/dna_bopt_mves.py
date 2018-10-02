@@ -99,7 +99,7 @@ params = Params(
     train_lr=float(train_lr),
     compare_w_old=int(compare_w_old) == 1,
     pred_weighting=int(pred_weighting),
-    condense=int(condense) == 1,
+    condense=int(condense),
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -223,7 +223,7 @@ for filename in filenames:
         if not loaded:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
-        for ack_batch_size in [20]:
+        for ack_batch_size in [5]:
             print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
@@ -254,7 +254,7 @@ for filename in filenames:
                         qz_mves.load_state_dict(checkpoint['qz_state_dict'])
                         logging = checkpoint['logging']
 
-                        model_parameters = model_ei.parameters() + qz_ei.parameters()
+                        model_parameters = list(model_mves.parameters()) + list(qz_mves.parameters())
                         optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                         optim = optim.load_state_dict(checkpoint['optim'])
 
@@ -284,15 +284,23 @@ for filename in filenames:
                     f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
                     best_pdts_10 = labels[np.unique(sorted_preds_idx[:, -top_k:])][-10:]
                     f.write('best_pdts_10\t' + str(best_pdts_10.mean()) + "\t" + str(best_pdts_10.max()) + "\n")
-                    
+
                     sorted_preds = torch.sort(preds, dim=1)[0]    
                     #best_pred = preds.max(dim=1)[0].view(-1)
                     #best_pred = sorted_preds[:, -top_k:]
 
-                    if condense:
+                    if condense == 1:
                         ei_sortidx = np.argsort(ei)
                         ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
                         best_pred = torch.cat([preds[:, ei_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
+                    elif condense == 2:
+                        ei_sortidx = np.argsort(ei)
+                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        best_pred = preds[:, ei_idx]
+                    elif condense == 3:
+                        ei_sortidx = np.argsort(ei)
+                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx].unsqueeze(-1)], dim=-1)
                     else:
                         best_pred = sorted_preds[:, -top_k:]
                     
@@ -300,6 +308,7 @@ for filename in filenames:
                     mves_compute_batch_size = 3000
                     #ack_batch_size=params.ack_batch_size
                     mves_idx, best_hsic = bopt.acquire_batch_mves_sid(params, best_pred, preds, skip_idx_mves, mves_compute_batch_size, ack_batch_size, true_labels=labels, greedy_ordering=params.mves_greedy, pred_weighting=params.pred_weighting, normalize=True, divide_by_std=params.divide_by_std)
+                    print('best_hsic\t' + str(best_hsic))
                     f.write('best_hsic\t' + str(best_hsic) + "\n")
                     skip_idx_mves.update(mves_idx)
                     ack_all_mves.update(mves_idx)

@@ -242,7 +242,7 @@ for filename in filenames:
                         qz_ei.load_state_dict(checkpoint['qz_state_dict'])
                         logging = checkpoint['logging']
 
-                        model_parameters = model_ei.parameters() + qz_ei.parameters()
+                        model_parameters = list(model_ei.parameters()) + list(qz_ei.parameters())
                         optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                         optim = optim.load_state_dict(checkpoint['optim'])
 
