@@ -1139,6 +1139,115 @@ def ei_diversity_selection_detk(
     return chosen_idx
 
 
+def acquire_batch_self_hsic(
+    params,
+    candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
+    skip_idx,
+    mves_compute_batch_size,
+    ack_batch_size,
+    device : str = "cuda",
+    true_labels=None,
+    pred_weighting=0,
+)-> torch.tensor:
+
+    num_candidate_points = candidate_points_preds.shape[1]
+    num_samples = candidate_points_preds.shape[0]
+    min_pred = candidate_points_preds.min().to(device)
+    ei = candidate_points_preds.mean(dim=0).to(device)
+    ei = ei-ei.min()+0.1
+
+    batch_idx = set()
+    remaining_idx_set = set(range(num_candidate_points))
+    remaining_idx_set = remaining_idx_set.difference(skip_idx)
+    batch_dist_matrix = None # (num_samples, num_samples, 1)
+    batch_sum_pred = 0
+
+    while len(batch_idx) < ack_batch_size:
+        if len(batch_idx) > 0 and len(batch_idx) % 10 == 0 and type(true_labels) != type(None):
+            print(len(batch_idx), list(np.sort(true_labels[list(batch_idx)])[-5:]))
+
+        best_idx = None
+        best_idx_dist_matrix = None
+        best_hsic = None
+        
+        num_remaining = len(remaining_idx_set)
+        num_batches = num_remaining // mves_compute_batch_size + 1
+        remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
+
+        for bi in range(num_batches):
+            bs = bi*mves_compute_batch_size
+            be = min((bi+1)*mves_compute_batch_size, num_remaining)
+            cur_batch_size = be-bs
+            if cur_batch_size == 0:
+                continue
+            idx = remaining_idx[bs:be]
+
+            pred = candidate_points_preds[:, idx].to(device) # (num_samples, cur_batch_size)
+            dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size)
+
+            assert list(dist_matrix.shape) == [
+            num_samples, 
+            num_samples, 
+            cur_batch_size], str(dist_matrix.shape) + " == " \
+                    + str([num_samples, num_samples, cur_batch_size])
+
+            if batch_dist_matrix is not None:
+                dist_matrix += batch_dist_matrix # (n, n, m)
+
+            batch_kernel_matrix = getattr(hsic, params.mves_kernel_fn)(dist_matrix) \
+                    .detach() \
+                    .permute([2, 0, 1]) \
+                    .unsqueeze(-1) # (m, n, n, 1)
+
+            assert list(batch_kernel_matrix.shape) == [
+                    cur_batch_size, 
+                    num_samples, 
+                    num_samples, 
+                    1], str(batch_kernel_matrix.shape) + " == " \
+                            + str([cur_batch_size, num_samples, num_samples, 2])
+
+            self_hsic = torch.sqrt(
+                    hsic.total_hsic_parallel(
+                        batch_kernel_matrix.repeat([
+                            1, 1, 1, 2])).detach()).view(-1)
+
+            assert self_hsic.shape[0] == cur_batch_size
+            assert not ops.isinf(self_hsic)
+            assert not ops.isnan(self_hsic)
+
+            del batch_kernel_matrix
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            if pred_weighting > 0:
+                cur_batch_ei = (ei[bs:be] + batch_sum_pred) / (len(batch_idx) + 1)
+                if pred_weighting == 1:
+                    self_hsic *= cur_batch_ei
+                elif pred_weighting == 2:
+                    self_hsic = self_hsic * cur_batch_ei.std() + cur_batch_ei
+
+            sorted_idx = self_hsic.cpu().numpy().argsort()
+            best_cur_idx = sorted_idx[-1]
+
+            if best_idx is None or best_hsic < self_hsic[best_cur_idx]:
+                best_idx = idx[best_cur_idx].item()
+                best_idx_dist_matrix = dist_matrix[:, :, best_cur_idx:best_cur_idx+1].detach()
+                best_hsic = self_hsic[best_cur_idx].item()
+
+        assert best_hsic is not None
+        assert best_idx_dist_matrix is not None
+        assert best_idx is not None
+
+        batch_sum_pred += ei[best_idx]
+        batch_dist_matrix = best_idx_dist_matrix
+        best_hsic_overall = best_hsic
+        remaining_idx_set.remove(best_idx)
+        batch_idx.update({best_idx})
+
+    return batch_idx, best_hsic 
+
+
+
 def acquire_batch_mves_sid(
     params,
     opt_values : torch.tensor,
@@ -1147,7 +1256,6 @@ def acquire_batch_mves_sid(
     mves_compute_batch_size,
     ack_batch_size,
     greedy_ordering=False,
-    do_mean=False,
     device : str = "cuda",
     true_labels=None,
     pred_weighting=False,
@@ -1164,7 +1272,7 @@ def acquire_batch_mves_sid(
     ei = ei-ei.min()+0.1
 
     kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
-    opt_kernel_matrix = kernel_fn(opt_values, do_mean=do_mean).detach()  # shape (n=num_samples, n, 1)
+    opt_kernel_matrix = kernel_fn(opt_values).detach()  # shape (n=num_samples, n, 1)
 
     if normalize:
         opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2])).detach()).view(-1)
@@ -1199,7 +1307,7 @@ def acquire_batch_mves_sid(
             idx = remaining_idx[bs:be]
 
             pred = candidate_points_preds[:, idx].to(device) # (num_samples, cur_batch_size)
-            dist_matrix = hsic.sqdist(pred, do_mean=do_mean) # (num_samples, num_samples, cur_batch_size)
+            dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size)
 
             if pred_weighting == 1:
                 predsqrt_matrix = pred-min_pred + 0.1
