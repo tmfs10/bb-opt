@@ -22,6 +22,7 @@ log/
 *.fls
 *.svg
 *.pdf
+output_*
 chemical_vae
 
 # Do not include automake output

@@ -1,12 +1,23 @@
 
-import torch
 import sys
+import torch
 import torch.nn as nn
+from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import random
 import numpy as np
 from bb_opt.src import utils
-from bb_opt.src import hsic
+import ops
+
+
+class GaussianQz(nn.Module):
+    def __init__(self, num_latent, prior_std=1):
+        super(GaussianQz, self).__init__()
+        self.mu_z = Parameter(torch.zeros(num_latent))
+        self.std_z = Parameter(torch.ones(num_latent)*prior_std)
+
+    def forward(self, e):
+        return self.mu_z.unsqueeze(0) + e*self.std_z.unsqueeze(0)
 
 
 def gaussian_kl(mean, std, prior_std, device):
@@ -18,14 +29,14 @@ def gaussian_kl(mean, std, prior_std, device):
     #return 0.5 * torch.sum((1+torch.log(var)) - mean**2 - var)
 
 
-def init_train(params, model_parameters, X, Y):
+def init_train(batch_size, lr, model_parameters, X, Y):
     assert X.shape[0] == Y.shape[0]
 
     N = X.shape[0]
-    num_batches = N//params.batch_size
-    batches = [i*params.batch_size  for i in range(num_batches)] + [N]
+    num_batches = N//batch_size
+    batches = [i*batch_size  for i in range(num_batches)] + [N]
 
-    optim = torch.optim.Adam(model_parameters, lr=params.lr)
+    optim = torch.optim.Adam(model_parameters, lr=lr)
 
     return batches, optim
 
@@ -36,32 +47,106 @@ def expand_to_sample(X, num_samples):
     return X
 
 
-def predict_no_resize(X, model, qz, e, device='cuda'):
+def predict_no_resize(X, model, qz, e, device='cuda', output_device='cuda', batch_size=0, expansion_size=0, all_pairs=True):
     model = model.to(device)
-    X = X.to(device)
     qz = qz.to(device)
+    X = X.to(device)
     e = e.to(device)
 
     num_samples = e.shape[0]
     assert num_samples > 0
     N = X.shape[0]
     z = qz(e)
-    output = model(X, z)
 
+    num_samples = z.shape[0]
+    N = X.shape[0]
+
+    if batch_size == 0:
+        if all_pairs:
+            X = collated_expand(X, num_samples)
+            z2 = z.repeat([N, 1])
+        else:
+            assert N == num_samples
+            z2 = z
+        output = model(X, z2)
+    else:
+        assert batch_size > 0
+
+        if not all_pairs:
+            num_total = X.shape[0]
+            num_batches = num_total//batch_size + 1
+            output = []
+            for bi in range(num_batches):
+                bs = bi*batch_size
+                be = min((bi+1)*batch_size, num_total)
+                output += [model(X[bs:be], z[bs:be]).detach().to(output_device)]
+            output = torch.cat(output, dim=0)
+        else:
+            if expansion_size == 0:
+                X = collated_expand(X, num_samples)
+                z2 = z.repeat([N, 1])
+
+                num_total = X.shape[0]
+                num_batches = num_total//batch_size + 1
+
+                output = []
+                for bi in range(num_batches):
+                    bs = bi*batch_size
+                    be = min((bi+1)*batch_size, num_total)
+
+                    if be <= bs:
+                        continue
+
+                    output += [model(X[bs:be], z2[bs:be]).detach().to(output_device)]
+                output = torch.cat(output, dim=0)
+            else:
+                num_expansion_batches = N//expansion_size + 1
+
+                output = []
+                for ebi in range(num_expansion_batches):
+                    ebs = ebi*expansion_size
+                    ebe = min((ebi+1)*expansion_size, N)
+
+                    if ebe <= ebs:
+                        continue
+
+                    N2 = ebe-ebs
+
+                    X2 = collated_expand(X[ebs:ebe], num_samples)
+                    z2 = z.repeat([N2, 1])
+
+                    num_total = X2.shape[0]
+                    num_batches = num_total//batch_size + 1
+
+                    for bi in range(num_batches):
+                        bs = bi*batch_size
+                        be = min((bi+1)*batch_size, num_total)
+
+                        if be <= bs:
+                            continue
+                        output += [model(X2[bs:be], z2[bs:be]).detach().to(output_device)]
+                output = torch.cat(output, dim=0)
     return output, z
 
 
-def predict(X, model, qz, e, device='cuda'):
+def predict(X, model, qz, e, device='cuda', output_device='cuda', batch_size=0, expansion_size=0, all_pairs=True):
     num_samples = e.shape[0]
-    output, z = predict_no_resize(X, model, qz, e, device)
-    return output.detach().view(-1, num_samples, 2)
+    output, z = predict_no_resize(X, model, qz, e, device=device, batch_size=batch_size, output_device=output_device, expansion_size=expansion_size, all_pairs=all_pairs)
+    output_non_batch_shape = list(output.shape[1:])
+    output = output.detach().view([-1, num_samples] + output_non_batch_shape)
+    assert output.shape[1] == num_samples
+    return output
 
 
-def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
+def generate_ensemble_from_stochastic_net(model, qz, e):
+    def forward(x, *args, **kwargs):
+        return predict(x, model, qz, e, *args, **kwargs)
+    return forward
+
+
+def compute_loss(params, batch_size, num_samples, X, Y, model, qz, e, hsic_lambda=0):
     do_hsic = hsic_lambda > 1e-9
     N = X.shape[0]
-    num_samples = params.num_samples
-    batch_size = params.batch_size
     assert num_samples == e.shape[0]
 
     if N > batch_size:
@@ -88,20 +173,29 @@ def compute_loss(params, X, Y, model, qz, e, hsic_lambda=0):
         bX = bX.to(params.device)
         bY = bY.to(params.device)
 
-        bY = utils.collated_expand(bY, num_samples)
+        bY = collated_expand(bY, num_samples)
 
         output, z = predict_no_resize(X, model, qz, e)
         assert z.shape[0] == num_samples
-        mu = output[:, 0]
-        std = output[:, 1]
 
-        assert mu.shape[0] == std.shape[0]
+        if output.ndimension() == 1:
+            mu = output
+        else:
+            assert output.ndimension() == 2
+            mu = output[:, 0]
 
         if params.output_dist_std > 0:
-            std[:] = params.output_dist_std
+            std = torch.ones(mu.shape, device=params.device)*params.output_dist_std
+        else:
+            assert output.ndimension() == 2
+            assert output.shape[1] == 2
+            std = output[:, 1]
+
+        assert mu.shape[0] == std.shape[0]
         output_dist = params.output_dist_fn(mu, std)
 
-        log_prob_loss += -torch.mean(output_dist.log_prob(bY))/num_batches
+        log_prob = output_dist.log_prob(bY)
+        log_prob_loss += -torch.mean(log_prob)/num_batches
         #log_prob_loss += torch.mean((bY-mu)**2)/num_batches
 
         if do_hsic:
@@ -152,7 +246,8 @@ def generate_prior_samples(num_samples, e_dist, device='cuda'):
     e = torch.stack(e, dim=0)
     return e
 
-def train_model_reparam(model, X, Y, n_epochs, batch_size):
+
+def train(batch_size, lr, X, Y, model, qz, e_dist):
     assert X.shape[0] == Y.shape[0]
 
     model, qz, e_dist, params = model
@@ -161,7 +256,7 @@ def train_model_reparam(model, X, Y, n_epochs, batch_size):
     num_batches = N // batch_size
 
     model_parameters = model.parameters() + qz.parameters()
-    batches, optim = init_train(params, model_parameters, X, Y)
+    batches, optim = init_train(batch_size, lr, model_parameters, X, Y)
 
     for epoch_iter in n_epochs:
         for bi in num_batches:
