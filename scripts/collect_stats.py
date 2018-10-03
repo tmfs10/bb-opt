@@ -55,7 +55,7 @@ def get_data_mves(exp_folder, suffix, map_loc="cpu"):
             stats_mves[filename][i_batch] = np.array(stats_mves[filename][i_batch], dtype=np.float32)
     return stats_mves
 
-def get_data_ucb(exp_folder, map_loc="cpu"):
+def get_data_ucb(exp_folder, suffix, map_loc="cpu"):
     num_samples = 10
     stats_mves = {}
     batches = [2, 5, 10, 20]
@@ -66,7 +66,7 @@ def get_data_ucb(exp_folder, map_loc="cpu"):
         print("reading", i_ucb)
         num_samples_read = 0
         for i_sample in range(1, num_samples+1):
-            dirpath = exp_folder + "/output_ucb_n" + str(i_sample) + "_" + str(ucb)
+            dirpath = exp_folder + "/output_ucb_" + suffix + str(i_sample) + "_" + str(ucb)
             if not os.path.exists(dirpath):
                 continue
 
@@ -92,16 +92,18 @@ def get_data_ucb(exp_folder, map_loc="cpu"):
                         for line in f:
                             line = [k.strip() for k in line.strip().split("\t")]
 
-                            if len(line) != 5:
+                            if line[0].startswith("best_ei_10"):
                                 continue
                             i += 1
                             assert i < 20
                             best_value = torch.load(batch_dir + "/" + str(i) + ".pth", map_location=map_loc)['ack_labels'].max().item()
 
-                            assert line[4][0] == "["
-                            assert line[4][-1] == "]"
-                            top_idx_frac = [float(k) for k in line[4][1:-1].split(",")]
-                            assert len(top_idx_frac) == 4
+                            #assert line[4][0] == "[", str(line[4])
+                            #assert line[4][-1] == "]", str(line[4])
+
+                            top_idx_frac = line[4].split("[")[-1][:-1].split(",")
+                            top_idx_frac = [float(k) for k in top_idx_frac]
+                            assert len(top_idx_frac) == 4, str(top_idx_frac) + "\t" + batch_dir
 
                             stats_ucb[i_ucb][filename][i_batch][-1] += [ [float(k) for k in line[:4]] + [best_value] + top_idx_frac ]
                     stats_ucb[i_ucb][filename][i_batch][-1] = np.array(stats_ucb[i_ucb][filename][i_batch][-1], dtype=np.float32)
