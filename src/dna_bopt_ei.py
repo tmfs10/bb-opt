@@ -253,8 +253,11 @@ for filename in filenames:
 
                     print('doing ack_iter', ack_iter)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
-                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device=params.device) # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
+
+                    #preds_for_ei = torch.max(preds - train_Y_ei.max(), torch.tensor(0.).to(params.device))
+                    #assert preds_for_ei.shape == preds.shape, str(preds_for_ei.shape)
 
                     top_k = max(params.mves_diversity, ack_batch_size)
 
@@ -284,7 +287,7 @@ for filename in filenames:
                         assert False, "Not implemented"
 
                     best_ei_10 = labels[ei_sortidx[-10:]]
-                    f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()))
+                    f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()) + "\t")
 
                     ack_all_ei.update(ei_idx)
                     skip_idx_ei.update(ei_idx)

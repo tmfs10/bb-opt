@@ -223,7 +223,7 @@ for filename in filenames:
         if not loaded:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
-        for ack_batch_size in [5]:
+        for ack_batch_size in [20]:
             print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
@@ -289,20 +289,26 @@ for filename in filenames:
                     #best_pred = preds.max(dim=1)[0].view(-1)
                     #best_pred = sorted_preds[:, -top_k:]
 
-                    if condense == 1:
+                    if params.condense == 1:
+                        print(1)
                         ei_sortidx = np.argsort(ei)
                         ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
                         best_pred = torch.cat([preds[:, ei_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
-                    elif condense == 2:
+                    elif params.condense == 2:
+                        print(2)
                         ei_sortidx = np.argsort(ei)
                         ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
                         best_pred = preds[:, ei_idx]
-                    elif condense == 3:
+                    elif params.condense == 3:
+                        print(3)
                         ei_sortidx = np.argsort(ei)
                         ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
                         best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx].unsqueeze(-1)], dim=-1)
-                    else:
+                    elif params.condense == 0:
+                        print(0)
                         best_pred = sorted_preds[:, -top_k:]
+                    else:
+                        assert False
                     
                     mves_compute_batch_size = params.mves_compute_batch_size
                     mves_compute_batch_size = 3000
@@ -332,6 +338,7 @@ for filename in filenames:
                         qz_mves, 
                         e_dist)
 
+                    print("train_X.shape:", train_X_mves.shape)
                     print('logging:', [k[-1] for k in logging])
                     f.write(str([k[-1] for k in logging]) + "\n")
                     logging = [torch.tensor(k) for k in logging]

@@ -1261,6 +1261,7 @@ def acquire_batch_mves_sid(
     pred_weighting=False,
     normalize=True,
     divide_by_std=False,
+    double=False,
 )-> torch.tensor:
 
     opt_values = opt_values.to(device)
@@ -1330,7 +1331,12 @@ def acquire_batch_mves_sid(
                 self_kernel_matrix = batch_kernel_matrix.repeat([1, 1, 1, 2]).detach() # (m, n, n, 2)
                 assert list(self_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 2], str(self_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
 
-                hsic_logvar = torch.log(hsic.total_hsic_parallel(self_kernel_matrix).detach()).view(-1)
+                if double:
+                    hsic_logvar = hsic.total_hsic_parallel(self_kernel_matrix.double()).detach()
+                else:
+                    hsic_logvar = hsic.total_hsic_parallel(self_kernel_matrix).detach()
+                #assert ops.tensor_all(hsic_logvar > 0)
+                hsic_logvar = torch.log(hsic_logvar).view(-1).float()
                 assert hsic_logvar.shape[0] == cur_batch_size
                 assert not ops.isinf(hsic_logvar)
                 assert not ops.isnan(hsic_logvar)

@@ -88,17 +88,16 @@ def train(
     train_X, train_Y, val_X, val_Y = data
 
     N = train_X.shape[0]
-    num_batches = N//batch_size
     print("training:")
-    print(str(N) + " samples")
     print(str(batch_size) + " batch_size")
-    print(str(num_batches) + " num_batches")
     print(str(num_epochs) + " num_epochs")
 
     model_parameters = []
     for m in [model, qz]:
         model_parameters += list(m.parameters())
     batches, optim = reparam.init_train(batch_size, lr, model_parameters, train_X, train_Y)
+    num_batches = len(batches)-1
+    print(str(num_batches) + " num_batches")
 
     progress = tnrange(num_epochs)
 
@@ -107,6 +106,8 @@ def train(
             bs = batches[bi]
             be = batches[bi+1]
             bN = be-bs
+            if bN <= 0:
+                continue
 
             bX = train_X[bs:be]
             bY = train_Y[bs:be]

@@ -12,11 +12,11 @@ import torch.distributions as tdist
 import reparam_trainer as reparam
 import numpy as np
 from scipy.stats import kendalltau
-import chemvae_bopt as cbopt
 import bayesian_opt as bopt
 from gpu_utils.utils import gpu_init
 from tqdm import tnrange
 import pandas as pd
+import chemvae_bopt as cbopt
 import copy
 
 if len(sys.argv) < 11:
@@ -68,25 +68,25 @@ Params = namedtuple('params', [
     'train_batch_size', 
     'hsic_train_lambda',
     
-    'ack_batch_size',
-    'num_acks',
-    'mves_kernel_fn',
     'input_opt_num_iter',
     'ack_num_model_samples',
     'hsic_diversity_lambda',
-    'mves_compute_batch_size',
     'mves_diversity',
     'ei_diversity',
     
     'ack_batch_size',
     'num_acks',
     'mves_kernel_fn',
-    'ack_num_model_samples',
-    'ack_num_pdts_points',
-    'hsic_diversity_lambda',
     'mves_compute_batch_size',
-    'mves_diversity',
-    'mves_greedy',
+
+    'prop_activation',
+    'prop_pred_num_input_features',
+    'prop_pred_num_random_inputs',
+    'prop_pred_num_hidden',
+    'prop_pred_dropout',
+    'prop_pred_depth',
+    'prop_pred_growth_factor',
+    'prop_batchnorm',
 
     'retrain_num_epochs',
     'retrain_batch_size',
@@ -122,7 +122,7 @@ params = Params(
     ei_diversity=ei_diversity_measure.lower(),
     
     prop_activation='relu',
-    prop_pred_num_input_features=chemvae_num_z,
+    prop_pred_num_input_features=196,
     prop_pred_num_random_inputs=10,
     prop_pred_num_hidden=67,
     prop_pred_dropout=0.15694573998898703,
@@ -135,21 +135,17 @@ params = Params(
     retrain_lr=1e-4,
     hsic_retrain_lambda=20.,
     num_retrain_latent_samples=10,
-
-    score_fn=lambda x : 5*x[1]-x[2],
 )
 
 n_train = 20
 
-filedir = data_dir + "/" + filename + "/"
-if not os.path.exists(filedir):
-    continue
-print('doing file:', filedir)
-inputs = np.load(filedir+"inputs.npy")
-labels = np.load(filedir+"labels.npy")
+inputs = np.load("/cluster/sj1/bb_opt/data/chemvae_inputs.npy").astype(np.float32)
+labels = np.load("/cluster/sj1/bb_opt/data/chemvae_labels.npy").astype(np.float32)
+
+#labels = np.array([params.score_fn(k) for k in labels], dtype=np.float32)
 
 output_dir2 = output_dir + "_" + str(params.ucb)
-main_output_dir = output_dir2 + "/" + filename
+main_output_dir = output_dir2 + "/chemvae"
 
 if not os.path.exists(output_dir2):
     os.mkdir(output_dir2)
@@ -214,7 +210,7 @@ if os.path.isfile(init_model_path):
     if "train_idx" in checkpoint:
         train_idx = checkpoint["train_idx"].numpy()
 else:
-    logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+    logging, optim = cbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
     print('logging:', [k[-1] for k in logging])
     logging = [torch.tensor(k) for k in logging]
 
@@ -234,7 +230,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
     if not loaded:
         main_f.write(str([k[-1] for k in logging]) + "\n")
 
-    for ack_batch_size in [2, 5, 10, 20]:
+    for ack_batch_size in [5]:
         batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
         try:
             os.mkdir(batch_output_dir)
@@ -265,7 +261,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                     qz_ei.load_state_dict(checkpoint['qz_state_dict'])
                     logging = checkpoint['logging']
 
-                    model_parameters = model_ei.parameters() + qz_ei.parameters()
+                    model_parameters = list(model_ei.parameters()) + list(qz_ei.parameters())
                     optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                     optim = optim.load_state_dict(checkpoint['optim'])
 
@@ -276,7 +272,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
 
                 print('doing ack_iter', ack_iter)
                 model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
-                preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                preds = model_ensemble(X, expansion_size=1000, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                 preds = preds.transpose(0, 1)
 
                 top_k = max(params.mves_diversity, ack_batch_size)
@@ -319,7 +315,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                 train_X_ei = torch.cat([train_X_ei, ack_ei], dim=0)
                 train_Y_ei = torch.cat([train_Y_ei, ack_ei_vals], dim=0)
                 data = [train_X_ei, train_Y_ei, val_X, val_Y]
-                logging, optim = dbopt.train(
+                logging, optim = cbopt.train(
                     params, 
                     params.retrain_batch_size, 
                     params.retrain_lr,
@@ -348,9 +344,10 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                     'ack_labels': torch.from_numpy(labels[ack_array]),
                     }, batch_ack_output_file)
                 
+                print('best so far:', labels[ack_array].max())
                 e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
                 model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
-                preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                preds = model_ensemble(X, expansion_size=1000, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                 preds = preds.transpose(0, 1)
                 ei = preds.mean(dim=0).view(-1).cpu().numpy()
                 ei_sortidx = np.argsort(ei)[-50:]

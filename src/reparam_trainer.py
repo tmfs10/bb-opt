@@ -37,7 +37,7 @@ def init_train(batch_size, lr, model_parameters, X, Y):
     assert X.shape[0] == Y.shape[0]
 
     N = X.shape[0]
-    num_batches = N//batch_size
+    num_batches = N//batch_size+1
     batches = [i*batch_size  for i in range(num_batches)] + [N]
 
     optim = torch.optim.Adam(model_parameters, lr=lr)
@@ -106,6 +106,7 @@ def predict_no_resize(X, model, qz, e, device='cuda', output_device='cuda', batc
 
                 output = []
                 for ebi in range(num_expansion_batches):
+                    output += [[]]
                     ebs = ebi*expansion_size
                     ebe = min((ebi+1)*expansion_size, N)
 
@@ -126,7 +127,8 @@ def predict_no_resize(X, model, qz, e, device='cuda', output_device='cuda', batc
 
                         if be <= bs:
                             continue
-                        output += [model(X2[bs:be], z2[bs:be]).detach().to(output_device)]
+                        output[-1] += [model(X2[bs:be], z2[bs:be]).detach().to(output_device)]
+                    output[-1] = torch.cat(output[-1], dim=0).view(-1)
                 output = torch.cat(output, dim=0)
     return output, z
 

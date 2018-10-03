@@ -6,10 +6,7 @@ import hsic
 import torch
 import torch.nn as nn
 
-from chemvae_keras import vae_utils
-from chemvae_keras import mol_utils as mu
-
-import utils
+import non_matlab_utils as utils
 import reparam_trainer as reparam
 from tqdm import tnrange
 
@@ -90,6 +87,10 @@ class PropertyPredictor(nn.Module):
 
 def train(
         params,
+        batch_size,
+        lr,
+        num_epochs,
+        hsic_lambda,
         num_latent_samples,
         data,
         model,
@@ -99,7 +100,6 @@ def train(
     losses = []
     kl_losses = []
     hsic_losses = []
-    val_losses = []
 
     corrs = []
     val_corrs = []
@@ -107,32 +107,34 @@ def train(
     train_X, train_Y, val_X, val_Y = data
 
     N = train_X.shape[0]
-    num_batches = N//params.train_batch_size
     print("training:")
     print(str(N) + " samples")
-    print(str(params.train_batch_size) + " batch_size")
-    print(str(num_batches) + " num_batches")
-    print(str(params.num_epochs) + " num_epochs")
+    print(str(batch_size) + " batch_size")
+    print(str(num_epochs) + " num_epochs")
 
     model_parameters = []
     for m in [model, qz]:
         model_parameters += list(m.parameters())
-    batches, optim = reparam.init_train(params.train_batch_size, params.train_lr, model_parameters, train_X, train_Y)
+    batches, optim = reparam.init_train(batch_size, lr, model_parameters, train_X, train_Y)
+    num_batches = len(batches)-1
+    print(str(num_batches) + " num_batches")
 
-    progress = tnrange(params.num_epochs)
+    progress = tnrange(num_epochs)
 
     for epoch_iter in progress:
         for bi in range(num_batches):
             bs = batches[bi]
             be = batches[bi+1]
             bN = be-bs
+            if bN <= 0:
+                continue
 
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
 
             for k in range(1):
                 e = reparam.generate_prior_samples(num_latent_samples, e_dist)
-                loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, params.train_batch_size, num_latent_samples, bX, bY, model, qz, e, hsic_lambda=params.hsic_train_lambda)
+                loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, batch_size, num_latent_samples, bX, bY, model, qz, e, hsic_lambda=hsic_lambda)
 
                 losses += [log_prob_loss]
                 kl_losses += [kl_loss]
@@ -157,7 +159,7 @@ def train(
         progress.set_description(f"Corr: {val_corr:.3f}")
         progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1], 'train_corr' : corrs[-1]})
 
-    return losses, kl_losses, hsic_losses, val_losses, corrs, val_corrs
+    return [losses, kl_losses, hsic_losses, corrs, val_corrs], optim
 
 
 def z_to_smiles(vae, z, decode_attempts=1000, noise_norm=1.0):
@@ -186,6 +188,7 @@ def acquire_properties(encoded, vae, decode_attempts=1000, noise=0.1, device='cu
 
 
 def load_zinc250k(num_to_load=0, score_fn=None, batch_size=128):
+    from chemvae_keras import vae_utils
     filename = '/cluster/sj1/bb_opt/chemical_vae/models/zinc_properties/250k_rndm_zinc_drugs_clean_3.csv'
     zinc250k = [[], []]
     with open(filename) as f:
