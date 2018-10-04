@@ -366,18 +366,6 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
 
                 ack_array = np.array(list(ack_all_mves), dtype=np.int32)
 
-                torch.save({
-                    'model_state_dict': model_mves.state_dict(), 
-                    'qz_state_dict': qz_mves.state_dict(),
-                    'logging': logging,
-                    'optim': optim.state_dict(),
-                    'ack_idx': torch.from_numpy(ack_array),
-                    'ack_labels': torch.from_numpy(labels[ack_array]),
-                    'best_hsic': best_hsic,
-                    'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
-                    'best_pdts': torch.from_numpy(best_pdts_10),
-                    }, batch_ack_output_file)
-                
                 print('best so far:', labels[ack_array].max())
                 e = reparam.generate_prior_samples(100, e_dist)
                 model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
@@ -401,4 +389,17 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
 
                 print(s)
                 f.write(s + "\n")
+
+                torch.save({
+                    'model_state_dict': model_mves.state_dict(), 
+                    'qz_state_dict': qz_mves.state_dict(),
+                    'logging': logging,
+                    'optim': optim.state_dict(),
+                    'ack_idx': torch.from_numpy(ack_array),
+                    'ack_labels': torch.from_numpy(labels[ack_array]),
+                    'best_hsic': best_hsic,
+                    'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
+                    'best_pdts': torch.from_numpy(best_pdts_10),
+                    }, batch_ack_output_file)
+                
         main_f.write(str(ack_batch_size) + "\t" + s + "\n")

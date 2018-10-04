@@ -274,9 +274,34 @@ for filename in filenames:
                     
                     top_k = params.mves_diversity
                     
-                    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-                    std = preds.std(dim=0).view(-1).cpu().numpy()
+                    sorted_preds_idx = []
+                    for i in range(preds.shape[0]):
+                        sorted_preds_idx += [np.argsort(preds[i].numpy())]
+                    sorted_preds_idx = np.array(sorted_preds_idx)
+                    #f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
+                    best_pdts_10 = labels[np.unique(sorted_preds_idx[:, -top_k:])][-10:]
+                    #f.write('best_pdts_10\t' + str(best_pdts_10.mean()) + "\t" + str(best_pdts_10.max()) + "\n")
 
+                    num_pdts_cands = params.mves_diversity * ack_batch_size
+                    pdts_idx = set()
+                    for draw in range(min(num_pdts_cands, sorted_preds_idx.shape[0])):
+                        for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
+                            idx = sorted_preds_idx[draw, rank]
+                            if idx not in pdts_idx:
+                                if len(pdts_idx) >= num_pdts_cands:
+                                    break
+                                pdts_idx.update({idx})
+                                break
+                    assert len(pdts_idx) == num_pdts_cands
+                    pdts_idx = list(pdts_idx)
+
+                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
+                    preds = preds.transpose(0, 1)
+                    
+                    if not params.compare_w_old:
+                        preds[:, list(skip_idx_mves)] = preds.min()
+                    
                     sorted_preds_idx = []
                     for i in range(preds.shape[0]):
                         sorted_preds_idx += [np.argsort(preds[i].numpy())]
@@ -285,17 +310,6 @@ for filename in filenames:
                     best_pdts_10 = labels[np.unique(sorted_preds_idx[:, -top_k:])][-10:]
                     f.write('best_pdts_10\t' + str(best_pdts_10.mean()) + "\t" + str(best_pdts_10.max()) + "\n")
 
-                    num_pdts_cands = params.mves_diversity * ack_batch_size
-                    pdts_idx = set()
-                    for draw in range(min(num_pdts_cands, sorted_preds_idx.shape[0])):
-                        for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
-                            idx = sorted_preds_idx[draw, rank]
-                            if idx not in pdts_idx:
-                                pdts_idx.update({idx})
-                                break
-                    assert len(pdts_idx) == num_pdts_cands
-                    pdts_idx = list(pdts_idx)
-                    
                     sorted_preds = torch.sort(preds, dim=1)[0]    
                     #best_pred = preds.max(dim=1)[0].view(-1)
                     #best_pred = sorted_preds[:, -top_k:]
@@ -317,6 +331,10 @@ for filename in filenames:
                     
                     train_X_mves = torch.cat([train_X_mves, ack_mves], dim=0)
                     train_Y_mves = torch.cat([train_Y_mves, ack_mves_vals], dim=0)
+
+                    print("train_X.shape:", train_X_mves.shape)
+
+
                     data = [train_X_mves, train_Y_mves, val_X, val_Y]
                     logging, optim = dbopt.train(
                         params, 

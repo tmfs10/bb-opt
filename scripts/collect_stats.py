@@ -46,8 +46,12 @@ def get_data_mves(exp_folder, suffix, map_loc="cpu"):
                         assert line[4][-1] == "]"
                         top_idx_frac = [float(k) for k in line[4][1:-1].split(",")]
                         assert len(top_idx_frac) == 4
+                        arr =  [float(k) for k in line[:4]] + [best_value] + top_idx_frac 
+                        for k in arr:
+                            assert type(k) == float
+                        assert len(arr) == 9, len(arr)
 
-                        stats_mves[filename][i_batch][-1] += [ [float(k) for k in line[:4]] + [best_value] + top_idx_frac ]
+                        stats_mves[filename][i_batch][-1] = [arr]
                 stats_mves[filename][i_batch][-1] = np.array(stats_mves[filename][i_batch][-1], dtype=np.float32) # (num_acks, 9)
 
     for filename in stats_mves:

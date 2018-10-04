@@ -259,6 +259,8 @@ for filename in filenames:
                     preds = preds.transpose(0, 1)
                     preds = preds[:ack_batch_size, :]
 
+                    preds[:, list(skip_idx_pdts)] = preds.min()
+
                     top_k = params.pdts_diversity
                     
                     sorted_preds_idx = []
@@ -271,6 +273,8 @@ for filename in filenames:
                     for draw in range(min(ack_batch_size, sorted_preds_idx.shape[0])):
                         for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
                             idx = sorted_preds_idx[draw, rank]
+                            if len(pdts_idx) >= ack_batch_size:
+                                break
                             if idx not in pdts_idx:
                                 pdts_idx.update({idx})
                                 break
