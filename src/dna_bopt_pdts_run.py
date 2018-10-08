@@ -19,11 +19,11 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 10:
+if len(sys.argv) < 11:
     print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <data dir> <filename file> <output dir> <suffix>")
     sys.exit(1)
 
-num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
+num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, pdts_density, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
 
 if output_dir[-1] == "/":
     output_dir = output_dir[:-1]
@@ -67,6 +67,7 @@ Params = namedtuple('params', [
     'num_latent_vars',
     'train_batch_size', 
     'hsic_train_lambda',
+    'pdts_density',
     
     'ack_batch_size',
     'num_acks',
@@ -92,6 +93,7 @@ params = Params(
     device='cuda',
     num_epochs=int(init_train_epochs),
     train_lr=float(train_lr),
+    pdts_density=int(pdts_density) == 1,
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -178,7 +180,7 @@ for filename in filenames:
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
+    model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, params.prior_std)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = main_output_dir + "/init_model.pth"
@@ -260,35 +262,53 @@ for filename in filenames:
                     preds = preds[:ack_batch_size, :]
 
                     preds[:, list(skip_idx_pdts)] = preds.min()
+                    sorted_preds, sorted_preds_idx = torch.sort(preds, dim=1, descending=True)
 
                     top_k = params.pdts_diversity
                     
-                    sorted_preds_idx = []
-                    for i in range(preds.shape[0]):
-                        sorted_preds_idx += [np.argsort(preds[i].numpy())]
-                    sorted_preds_idx = np.array(sorted_preds_idx)
-                    f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -1:].flatten()))) + "\n")
-
                     pdts_idx = set()
-                    for draw in range(min(ack_batch_size, sorted_preds_idx.shape[0])):
+                    if params.pdts_density:
+                        counts = np.zeros(sorted_preds_idx.shape[1])
                         for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
-                            idx = sorted_preds_idx[draw, rank]
+                            counts[:] = 0
+                            for idx in sorted_preds_idx[:, rank]:
+                                counts[idx] += 1
+                            counts_idx = counts.argsort()[::-1]
+                            j = 0
+                            while len(pdts_idx) < ack_batch_size and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
+                                pdts_idx.update({counts_idx[j]})
+                                j += 1
                             if len(pdts_idx) >= ack_batch_size:
                                 break
-                            if idx not in pdts_idx:
-                                pdts_idx.update({idx})
+                    else:
+                        for i_model in range(sorted_preds_idx.shape[0]):
+                            for idx in sorted_preds_idx[i_model]:
+                                if idx not in pdts_idx:
+                                    pdts_idx.update({idx})
+                                    break
+                            if len(pdts_idx) >= ack_batch_size:
                                 break
-                    assert len(pdts_idx) == ack_batch_size
                     pdts_idx = list(pdts_idx)
+                    assert len(pdts_idx) == ack_batch_size
 
                     ack_all_pdts.update(pdts_idx)
                     skip_idx_pdts.update(pdts_idx)
+
+                    new_idx = list(skip_idx_pdts)
+                    random.shuffle(new_idx)
+                    new_idx = torch.LongTensor(new_idx)
                     
                     ack_pdts = X[pdts_idx]
                     ack_pdts_vals = (Y[pdts_idx]-float(train_label_mean))/float(train_label_std)
 
-                    train_X_pdts = torch.cat([train_X_pdts, ack_pdts], dim=0)
-                    train_Y_pdts = torch.cat([train_Y_pdts, ack_pdts_vals], dim=0)
+                    train_X_pdts = X.new_tensor(X[new_idx])
+                    train_Y_pdts = Y.new_tensor(Y[new_idx])
+
+                    Y_mean = train_Y_pdts.mean()
+                    Y_std = train_Y_pdts.std()
+
+                    train_Y_pdts = (train_Y_pdts-Y_mean)/Y_std
+
                     data = [train_X_pdts, train_Y_pdts, val_X, val_Y]
                     logging, optim = dbopt.train(
                         params, 

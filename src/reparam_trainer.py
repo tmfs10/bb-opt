@@ -167,10 +167,12 @@ def compute_loss(params, batch_size, num_samples, X, Y, model, qz, e, hsic_lambd
     kl_loss = 0
     hsic_loss = torch.tensor(0., device=params.device)
     loss = 0
-    for bi in range(num_batches):
+    for bi in range(len(batches)-1):
         bs = batches[bi]
         be = batches[bi+1]
         bN = be-bs
+        if bN <= 0:
+            continue
 
         bX = X[bs:be]
         bY = Y[bs:be]
@@ -179,7 +181,7 @@ def compute_loss(params, batch_size, num_samples, X, Y, model, qz, e, hsic_lambd
 
         bY = collated_expand(bY, num_samples)
 
-        output, z = predict_no_resize(X, model, qz, e)
+        output, z = predict_no_resize(bX, model, qz, e)
         assert z.shape[0] == num_samples
 
         if output.ndimension() == 1:
@@ -218,18 +220,6 @@ def compute_loss(params, batch_size, num_samples, X, Y, model, qz, e, hsic_lambd
             kernels = torch.cat([mu_kernels, z_kernels], dim=-1)
             total_hsic = torch.mean(hsic.total_hsic_parallel(kernels))
             hsic_loss += total_hsic/num_batches
-
-            """
-            for di in random_d:
-                s = di*num_samples
-                e = (di+1)*num_samples
-                mu2 = mu[s:e]
-                mu_kernels = hsic.two_vec_mixrq_kernels(mu2, mu2)
-                kernels = torch.cat([mu_kernels, z_kernels], dim=-1)
-                total_hsic = hsic.total_hsic(kernels)
-                #hsic_loss_vec[di] = total_hsic
-                hsic_loss += total_hsic/(num_batches*len(random_d))
-            """
 
         loss += -hsic_lambda*hsic_loss
         loss += log_prob_loss

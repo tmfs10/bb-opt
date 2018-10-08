@@ -294,7 +294,6 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                             ei_idx += [idx]
                         if len(ei_idx) >= top_k:
                             break
-                    ei_idx = np.random.choice(ei_idx, ack_batch_size).tolist()
                 elif "hsic" in params.ei_diversity:
                     ei_idx = bopt.ei_diversity_selection_hsic(params, preds, skip_idx_ei, device=params.device)
                 elif "detk" in params.ei_diversity:
@@ -302,6 +301,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                 else:
                     assert False, "Not implemented"
 
+                assert len(ei_idx) == ack_batch_size
                 best_ei_10 = labels[ei_sortidx[-10:]]
                 f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()))
 
@@ -313,6 +313,7 @@ with open(main_output_dir + "/stats.txt", 'a') as main_f:
                 ack_ei_vals = (Y[ei_idx]-float(train_label_mean))/float(train_label_std)
                 
                 train_X_ei = torch.cat([train_X_ei, ack_ei], dim=0)
+                print(train_X_ei.shape, len(ack_ei))
                 train_Y_ei = torch.cat([train_Y_ei, ack_ei_vals], dim=0)
                 data = [train_X_ei, train_Y_ei, val_X, val_Y]
                 logging, optim = cbopt.train(

@@ -177,7 +177,7 @@ for filename in filenames:
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
+    model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, device=params.device)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = main_output_dir + "/init_model.pth"
@@ -211,7 +211,7 @@ for filename in filenames:
         if not loaded:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
-        for ack_batch_size in [2, 5, 10, 20]:
+        for ack_batch_size in [5]:
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
                 os.mkdir(batch_output_dir)
@@ -233,7 +233,7 @@ for filename in filenames:
                 print('alread done batch', ack_batch_size)
                 continue
 
-            with open(batch_output_dir + "/stats.txt", 'a') as f:
+            with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
                     if os.path.exists(batch_ack_output_file):
@@ -278,11 +278,11 @@ for filename in filenames:
                                 ei_idx += [idx]
                             if len(ei_idx) >= top_k:
                                 break
-                        ei_idx = np.random.choice(ei_idx, ack_batch_size).tolist()
                     elif "hsic" in params.ei_diversity:
                         ei_idx = bopt.ei_diversity_selection_hsic(params, preds, skip_idx_ei, device=params.device)
                     elif "detk" in params.ei_diversity:
                         ei_idx = bopt.ei_diversity_selection_detk(params, preds, skip_idx_ei, device=params.device)
+                    elif "pdts" in params.ei_diversity:
                     else:
                         assert False, "Not implemented"
 
@@ -291,10 +291,15 @@ for filename in filenames:
 
                     ack_all_ei.update(ei_idx)
                     skip_idx_ei.update(ei_idx)
+                    print("before ei_idx:", ei_idx)
+                    #np.random.shuffle(ei_idx)
+                    #print("after ei_idx:", ei_idx)
                     ei_idx = torch.LongTensor(ei_idx).to(params.device)
                     
                     ack_ei = X[ei_idx]
                     ack_ei_vals = (Y[ei_idx]-float(train_label_mean))/float(train_label_std)
+
+                    print(train_X_ei.shape, len(ei_idx))
                     
                     train_X_ei = torch.cat([train_X_ei, ack_ei], dim=0)
                     train_Y_ei = torch.cat([train_Y_ei, ack_ei_vals], dim=0)
@@ -311,22 +316,13 @@ for filename in filenames:
                         qz_ei, 
                         e_dist)
 
-                    print([k[-1] for k in logging])
-
+                    print(filename)
                     print('logging:', [k[-1] for k in logging])
+
                     f.write(str([k[-1] for k in logging]) + "\n")
                     logging = [torch.tensor(k) for k in logging]
 
                     ack_array = np.array(list(ack_all_ei), dtype=np.int32)
-                    
-                    torch.save({
-                        'model_state_dict': model_ei.state_dict(), 
-                        'qz_state_dict': qz_ei.state_dict(),
-                        'logging': logging,
-                        'optim': optim.state_dict(),
-                        'ack_idx': torch.from_numpy(ack_array),
-                        'ack_labels': torch.from_numpy(labels[ack_array]),
-                        }, batch_ack_output_file)
                     
                     e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
@@ -350,4 +346,17 @@ for filename in filenames:
 
                     print(s)
                     f.write(s + "\n")
+
+                    torch.save({
+                        'model_state_dict': model_ei.state_dict(), 
+                        'qz_state_dict': qz_ei.state_dict(),
+                        'logging': logging,
+                        'optim': optim.state_dict(),
+                        'ack_idx': torch.from_numpy(ack_array),
+                        'ack_labels': torch.from_numpy(labels[ack_array]),
+                        'ir_batch_ei': torch.from_numpy(ei),
+                        'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
+                        'idx_frac': torch.tensor(idx_frac),
+                        }, batch_ack_output_file)
+                    
             main_f.write(str(ack_batch_size) + "\t" + s + "\n")

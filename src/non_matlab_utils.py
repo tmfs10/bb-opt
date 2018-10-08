@@ -8,6 +8,7 @@ from rdkit.Chem import Descriptors, QED
 import bb_opt.src.sascorer as sascorer
 import pyro
 import torch
+import sys
 
 def logp(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
@@ -105,3 +106,30 @@ def collated_expand(X, num_samples):
         [-1] + list(X.shape[2:])
     )
     return X
+
+def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_length=100):
+    """
+    Call in a loop to create terminal progress bar
+    @params:
+        iteration   - Required  : current iteration (Int)
+        total       - Required  : total iterations (Int)
+        prefix      - Optional  : prefix string (Str)
+        suffix      - Optional  : suffix string (Str)
+        decimals    - Optional  : positive number of decimals in percent complete (Int)
+        bar_length  - Optional  : character length of bar (Int)
+    """
+    str_format = "{0:." + str(decimals) + "f}"
+    percents = str_format.format(100 * (iteration / float(total)))
+    filled_length = int(round(bar_length * iteration / float(total)))
+    bar = '█' * filled_length + '-' * (bar_length - filled_length)
+
+    sys.stdout.write('%s |%s| %s%s\n' % (prefix, bar, percents, '%'))
+    sys.stdout.write(suffix + "\n")
+    sys.stdout.write('\033[F')
+    sys.stdout.write('\033[F')
+    sys.stdout.write('\033[F')
+    sys.stdout.flush()
+
+    if iteration == total:
+        sys.stdout.write('\n')
+    sys.stdout.flush()

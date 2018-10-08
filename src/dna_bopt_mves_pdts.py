@@ -188,7 +188,7 @@ for filename in filenames:
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
+    model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, params.prior_std)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = main_output_dir + "/init_model.pth"

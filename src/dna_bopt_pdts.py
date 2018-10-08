@@ -18,8 +18,8 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 6:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size>")
+if len(sys.argv) < 7:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <ack_batch_size> <density_based>")
     sys.exit(1)
 
 def train_val_test_split(n, split, shuffle=True):
@@ -73,6 +73,7 @@ Params = namedtuple('params', [
     'hsic_diversity_lambda',
     'mves_compute_batch_size',
     'pdts_diversity',
+    'pdts_density',
     
     'retrain_num_epochs',
     'retrain_batch_size',
@@ -111,6 +112,7 @@ params = Params(
     hsic_diversity_lambda=1,
     mves_compute_batch_size=3000,
     pdts_diversity=int(sys.argv[1]),
+    pdts_density=int(sys.argv[6]) == 1,
     
     retrain_num_epochs=int(sys.argv[4]),
     retrain_batch_size=10,
@@ -168,7 +170,7 @@ train_Y_pdts = torch.FloatTensor(train_labels).to(device)
 val_X = torch.FloatTensor(val_inputs).to(device)
 val_Y = torch.FloatTensor(val_labels).to(device)
 
-model, qz, e_dist = dbopt.get_model_nn(params, inputs.shape[1], params.num_latent_vars, params.prior_std)
+model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, params.prior_std)
 data = [train_X_pdts, train_Y_pdts, val_X, val_Y]
 logging = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
 
@@ -185,34 +187,40 @@ qz_pdts = qz
 skip_idx_pdts = set(train_idx)
 ack_all_pdts = set()
 for ack_iter in range(10):
+    ack_batch_size = max(params.pdts_diversity, params.ack_batch_size)
+
     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_pdts, qz_pdts, e)
     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
     preds = preds.transpose(0, 1)
     print("done predictions")
 
     preds[:, list(skip_idx_pdts)] = preds.min()
-    
-    top_k = max(params.pdts_diversity, params.ack_batch_size)
-    sorted_preds_idx = []
-    for i in range(preds.shape[0]):
-        sorted_preds_idx += [np.argsort(preds[i].numpy())]
-    sorted_preds_idx = np.array(sorted_preds_idx)
+    sorted_preds, sorted_preds_idx = torch.sort(preds, dim=1, descending=True)
 
     pdts_idx = set()
-    counts = np.zeros(sorted_preds_idx.shape[1])
-    for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
-        counts[:] = 0
-        for idx in sorted_preds_idx[:, rank]:
-            counts[idx] += 1
-        counts_idx = counts.argsort()[::-1]
-        j = 0
-        while len(pdts_idx) < top_k and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
-            pdts_idx.update({counts_idx[j]})
-            j += 1
-        if len(pdts_idx) >= top_k:
-            break
-    assert len(pdts_idx) == top_k
-    pdts_idx = np.random.choice(list(pdts_idx), params.ack_batch_size)
+    
+    if params.pdts_density:
+        counts = np.zeros(sorted_preds_idx.shape[1])
+        for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
+            counts[:] = 0
+            for idx in sorted_preds_idx[:, rank]:
+                counts[idx] += 1
+            counts_idx = counts.argsort()[::-1]
+            j = 0
+            while len(pdts_idx) < ack_batch_size and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
+                pdts_idx.update({counts_idx[j]})
+                j += 1
+            if len(pdts_idx) >= ack_batch_size:
+                break
+    else:
+        for i_model in range(sorted_preds_idx.shape[0]):
+            for idx in sorted_preds_idx[i_model]:
+                if idx not in pdts_idx:
+                    pdts_idx.update({idx})
+                    break
+            if len(pdts_idx) >= ack_batch_size:
+                break
+    assert len(pdts_idx) == ack_batch_size
 
     ack_all_pdts.update(pdts_idx)
     skip_idx_pdts.update(pdts_idx)
