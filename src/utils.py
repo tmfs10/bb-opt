@@ -182,6 +182,7 @@ def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
 def load_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
     checkpoint = torch.load(fname)
     model.load_state_dict(checkpoint["model_state"])
+    model.eval()
     if optimizer:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
 

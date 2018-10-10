@@ -230,7 +230,7 @@ def total_hsic(kernels, logspace=True):
     else:
         log_n = torch.log(n)
         log_2 = torch.log(kernels.new_tensor(2))
-        log_kernels = kernels.log_()  # TODO: just take directly?
+        log_kernels = kernels.log()
         log_sum_b = log_kernels.logsumexp(dim=1)
 
         l1 = log_kernels.sum(dim=2).logsumexp(dim=1).logsumexp(dim=0) - 2 * log_n
@@ -360,14 +360,16 @@ def compute_point_hsics(
     return hsics
 
 
-def total_hsic_batched(
-    rv_samples1: Union[torch.Tensor, Sequence[torch.Tensor]],
-    rv_samples2: Union[torch.Tensor, Sequence[torch.Tensor]],
+def total_hsic_with_batch(
+    rv_samples: torch.Tensor,
+    batch_samples: Optional[torch.Tensor],
+    new_points: torch.Tensor,
     kernel,
     acquirable_idx: Optional[Sequence[int]] = None,
     n_points_parallel: int = 50,
 ) -> torch.Tensor:
     """
+    Compute HSIC between all RVs in `rv_samples` and the batch with each point in `new_points`.
     :param rv_samples1: n_samples x n_variables1 [x n_features if kernel supports this]
       a Sequence of tensors of this shape is allowed so that we can still compute HSIC
       even if n_features is different for some of the variables
@@ -378,20 +380,23 @@ def total_hsic_batched(
     :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
     :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
     """
-    if not isinstance(rv_samples1, Sequence):
-        rv_samples1 = [rv_samples1]
+    acquirable_idx = acquirable_idx or list(range(new_points.shape[1]))
+    all_hsics = rv_samples.new_empty(len(acquirable_idx))
 
-    if not isinstance(rv_samples2, Sequence):
-        rv_samples2 = [rv_samples2]
+    rv_kernel = kernel(sqdist(rv_samples))
 
-    n_variables = rv_samples2[0].shape[1]
-    all_hsics = rv_samples1[0].new_empty(n_variables)
-    batch_stats = precompute_batch_hsic_stats(rv_samples1, kernel=kernel)
+    if batch_samples is not None:
+        batch_sqdists = sqdist(batch_samples)
 
-    acquirable_idx = acquirable_idx or list(range(n_variables))
-
-    for next_points in torch.tensor(acquirable_idx).split(n_points_parallel):
-        hsics = compute_point_hsics(rv_samples2, next_points, *batch_stats, kernel)
-        all_hsics[next_points] = hsics
+    for i, point_idx in enumerate(acquirable_idx):
+        point_sqdist = sqdist(new_points[:, point_idx : point_idx + 1])
+        sqdists = (
+            torch.cat((batch_sqdists, point_sqdist), dim=-1)
+            if batch_samples is not None
+            else point_sqdist
+        )
+        point_kernel = kernel(sqdists)
+        point_kernel = point_kernel.mean(dim=-1).unsqueeze(-1)
+        all_hsics[i] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
 
     return all_hsics

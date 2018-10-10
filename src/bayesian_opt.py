@@ -40,23 +40,12 @@ from bb_opt.src.hsic import (
     precompute_batch_hsic_stats,
     compute_point_hsics,
     total_hsic,
-    total_hsic_batched,
+    total_hsic_with_batch,
 )
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
-import ops
-
-def get_path(*path_segments):
-    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
-
-def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
-    os.makedirs(os.path.dirname(fname), exist_ok=True)
-
-    checkpoint = {"model_state": model.state_dict()}
-    if optimizer:
-        checkpoint["optimizer_state"] = optimizer.state_dict()
-
-    torch.save(checkpoint, fname)
+from bb_opt.src.utils import get_path, save_checkpoint
+from bb_opt.src import reparam_trainer as reparam
 
 
 N_HIDDEN = 100
@@ -581,13 +570,26 @@ def acquire_batch_ei(
     n_bnn_samples: int = 50,
     **unused_kwargs,
 ) -> List[int]:
-    if isinstance(model, Sequence):  # bnn
-        bnn_model, guide = model
-        preds = bnn_predict(guide, inputs, n_samples=n_bnn_samples)
-        preds = preds.mean(axis=0)
-        sorted_idx = np.argsort(preds)
-        sorted_idx = [i for i in sorted_idx if i not in sampled_idx]
-        acquire_samples = sorted_idx[-batch_size:]  # sorted smallest first
+    if isinstance(model, Sequence):
+        if len(model) == 2:  # bnn
+            bnn_model, guide = model
+            preds = bnn_predict(guide, inputs, n_samples=n_bnn_samples)
+            preds = preds.mean(axis=0)
+            sorted_idx = np.argsort(preds)
+            sorted_idx = [i for i in sorted_idx if i not in sampled_idx]
+            acquire_samples = sorted_idx[-batch_size:]  # sorted smallest first
+        else:  # reparam
+            model, qz, e_dist, params = model
+            e = reparam.generate_prior_samples(params.num_samples, e_dist)
+            preds = reparam.predict(inputs, model, qz, e, device=inputs.device)
+            preds = preds[:, :, 0].mean(1)
+
+            acquire_samples = [
+                i
+                for i in preds.sort(descending=True)[1].tolist()
+                if i not in sampled_idx
+            ]
+            acquire_samples = acquire_samples[:batch_size]
     else:  # deep ensemble
         with torch.no_grad():
             means, variances = model(inputs, individual_predictions=False)
@@ -800,6 +802,7 @@ def acquire_batch_mves(
     kernel: Optional[Callable] = None,
     mi_estimator: str = "HSIC",
     n_max_dist_points: int = 1,
+    combine_max_dists: bool = True,
 ) -> List[int]:
     return acquire_batch_es(
         model,
@@ -813,6 +816,7 @@ def acquire_batch_mves(
         mi_estimator,
         max_value_es=True,
         n_max_dist_points=n_max_dist_points,
+        combine_max_dists=combine_max_dists,
     )
 
 
@@ -828,16 +832,25 @@ def acquire_batch_es(
     mi_estimator: str = "HSIC",
     max_value_es: bool = False,
     n_max_dist_points: int = 1,
+    combine_max_dists: bool = True,
 ) -> List[int]:
 
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
     if isinstance(model, Sequence):
-        n_preds = 250
-        bnn_model, guide = model
+        if len(model) == 2:  # bnn
+            n_preds = 250
+            bnn_model, guide = model
 
-        with torch.no_grad():
-            preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+            with torch.no_grad():
+                preds = torch.stack([guide()(inputs).squeeze() for _ in range(n_preds)])
+        else:  # reparam
+            model, qz, e_dist, params = model
+            e = reparam.generate_prior_samples(
+                params.num_samples, e_dist, device=inputs.device
+            )
+            preds = reparam.predict(inputs, model, qz, e, device=inputs.device)
+            preds = preds[:, :, 0].transpose(1, 0)
     else:
         with torch.no_grad():
             means, variances = model(inputs)
@@ -845,7 +858,12 @@ def acquire_batch_es(
         n_preds = len(means)
 
     if max_value_es:
-        max_dist = preds.sort(dim=1, descending=True)[0][:, :n_max_dist_points]
+        if combine_max_dists:
+            max_dist = preds.sort(dim=1, descending=True)[0][:, :n_max_dist_points]
+        else:
+            means = preds.mean(0)
+            max_idx = means.sort(descending=True)[1][:n_max_dist_points]
+            max_dist = preds[:, max_idx]
     else:
         max_idx = preds.sort(dim=1, descending=True)[1][:, :n_max_dist_points]
         max_dist = inputs[max_idx]
@@ -854,24 +872,21 @@ def acquire_batch_es(
     batch = []
 
     if mi_estimator == "HSIC":
-        max_batch_dist = max_dist
-
+        batch_dists = None
         for _ in range(batch_size):
-            all_mi = total_hsic_batched(max_batch_dist, preds, kernel, acquirable_idx)
+            all_mi = total_hsic_with_batch(
+                max_dist, batch_dists, preds, kernel, acquirable_idx
+            )
             best_idx = acquirable_idx[all_mi.argmax().item()]
             acquirable_idx.remove(best_idx)
             batch.append(best_idx)
 
-            if not max_value_es:
-                # the input distribution has vector samples instead of scalars,
-                # so we can't combine everything into one tensor
-
-                if isinstance(max_batch_dist, list):
-                    max_batch_dist[1] = torch.cat(
-                        (max_batch_dist[1], preds[:, best_idx : best_idx + 1]), dim=-1
-                    )
-                else:  # set things up the first time
-                    max_batch_dist = [max_batch_dist, preds[:, best_idx : best_idx + 1]]
+            if batch_dists is None:
+                batch_dists = preds[:, best_idx : best_idx + 1]
+            else:
+                batch_dists = torch.cat(
+                    (batch_dists, preds[:, best_idx : best_idx + 1]), dim=1
+                )
 
             if exp:
                 exp.log_multiple_metrics(
@@ -885,6 +900,10 @@ def acquire_batch_es(
     elif mi_estimator == "LNC":
         if not max_value_es:
             assert False, "LNC not supported for ES, only MVES."
+
+        assert (
+            False
+        ), "Update to do MI with batch properly (as for HSIC above) before use."
 
         max_batch_dist = max_dist.cpu().numpy()
         preds = preds.cpu().numpy()
@@ -943,10 +962,10 @@ def acquire_batch_es(
 
 
 def hsic_mves_loss(
-        X : torch.tensor, # (num_samples, ack_batch_size)
-        opt_values_kernel_matrix : torch.tensor,
-        kernel_fn,
-        do_mean=False
+    X : torch.tensor, # (num_samples, ack_batch_size)
+    opt_values_kernel_matrix : torch.tensor,
+    kernel_fn,
+    do_mean=False
 ):
     assert X.ndimension() == 2
     num_samples = X.shape[0]
@@ -1000,7 +1019,7 @@ def acquire_batch_via_grad_mves(
         loss = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
         postfix = {'loss' : loss.item()}
         progress.set_postfix(postfix)
-        
+
         optim.zero_grad()
         loss.backward()
         optim.step()
@@ -1037,7 +1056,7 @@ def ei_diversity_selection_hsic(
     chosen_idx = [num_ei-1]
     batch_dist_matrix = hsic.sqdist(preds[:, -1].unsqueeze(-1)) # (n, n, 1)
     self_kernel_matrix = kernel_fn(batch_dist_matrix).detach().repeat([1, 1, 2])
-    normalizer = torch.log(hsic.total_hsic(self_kernel_matrix)) 
+    normalizer = torch.log(hsic.total_hsic(self_kernel_matrix))
 
     all_dist_matrix = hsic.sqdist(preds) # (n, n, m)
     all_kernel_matrix = kernel_fn(all_dist_matrix) # (n, n, m)
@@ -1181,7 +1200,7 @@ def acquire_batch_self_hsic(
         best_idx = None
         best_idx_dist_matrix = None
         best_hsic = None
-        
+
         num_remaining = len(remaining_idx_set)
         num_batches = num_remaining // mves_compute_batch_size + 1
         remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
@@ -1198,8 +1217,8 @@ def acquire_batch_self_hsic(
             dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size)
 
             assert list(dist_matrix.shape) == [
-            num_samples, 
-            num_samples, 
+            num_samples,
+            num_samples,
             cur_batch_size], str(dist_matrix.shape) + " == " \
                     + str([num_samples, num_samples, cur_batch_size])
 
@@ -1212,9 +1231,9 @@ def acquire_batch_self_hsic(
                     .unsqueeze(-1) # (m, n, n, 1)
 
             assert list(batch_kernel_matrix.shape) == [
-                    cur_batch_size, 
-                    num_samples, 
-                    num_samples, 
+                    cur_batch_size,
+                    num_samples,
+                    num_samples,
                     1], str(batch_kernel_matrix.shape) + " == " \
                             + str([cur_batch_size, num_samples, num_samples, 2])
 
@@ -1256,7 +1275,8 @@ def acquire_batch_self_hsic(
         remaining_idx_set.remove(best_idx)
         batch_idx.update({best_idx})
 
-    return batch_idx, best_hsic 
+    return batch_idx, best_hsic
+
 
 
 
@@ -1321,7 +1341,7 @@ def acquire_batch_mves_sid(
         best_idx = None
         best_idx_dist_matrix = None
         best_hsic = None
-        
+
         num_remaining = len(remaining_idx_set)
         num_batches = num_remaining // mves_compute_batch_size + 1
         remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
@@ -1426,7 +1446,7 @@ def acquire_batch_mves_sid(
         best_hsic = idx_hsic_values[-1]
 
     print('best_hsic_vec', best_hsic_vec)
-    return batch_idx, best_hsic 
+    return batch_idx, best_hsic
 
 
 def acquire_batch_via_grad_er(
@@ -1462,8 +1482,8 @@ def acquire_batch_via_grad_er(
 
 
 def optimize_model_input(
-    params, 
-    input_shape, 
+    params,
+    input_shape,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     seed=None,
     hsic_diversity_lambda=0.
@@ -1505,8 +1525,8 @@ def optimize_model_input(
 
 
 def optimize_model_input_pdts(
-    params, 
-    input_shape, 
+    params,
+    input_shape,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     num_points_to_optimize,
     seed=None,

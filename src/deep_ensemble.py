@@ -8,10 +8,12 @@ This implementation also only supports training all models in the ensemble at on
 on the same GPU; modifications would be needed to use this for larger models.
 """
 
+import numpy as np
 import torch
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
-from typing import Tuple, Optional, Dict
+from itertools import cycle
+from typing import Tuple, Optional, Dict, Callable
 
 
 class NN(torch.nn.Module):
@@ -35,6 +37,53 @@ class NN(torch.nn.Module):
         return mean, variance
 
 
+class RandomNN(torch.nn.Module):
+    """
+    Single-layer MLP that predicts a Gaussian for each point.
+    """
+
+    def __init__(
+        self,
+        n_inputs: int,
+        n_hidden: int,
+        weight_min: Optional[float] = None,
+        weight_max: Optional[float] = None,
+        non_linearity: Callable = torch.nn.ReLU,
+        min_variance: float = 1e-5,
+    ):
+        super().__init__()
+        self.hidden = Linear(n_inputs, n_hidden)
+        self.output = Linear(n_hidden, 2)
+        self.non_linearity = non_linearity()
+        self.softplus = Softplus()
+        self.min_variance = min_variance
+
+        if weight_max is None and weight_min and weight_min < 0:
+            weight_max = -weight_min
+        if weight_min is None and weight_max and weight_max > 0:
+            weight_min = -weight_max
+
+        if weight_min:
+            self.apply(lambda module: uniform_weights(module, weight_min, weight_max))
+            self.weight_min = weight_min
+            self.weight_max = weight_max
+
+    def forward(self, x):
+        hidden = self.non_linearity(self.hidden(x))
+        output = self.output(hidden)
+        mean = output[:, 0]
+        variance = self.softplus(output[:, 1]) + self.min_variance
+        return mean, variance
+
+
+def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
+    if isinstance(module, Linear):
+        module.weight.data.uniform_(min_val, max_val)
+
+        if module.bias is not None:
+            module.bias.data.uniform_(min_val, max_val)
+
+
 class NNEnsemble(torch.nn.Module):
     """
     Ensemble of `NN`s, trained individually but whose predictions can be combined.
@@ -48,15 +97,32 @@ class NNEnsemble(torch.nn.Module):
     def __init__(
         self,
         n_models: int,
-        n_inputs: int,
-        n_hidden: int,
-        min_variance: float = 1e-5,
+        model_generator,
+        model_kwargs_generator,
         adversarial_epsilon: Optional = None,
     ):
         super().__init__()
+
+        try:
+            model_generator = cycle(model_generator)
+        except TypeError:  # not iterable
+            model_generator = cycle([model_generator])
+
+        # don't make an iterator over the dict keys
+        if isinstance(model_kwargs_generator, dict):
+            model_kwargs_generator = cycle([model_kwargs_generator])
+        else:
+            try:
+                model_kwargs_generator = cycle(model_kwargs_generator)
+            except TypeError:  # not iterable
+                model_kwargs_generator = cycle([model_kwargs_generator])
+
         self.n_models = n_models
         self.models = torch.nn.ModuleList(
-            [NN(n_inputs, n_hidden, min_variance) for _ in range(n_models)]
+            [
+                next(model_generator)(**next(model_kwargs_generator))
+                for _ in range(n_models)
+            ]
         )
         self.adversarial_epsilon = adversarial_epsilon
 
@@ -142,8 +208,52 @@ def get_model_deep_ensemble(
     device=None,
 ):
     device = device or "cpu"
+
+    def gelu(x):
+        return (
+            0.5
+            * x
+            * (
+                1
+                + torch.tanh(
+                    torch.sqrt(2 / x.new_tensor(np.pi)) * (x + 0.044715 * x ** 3)
+                )
+            )
+        )
+
+    def swish(x):
+        return x * torch.sigmoid(x)
+
+    non_linearities = [
+        torch.nn.ELU,
+        #     torch.nn.GLU,
+        #     torch.nn.Hardshrink,
+        torch.nn.Hardtanh,
+        torch.nn.LeakyReLU,
+        torch.nn.PReLU,
+        torch.nn.ReLU,
+        torch.nn.SELU,
+        torch.nn.Sigmoid,
+        torch.nn.Softmin,  # /
+        torch.nn.Softplus,
+        #     torch.nn.Softshrink,
+        torch.nn.Softsign,
+        torch.nn.Tanh,
+        torch.nn.Tanhshrink,
+        lambda: gelu,
+        lambda: swish,
+    ]
+
+    def model_kwargs():
+        kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden}
+        while True:
+            kw = kwargs.copy()
+            kw["weight_max"] = np.random.uniform(0.1, 20)
+            kw["non_linearity"] = np.random.choice(non_linearities)
+            yield kw
+
     model = NNEnsemble(
-        n_models, n_inputs, n_hidden, adversarial_epsilon=adversarial_epsilon
+        n_models, RandomNN, model_kwargs(), adversarial_epsilon=adversarial_epsilon
     ).to(device)
     return model
 
