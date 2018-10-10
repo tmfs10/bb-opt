@@ -9,10 +9,10 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 
 import reparam_trainer as reparam
-from tqdm import tnrange
+from tqdm import tnrange, trange
 
 class Qz(nn.Module):
-    def __init__(self, num_latent, prior_std=1):
+    def __init__(self, num_latent, prior_std):
         super(Qz, self).__init__()
         self.mu_z = Parameter(torch.zeros(num_latent))
         self.std_z = Parameter(torch.ones(num_latent)*prior_std)
@@ -37,15 +37,17 @@ class DnaNN(nn.Module):
         
         
 def get_model_nn(
-    params,
-    n_inputs: int = 512, 
-    num_latent: int = 20, 
-    prior_std=1,
+    prior_mean,
+    prior_std,
+    n_inputs,
+    num_latent,
     device='cuda',
     n_hidden=100,
     activation="ReLU",
 ):
-    model = DnaNN(n_inputs, num_latent, n_hidden, activation).to(device)
+    model = DnaNN(n_inputs, num_latent, n_hidden, activation)
+    print(model)
+    model = model.to(device)
 
     def init_weights(module):
         if isinstance(module, nn.Linear):
@@ -62,7 +64,7 @@ def get_model_nn(
     mu_e = torch.zeros(num_latent, requires_grad=False).to(device)
     std_e = torch.ones(num_latent, requires_grad=False).to(device)
     
-    e_dist = tdist.Normal(mu_e + params.prior_mean, std_e*params.prior_std)
+    e_dist = tdist.Normal(mu_e + prior_mean, std_e*prior_std)
     
     return model, qz, e_dist
 
@@ -77,6 +79,7 @@ def train(
         model,
         qz,
         e_dist,
+        jupyter=False,
 ):
     losses = []
     kl_losses = []
@@ -88,25 +91,29 @@ def train(
     train_X, train_Y, val_X, val_Y = data
 
     N = train_X.shape[0]
-    num_batches = N//batch_size
     print("training:")
-    print(str(N) + " samples")
     print(str(batch_size) + " batch_size")
-    print(str(num_batches) + " num_batches")
     print(str(num_epochs) + " num_epochs")
 
     model_parameters = []
     for m in [model, qz]:
         model_parameters += list(m.parameters())
     batches, optim = reparam.init_train(batch_size, lr, model_parameters, train_X, train_Y)
+    num_batches = len(batches)-1
+    print(str(num_batches) + " num_batches")
 
-    progress = tnrange(num_epochs)
+    if jupyter:
+        progress = tnrange(num_epochs)
+    else:
+        progress = trange(num_epochs)
 
     for epoch_iter in progress:
         for bi in range(num_batches):
             bs = batches[bi]
             be = batches[bi+1]
             bN = be-bs
+            if bN <= 0:
+                continue
 
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
@@ -136,6 +143,7 @@ def train(
 
         val_corrs.append(val_corr)
         progress.set_description(f"Corr: {val_corr:.3f}")
-        progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1]})
+        if jupyter:
+            progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1]})
 
     return [losses, kl_losses, hsic_losses, corrs, val_corrs], optim

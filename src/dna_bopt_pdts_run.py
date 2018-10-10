@@ -19,15 +19,15 @@ from tqdm import tnrange
 import pandas as pd
 import copy
 
-if len(sys.argv) < 13:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack batch size> <ei diversity measure> <ucb> <data dir> <filename file> <output dir> <suffix>")
+if len(sys.argv) < 11:
+    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <data dir> <filename file> <output dir> <suffix>")
     sys.exit(1)
 
-num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, ei_diversity_measure, ucb, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
+num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, pdts_density, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
 
 if output_dir[-1] == "/":
     output_dir = output_dir[:-1]
-output_dir = output_dir + "_" + suffix
+output_dir = output_dir + "_pdts_dna_" + suffix
 
 def train_val_test_split(n, split, shuffle=True):
     if type(n) == int:
@@ -48,6 +48,7 @@ def train_val_test_split(n, split, shuffle=True):
 
     return idx[:train_end], idx[train_end:val_end], idx[val_end:]
 
+
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
@@ -61,29 +62,27 @@ Params = namedtuple('params', [
     'device',
     'exp_noise_samples',
     'train_lr',
-    'ucb',
     
     'num_train_latent_samples',
     'num_latent_vars',
     'train_batch_size', 
     'hsic_train_lambda',
+    'pdts_density',
     
     'ack_batch_size',
     'num_acks',
-    'mves_kernel_fn',
-    'input_opt_num_iter',
+    'pdts_kernel_fn',
     'ack_num_model_samples',
+    'ack_num_pdts_points',
     'hsic_diversity_lambda',
-    'mves_compute_batch_size',
-    'mves_diversity',
-    'ei_diversity',
+    'pdts_compute_batch_size',
+    'pdts_diversity',
     
     'retrain_num_epochs',
     'retrain_batch_size',
     'retrain_lr',
     'hsic_retrain_lambda',
     'num_retrain_latent_samples',
-    
 ])
 params = Params(
     output_dist_std=1.,
@@ -94,7 +93,7 @@ params = Params(
     device='cuda',
     num_epochs=int(init_train_epochs),
     train_lr=float(train_lr),
-    ucb=float(ucb),
+    pdts_density=int(pdts_density) == 1,
     
     train_batch_size=10,
     num_latent_vars=15,
@@ -103,22 +102,27 @@ params = Params(
     
     ack_batch_size=int(ack_batch_size),
     num_acks=20,
-    mves_kernel_fn='mixrq_kernels',
-    input_opt_num_iter=2500,
+    pdts_kernel_fn='mixrq_kernels',
     ack_num_model_samples=100,
+    ack_num_pdts_points=40,
     hsic_diversity_lambda=1,
-    mves_compute_batch_size=3000,
-    mves_diversity=int(num_diversity),
-    ei_diversity=ei_diversity_measure.lower(),
+    pdts_compute_batch_size=4000,
+    pdts_diversity=int(num_diversity),
     
     retrain_num_epochs=int(retrain_num_epochs),
     retrain_batch_size=10,
-    retrain_lr=1e-4,
+    retrain_lr=float(retrain_lr),
     hsic_retrain_lambda=20.,
     num_retrain_latent_samples=20,
 )
 
 n_train = 20
+
+#project = "dna_binding"
+#dataset = "crx_ref_r1"
+
+#root = "/cluster/sj1/bb_opt/"
+#data_dir = root+"data/"+project+"/"+dataset+"/"
 
 filenames = [k.strip() for k in open(filename_file).readlines()]
 
@@ -130,11 +134,10 @@ for filename in filenames:
     inputs = np.load(filedir+"inputs.npy")
     labels = np.load(filedir+"labels.npy")
 
-    output_dir2 = output_dir + "_" + str(params.ucb)
-    main_output_dir = output_dir2 + "/" + filename
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
 
-    if not os.path.exists(output_dir2):
-        os.mkdir(output_dir2)
+    main_output_dir = output_dir + "/" + filename
 
     try:
         os.mkdir(main_output_dir)
@@ -177,7 +180,7 @@ for filename in filenames:
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, device=params.device)
+    model, qz, e_dist = dbopt.get_model_nn(params.prior_mean, params.prior_std, inputs.shape[1], params.num_latent_vars, params.prior_std)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = main_output_dir + "/init_model.pth"
@@ -192,6 +195,7 @@ for filename in filenames:
             train_idx = checkpoint["train_idx"].numpy()
     else:
         logging, optim = dbopt.train(params, params.train_batch_size, params.train_lr, params.num_epochs, params.hsic_train_lambda, params.num_train_latent_samples, data, model, qz, e_dist)
+
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
 
@@ -212,129 +216,140 @@ for filename in filenames:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
         for ack_batch_size in [5]:
+            print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
                 os.mkdir(batch_output_dir)
             except OSError as e:
                 pass
 
-            train_X_ei = train_X.clone()
-            train_Y_ei = train_Y.clone()
+            train_X_pdts = train_X.clone()
+            train_Y_pdts = train_Y.clone()
 
-            model_ei = copy.deepcopy(model)
-            qz_ei = copy.deepcopy(qz)
+            model_pdts = copy.deepcopy(model)
+            qz_pdts = copy.deepcopy(qz)
 
-            print('doing batch', ack_batch_size)
-            skip_idx_ei = set(train_idx)
-            ack_all_ei = set()
+            skip_idx_pdts = set(train_idx)
+            ack_all_pdts = set()
             e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
-                print('alread done batch', ack_batch_size)
+                print('already done batch', ack_batch_size)
                 continue
 
-            with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
+            with open(batch_output_dir + "/stats.txt", 'a') as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
                     if os.path.exists(batch_ack_output_file):
                         checkpoint = torch.load(batch_ack_output_file)
-                        model_ei.load_state_dict(checkpoint['model_state_dict'])
-                        qz_ei.load_state_dict(checkpoint['qz_state_dict'])
+                        model_pdts.load_state_dict(checkpoint['model_state_dict'])
+                        qz_pdts.load_state_dict(checkpoint['qz_state_dict'])
                         logging = checkpoint['logging']
 
-                        model_parameters = list(model_ei.parameters()) + list(qz_ei.parameters())
+                        model_parameters = list(model_pdts.parameters()) + list(qz_pdts.parameters())
                         optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                         optim = optim.load_state_dict(checkpoint['optim'])
 
                         ack_idx = list(checkpoint['ack_idx'].numpy())
-                        ack_all_ei.update(ack_idx)
-                        skip_idx_ei.update(ack_idx)
+                        ack_all_pdts.update(ack_idx)
+                        skip_idx_pdts.update(ack_idx)
                         continue
 
-                    print('doing ack_iter', ack_iter)
-                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
-                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device=params.device) # (num_candidate_points, num_samples)
+                    print('doing ack_iter', ack_iter, 'for pdts with suffix', suffix)
+                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_pdts, qz_pdts, e)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
+                    preds = preds[:ack_batch_size, :]
 
-                    #preds_for_ei = torch.max(preds - train_Y_ei.max(), torch.tensor(0.).to(params.device))
-                    #assert preds_for_ei.shape == preds.shape, str(preds_for_ei.shape)
+                    preds[:, list(skip_idx_pdts)] = preds.min()
+                    sorted_preds, sorted_preds_idx = torch.sort(preds, dim=1, descending=True)
 
-                    top_k = max(params.mves_diversity, ack_batch_size)
-
-                    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-                    std = preds.std(dim=0).view(-1).cpu().numpy()
-
-                    if "var" in params.ei_diversity:
-                        ei_sortidx = np.argsort(ei/std)
-                    elif "ucb" in params.ei_diversity:
-                        ei_sortidx = np.argsort(ei + params.ucb*std)
-                    else:
-                        ei_sortidx = np.argsort(ei)
-
-                    if "none" in params.ei_diversity:
-                        ei_idx = []
-                        for idx in ei_sortidx[::-1]:
-                            if idx not in skip_idx_ei:
-                                ei_idx += [idx]
-                            if len(ei_idx) >= top_k:
+                    top_k = params.pdts_diversity
+                    
+                    pdts_idx = set()
+                    if params.pdts_density:
+                        counts = np.zeros(sorted_preds_idx.shape[1])
+                        for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
+                            counts[:] = 0
+                            for idx in sorted_preds_idx[:, rank]:
+                                counts[idx] += 1
+                            counts_idx = counts.argsort()[::-1]
+                            j = 0
+                            while len(pdts_idx) < ack_batch_size and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
+                                pdts_idx.update({counts_idx[j]})
+                                j += 1
+                            if len(pdts_idx) >= ack_batch_size:
                                 break
-                    elif "hsic" in params.ei_diversity:
-                        ei_idx = bopt.ei_diversity_selection_hsic(params, preds, skip_idx_ei, device=params.device)
-                    elif "detk" in params.ei_diversity:
-                        ei_idx = bopt.ei_diversity_selection_detk(params, preds, skip_idx_ei, device=params.device)
-                    elif "pdts" in params.ei_diversity:
                     else:
-                        assert False, "Not implemented"
+                        for i_model in range(sorted_preds_idx.shape[0]):
+                            for idx in sorted_preds_idx[i_model]:
+                                if idx not in pdts_idx:
+                                    pdts_idx.update({idx})
+                                    break
+                            if len(pdts_idx) >= ack_batch_size:
+                                break
+                    pdts_idx = list(pdts_idx)
+                    assert len(pdts_idx) == ack_batch_size
 
-                    best_ei_10 = labels[ei_sortidx[-10:]]
-                    f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()) + "\t")
+                    ack_all_pdts.update(pdts_idx)
+                    skip_idx_pdts.update(pdts_idx)
 
-                    ack_all_ei.update(ei_idx)
-                    skip_idx_ei.update(ei_idx)
-                    print("before ei_idx:", ei_idx)
-                    #np.random.shuffle(ei_idx)
-                    #print("after ei_idx:", ei_idx)
-                    ei_idx = torch.LongTensor(ei_idx).to(params.device)
+                    new_idx = list(skip_idx_pdts)
+                    random.shuffle(new_idx)
+                    new_idx = torch.LongTensor(new_idx)
                     
-                    ack_ei = X[ei_idx]
-                    ack_ei_vals = (Y[ei_idx]-float(train_label_mean))/float(train_label_std)
+                    ack_pdts = X[pdts_idx]
+                    ack_pdts_vals = (Y[pdts_idx]-float(train_label_mean))/float(train_label_std)
 
-                    print(train_X_ei.shape, len(ei_idx))
-                    
-                    train_X_ei = torch.cat([train_X_ei, ack_ei], dim=0)
-                    train_Y_ei = torch.cat([train_Y_ei, ack_ei_vals], dim=0)
-                    data = [train_X_ei, train_Y_ei, val_X, val_Y]
+                    train_X_pdts = X.new_tensor(X[new_idx])
+                    train_Y_pdts = Y.new_tensor(Y[new_idx])
+
+                    Y_mean = train_Y_pdts.mean()
+                    Y_std = train_Y_pdts.std()
+
+                    train_Y_pdts = (train_Y_pdts-Y_mean)/Y_std
+
+                    data = [train_X_pdts, train_Y_pdts, val_X, val_Y]
                     logging, optim = dbopt.train(
                         params, 
                         params.retrain_batch_size, 
-                        params.retrain_lr,
+                        params.retrain_lr, 
                         params.retrain_num_epochs, 
                         params.hsic_retrain_lambda, 
                         params.num_retrain_latent_samples, 
                         data, 
-                        model_ei, 
-                        qz_ei, 
+                        model_pdts, 
+                        qz_pdts, 
                         e_dist)
 
-                    print(filename)
                     print('logging:', [k[-1] for k in logging])
-
                     f.write(str([k[-1] for k in logging]) + "\n")
                     logging = [torch.tensor(k) for k in logging]
 
-                    ack_array = np.array(list(ack_all_ei), dtype=np.int32)
+                    ack_array = np.array(list(ack_all_pdts), dtype=np.int32)
+
+                    torch.save({
+                        'model_state_dict': model_pdts.state_dict(), 
+                        'qz_state_dict': qz_pdts.state_dict(),
+                        'logging': logging,
+                        'optim': optim.state_dict(),
+                        'ack_idx': torch.from_numpy(ack_array),
+                        'ack_labels': torch.from_numpy(labels[ack_array]),
+                        'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
+                        }, batch_ack_output_file)
                     
-                    e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
-                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
+                    print('best so far:', labels[ack_array].max())
+                    e = reparam.generate_prior_samples(100, e_dist)
+                    model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_pdts, qz_pdts, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
                     ei = preds.mean(dim=0).view(-1).cpu().numpy()
                     ei_sortidx = np.argsort(ei)[-50:]
-                    ack = list(ack_all_ei.union(list(ei_sortidx)))
+                    ack = list(ack_all_pdts.union(list(ei_sortidx)))
                     best_10 = np.sort(labels[ack])[-10:]
                     best_batch_size = np.sort(labels[ack])[-ack_batch_size:]
 
-                    idx_frac = [len(ack_all_ei.intersection(k))/len(k) for k in top_idx]
+                    idx_frac = [len(ack_all_pdts.intersection(k))/len(k) for k in top_idx]
 
                     s = "\t".join([str(k) for k in [
                         best_10.mean(), 
@@ -346,17 +361,4 @@ for filename in filenames:
 
                     print(s)
                     f.write(s + "\n")
-
-                    torch.save({
-                        'model_state_dict': model_ei.state_dict(), 
-                        'qz_state_dict': qz_ei.state_dict(),
-                        'logging': logging,
-                        'optim': optim.state_dict(),
-                        'ack_idx': torch.from_numpy(ack_array),
-                        'ack_labels': torch.from_numpy(labels[ack_array]),
-                        'ir_batch_ei': torch.from_numpy(ei),
-                        'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
-                        'idx_frac': torch.tensor(idx_frac),
-                        }, batch_ack_output_file)
-                    
             main_f.write(str(ack_batch_size) + "\t" + s + "\n")

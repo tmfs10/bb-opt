@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 from rdkit.Chem import MolFromSmiles
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect as get_fingerprint
 import torch
-from tqdm import tnrange
+from tqdm import tnrange, trange
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 import pyro
@@ -993,6 +993,7 @@ def acquire_batch_via_grad_mves(
     ack_batch_size,
     do_mean=False,
     seed: torch.tensor = None,
+    jupyter: bool = False,
 ) -> torch.tensor:
 
     print('mves: ack_batch_size', ack_batch_size)
@@ -1005,7 +1006,10 @@ def acquire_batch_via_grad_mves(
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
-    progress = tnrange(params.batch_opt_num_iter)
+    if jupyter:
+        progress = tnrange(params.batch_opt_num_iter)
+    else:
+        progress = trange(params.batch_opt_num_iter)
 
     for step_iter in progress:
         preds = model_ensemble(input_tensor) # (ack_batch_size, num_samples)
@@ -1158,6 +1162,14 @@ def ei_diversity_selection_detk(
     return chosen_idx
 
 
+def argsort_preds(preds):
+    sorted_preds_idx = []
+    for i in range(preds.shape[0]):
+        sorted_preds_idx += [np.argsort(preds[i].numpy())]
+    sorted_preds_idx = np.array(sorted_preds_idx)
+    return sorted_preds_idx
+
+
 def acquire_batch_self_hsic(
     params,
     candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
@@ -1270,7 +1282,7 @@ def acquire_batch_self_hsic(
 
 def acquire_batch_mves_sid(
     params,
-    opt_values : torch.tensor,
+    opt_values : torch.tensor, # (num_samples, num_opt_values)
     candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
     skip_idx,
     mves_compute_batch_size,
@@ -1281,6 +1293,8 @@ def acquire_batch_mves_sid(
     pred_weighting=False,
     normalize=True,
     divide_by_std=False,
+    double=False,
+    opt_weighting=None,
 )-> torch.tensor:
 
     opt_values = opt_values.to(device)
@@ -1291,24 +1305,39 @@ def acquire_batch_mves_sid(
     ei = candidate_points_preds.mean(dim=0).to(device)
     ei = ei-ei.min()+0.1
 
-    kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
-    opt_kernel_matrix = kernel_fn(opt_values).detach()  # shape (n=num_samples, n, 1)
+    if opt_values.ndimension() == 1:
+        opt_values.unsqueeze(-1)
+    assert opt_values.ndimension() == 2
 
-    if normalize:
-        opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2])).detach()).view(-1)
+    if opt_weighting is None:
+        opt_dist_matrix = hsic.sqdist(opt_values.unsqueeze(1))
+    else:
+        assert len(opt_weighting.shape) == 1, opt_weighting.shape
+        opt_dist_matrix = hsic.sqdist(opt_values.unsqueeze(1), collect=False) # (n, n, 1, k)
+        opt_dist_matrix *= (opt_weighting**2).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    opt_kernel_matrix = getattr(hsic, params.mves_kernel_fn)(opt_dist_matrix).detach()  # shape (n=num_samples, n, 1)
+
+    opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2])).detach()).view(-1)
+    opt_normalizer_exp = torch.exp(0.5 * opt_normalizer)
+    if ops.isnan(opt_normalizer_exp):
+        return [], 0.0
+
+    print('opt_self_hsic:', opt_normalizer_exp)
     assert list(opt_kernel_matrix.shape) == [num_samples, num_samples, 1], str(opt_kernel_matrix.shape) + " == " + str([num_samples, num_samples, 1])
     opt_kernel_matrix = opt_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1) # (1, n, n, 1)
 
-    batch_idx = set()
+    batch_idx = []
     remaining_idx_set = set(range(num_candidate_points))
     remaining_idx_set = remaining_idx_set.difference(skip_idx)
     batch_dist_matrix = None # (num_samples, num_samples, 1)
 
     regular_batch_opt_kernel_matrix = opt_kernel_matrix.repeat([mves_compute_batch_size, 1, 1, 1]) # (mves_compute_batch_size, n, n, 1)
+
+    best_hsic_vec = []
     while len(batch_idx) < ack_batch_size:
         #print("len(batch_idx):", len(batch_idx))
         if len(batch_idx) > 0 and len(batch_idx) % 10 == 0 and type(true_labels) != type(None):
-            print(len(batch_idx), list(np.sort(true_labels[list(batch_idx)])[-5:]))
+            print(len(batch_idx), list(np.sort(true_labels[batch_idx])[-5:]))
         best_idx = None
         best_idx_dist_matrix = None
         best_hsic = None
@@ -1327,7 +1356,7 @@ def acquire_batch_mves_sid(
             idx = remaining_idx[bs:be]
 
             pred = candidate_points_preds[:, idx].to(device) # (num_samples, cur_batch_size)
-            dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size)
+            dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size) # not doing dimwise but doing hsic in || for multiple vars
 
             if pred_weighting == 1:
                 predsqrt_matrix = pred-min_pred + 0.1
@@ -1336,7 +1365,8 @@ def acquire_batch_mves_sid(
                 dist_matrix /= predsqrt_matrix
             elif pred_weighting == 2:
                 ei_batch = ei[idx].unsqueeze(0).unsqueeze(0)
-                dist_matrix /= ei_batch
+                assert ei_batch.shape[-1] == cur_batch_size
+                dist_matrix *= (ei_batch**2)
 
             assert list(dist_matrix.shape) == [num_samples, num_samples, cur_batch_size], str(dist_matrix.shape) + " == " + str([num_samples, num_samples, cur_batch_size])
 
@@ -1346,11 +1376,18 @@ def acquire_batch_mves_sid(
             batch_kernel_matrix = getattr(hsic, params.mves_kernel_fn)(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1) # (m, n, n, 1)
             assert list(batch_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 1], str(batch_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
 
+            assert ops.tensor_all(batch_kernel_matrix <= 1.+1e-5), batch_kernel_matrix.max().item()
+
             if normalize:
                 self_kernel_matrix = batch_kernel_matrix.repeat([1, 1, 1, 2]).detach() # (m, n, n, 2)
                 assert list(self_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 2], str(self_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
 
-                hsic_logvar = torch.log(hsic.total_hsic_parallel(self_kernel_matrix).detach()).view(-1)
+                if double:
+                    hsic_logvar = hsic.total_hsic_parallel(self_kernel_matrix.double()).detach()
+                else:
+                    hsic_logvar = hsic.total_hsic_parallel(self_kernel_matrix).detach()
+                #assert ops.tensor_all(hsic_logvar > 0)
+                hsic_logvar = torch.log(hsic_logvar).view(-1).float()
                 assert hsic_logvar.shape[0] == cur_batch_size
                 assert not ops.isinf(hsic_logvar)
                 assert not ops.isnan(hsic_logvar)
@@ -1393,21 +1430,26 @@ def acquire_batch_mves_sid(
         assert best_hsic is not None
         assert best_idx_dist_matrix is not None
         assert best_idx is not None
+        best_hsic_vec += [best_hsic]
+        if len(best_hsic_vec) > 1 and best_hsic_vec[-1] < best_hsic_vec[-2]+0.05:
+            break
 
         batch_dist_matrix = best_idx_dist_matrix
         best_hsic_overall = best_hsic
         remaining_idx_set.remove(best_idx)
-        batch_idx.update({best_idx})
+        assert best_idx not in batch_idx
+        batch_idx += [best_idx]
 
     if greedy_ordering:
         idx_hsic_values = torch.cat(idx_hsic_values).cpu().numpy()
         batch_idx = set(idx_hsic_values.argsort()[-ack_batch_size:].tolist())
         best_hsic = idx_hsic_values[-1]
 
+    print('best_hsic_vec', best_hsic_vec)
     return batch_idx, best_hsic
 
 
-def acquire_batch_via_grad_ei(
+def acquire_batch_via_grad_er(
     params,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     input_shape: List[int],
