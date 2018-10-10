@@ -263,13 +263,14 @@ for filename in filenames:
 
                     preds[:, list(skip_idx_pdts)] = preds.min()
                     sorted_preds, sorted_preds_idx = torch.sort(preds, dim=1, descending=True)
+                    sorted_preds_idx = sorted_preds_idx.cpu().numpy()
 
                     top_k = params.pdts_diversity
                     
                     pdts_idx = set()
                     if params.pdts_density:
                         counts = np.zeros(sorted_preds_idx.shape[1])
-                        for rank in range(sorted_preds_idx.shape[1]-1, 0, -1):
+                        for rank in range(sorted_preds_idx.shape[1]):
                             counts[:] = 0
                             for idx in sorted_preds_idx[:, rank]:
                                 counts[idx] += 1

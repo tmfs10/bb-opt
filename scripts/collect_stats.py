@@ -5,8 +5,7 @@ import numpy as np
 import torch
 
 
-def get_data_mves(exp_folder, suffix, map_loc="cpu"):
-    num_samples = 10
+def get_data_mves(exp_folder, suffix, map_loc="cpu", num_samples=10):
     stats_mves = {}
     batches = [2, 5, 10, 20]
     for i_sample in range(1, num_samples+1):

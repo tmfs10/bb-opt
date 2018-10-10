@@ -5,6 +5,7 @@ sys.path.append('/cluster/sj1/bb_opt/src')
 
 import os
 import torch
+import random
 import torch.nn as nn
 from torch.nn.parameter import Parameter
 from collections import namedtuple
@@ -130,7 +131,10 @@ for filename in filenames:
     inputs = np.load(filedir+"inputs.npy")
     labels = np.load(filedir+"labels.npy")
 
-    output_dir2 = output_dir + "_" + str(params.ucb)
+    if "pdts" not in params.ei_diversity:
+        output_dir2 = output_dir + "_" + str(params.ucb)
+    else:
+        output_dir2 = output_dir
     main_output_dir = output_dir2 + "/" + filename
 
     if not os.path.exists(output_dir2):
@@ -166,8 +170,8 @@ for filename in filenames:
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
 
-    train_label_mean = train_labels.mean()
-    train_label_std = train_labels.std()
+    train_label_mean = float(train_labels.mean())
+    train_label_std = float(train_labels.std())
 
     train_labels = (train_labels - train_label_mean) / train_label_std
     val_labels = (val_labels - train_label_mean) / train_label_std
@@ -230,7 +234,7 @@ for filename in filenames:
             e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
-                print('alread done batch', ack_batch_size)
+                print('already done batch', ack_batch_size)
                 continue
 
             with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
@@ -253,11 +257,18 @@ for filename in filenames:
 
                     print('doing ack_iter', ack_iter)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
-                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device=params.device) # (num_candidate_points, num_samples)
+                    preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
+                    assert preds.shape[1] == Y.shape[0]
 
                     #preds_for_ei = torch.max(preds - train_Y_ei.max(), torch.tensor(0.).to(params.device))
                     #assert preds_for_ei.shape == preds.shape, str(preds_for_ei.shape)
+
+                    idx = list({i for i in range(Y.shape[0])}.difference(skip_idx_ei))
+                    log_prob_list, mse_list = bopt.get_log_prob(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
+
+                    print('log_prob_list:', log_prob_list)
+                    print('mse_list:', mse_list)
 
                     top_k = max(params.mves_diversity, ack_batch_size)
 
@@ -265,13 +276,17 @@ for filename in filenames:
                     std = preds.std(dim=0).view(-1).cpu().numpy()
 
                     if "var" in params.ei_diversity:
+                        print("var")
                         ei_sortidx = np.argsort(ei/std)
                     elif "ucb" in params.ei_diversity:
+                        print("ucb")
                         ei_sortidx = np.argsort(ei + params.ucb*std)
                     else:
-                        ei_sortidx = np.argsort(ei)
+                        if "pdts" not in params.ei_diversity:
+                            assert False, "Not Implemented"
 
                     if "none" in params.ei_diversity:
+                        print(filename, "none")
                         ei_idx = []
                         for idx in ei_sortidx[::-1]:
                             if idx not in skip_idx_ei:
@@ -279,30 +294,79 @@ for filename in filenames:
                             if len(ei_idx) >= top_k:
                                 break
                     elif "hsic" in params.ei_diversity:
+                        print(filename, "hsic")
                         ei_idx = bopt.ei_diversity_selection_hsic(params, preds, skip_idx_ei, device=params.device)
                     elif "detk" in params.ei_diversity:
+                        print(filename, "detk")
                         ei_idx = bopt.ei_diversity_selection_detk(params, preds, skip_idx_ei, device=params.device)
                     elif "pdts" in params.ei_diversity:
+                        print(filename, "pdts")
+                        ei_idx = set()
+                        ei_sortidx = np.argsort(ei)
+                        sorted_preds_idx = []
+                        for i in range(preds.shape[0]):
+                            sorted_preds_idx += [np.argsort(preds[i].numpy())]
+                        sorted_preds_idx = np.array(sorted_preds_idx)
+                        if "density" in params.ei_diversity:
+                            print("pdts_density")
+                            counts = np.zeros(sorted_preds_idx.shape[1])
+                            for rank in range(sorted_preds_idx.shape[1]):
+                                counts[:] = 0
+                                for idx in sorted_preds_idx[:, rank]:
+                                    counts[idx] += 1
+                                counts_idx = counts.argsort()[::-1]
+                                j = 0
+                                while len(ei_idx) < ack_batch_size and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
+                                    idx = int(counts_idx[j])
+                                    ei_idx.update({idx})
+                                    j += 1
+                                if len(ei_idx) >= ack_batch_size:
+                                    break
+                        else:
+                            assert params.ei_diversity == "pdts", params.ei_diversity
+                            for i_model in range(sorted_preds_idx.shape[0]):
+                                for idx in sorted_preds_idx[i_model]:
+                                    idx2 = int(idx)
+                                    if idx2 not in ei_idx:
+                                        ei_idx.update({idx2})
+                                        break
+                                if len(ei_idx) >= ack_batch_size:
+                                    break
+                        ei_idx = list(ei_idx)
                     else:
                         assert False, "Not implemented"
+                    assert len(ei_idx) == ack_batch_size, len(ei_idx)
 
                     best_ei_10 = labels[ei_sortidx[-10:]]
                     f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()) + "\t")
 
                     ack_all_ei.update(ei_idx)
                     skip_idx_ei.update(ei_idx)
-                    print("before ei_idx:", ei_idx)
+                    print("ei_idx:", ei_idx)
+                    print('ei_labels', labels[ei_idx])
                     #np.random.shuffle(ei_idx)
                     #print("after ei_idx:", ei_idx)
-                    ei_idx = torch.LongTensor(ei_idx).to(params.device)
-                    
-                    ack_ei = X[ei_idx]
-                    ack_ei_vals = (Y[ei_idx]-float(train_label_mean))/float(train_label_std)
 
-                    print(train_X_ei.shape, len(ei_idx))
+                    new_idx = list(skip_idx_ei)
+                    random.shuffle(new_idx)
+                    new_idx = torch.LongTensor(new_idx)
+
+                    train_X_ei = X.new_tensor(X[new_idx])
+                    train_Y_ei = Y.new_tensor(Y[new_idx])
+
+                    Y_mean = train_Y_ei.mean()
+                    Y_std = train_Y_ei.std()
+
+                    train_label_mean = float(Y_mean.item())
+                    train_label_std = float(Y_std.item())
+
+                    train_Y_ei = (train_Y_ei-Y_mean)/Y_std
                     
-                    train_X_ei = torch.cat([train_X_ei, ack_ei], dim=0)
-                    train_Y_ei = torch.cat([train_Y_ei, ack_ei_vals], dim=0)
+                    print("train_X_ei.shape", train_X_ei.shape)
+                    
+                    expected_num_points = (ack_iter+1)*ack_batch_size
+                    assert train_X_ei.shape[0] == int(n_train*0.9) + expected_num_points, str(train_X_ei.shape) + "[0] == " + str(int(n_train*0.9) + expected_num_points)
+                    assert train_Y_ei.shape[0] == train_X_ei.shape[0]
                     data = [train_X_ei, train_Y_ei, val_X, val_Y]
                     logging, optim = dbopt.train(
                         params, 
@@ -323,6 +387,8 @@ for filename in filenames:
                     logging = [torch.tensor(k) for k in logging]
 
                     ack_array = np.array(list(ack_all_ei), dtype=np.int32)
+
+                    print('best so far:', labels[ack_array].max())
                     
                     e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_ei, qz_ei, e)
@@ -357,6 +423,9 @@ for filename in filenames:
                         'ir_batch_ei': torch.from_numpy(ei),
                         'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
+                        'test_log_prob': torch.tensor(log_prob_list),
+                        'test_mse': torch.tensor(mse_list),
                         }, batch_ack_output_file)
+                    sys.stdout.flush()
                     
             main_f.write(str(ack_batch_size) + "\t" + s + "\n")

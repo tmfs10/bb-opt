@@ -184,8 +184,8 @@ for filename in filenames:
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
 
-    train_label_mean = train_labels.mean()
-    train_label_std = train_labels.std()
+    train_label_mean = float(train_labels.mean())
+    train_label_std = float(train_labels.std())
 
     train_labels = (train_labels - train_label_mean) / train_label_std
     val_labels = (val_labels - train_label_mean) / train_label_std
@@ -249,7 +249,7 @@ for filename in filenames:
             e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
-                print('alread done batch', ack_batch_size)
+                print('already done batch', ack_batch_size)
                 continue
 
             with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
@@ -270,12 +270,19 @@ for filename in filenames:
                         skip_idx_mves.update(ack_idx)
                         continue
 
+                    test_points_idx = list(set([i for i in range(X.shape[0])]).difference(skip_idx_mves))
                     print('doing ack_iter', ack_iter, 'for mves with suffix', suffix)
                     e = reparam.generate_prior_samples(params.ack_num_hsic_samples, e_dist)
                     model_ensemble = reparam.generate_ensemble_from_stochastic_net(model_mves, qz_mves, e)
                     preds = model_ensemble(X, expansion_size=0, batch_size=1000, output_device='cpu') # (num_candidate_points, num_samples)
                     preds = preds.transpose(0, 1)
                     #print("done predictions")
+
+                    idx = list({i for i in range(Y.shape[0])}.difference(skip_idx_mves))
+                    log_prob_list, mse_list = bopt.get_log_prob(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
+
+                    print('log_prob_list:', log_prob_list)
+                    print('mse_list:', mse_list)
 
                     if not params.compare_w_old:
                         preds[:, list(skip_idx_mves)] = preds.min()
@@ -310,8 +317,10 @@ for filename in filenames:
                     elif params.condense == 3:
                         print(filename, 'ei_pdts_mix')
                         ei_sortidx = np.argsort(ei)
+                        pdts_idx = bopt.get_pdts_idx(preds, params.mves_diversity*ack_batch_size, density=True)
+                        print('pdts_idx:', pdts_idx)
                         ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
-                        best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx].unsqueeze(-1)], dim=-1)
+                        best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx]], dim=-1)
                     elif params.condense == 4:
                         print(filename, 'cma_es')
                         idx = torch.LongTensor(list(skip_idx_mves)).to(params.device)
@@ -394,8 +403,14 @@ for filename in filenames:
                     Y_mean = train_Y_mves.mean()
                     Y_std = train_Y_mves.std()
 
+                    train_label_mean = float(Y_mean.item())
+                    train_label_std = float(Y_std.item())
+
                     train_Y_mves = (train_Y_mves-Y_mean)/Y_std
 
+                    expected_num_points = (ack_iter+1)*ack_batch_size
+                    assert train_X_mves.shape[0] == int(n_train*0.9) + expected_num_points, str(train_X_mves.shape) + "[0] == " + str(int(n_train*0.9) + expected_num_points)
+                    assert train_Y_mves.shape[0] == train_X_mves.shape[0]
                     data = [train_X_mves, train_Y_mves, val_X, val_Y]
                     logging, optim = dbopt.train(
                         params,
@@ -451,7 +466,10 @@ for filename in filenames:
                         'ir_batch_ei': torch.from_numpy(ei),
                         'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
-                        'ei_idx': torch.tensor(ei_idx)
+                        'ei_idx': torch.tensor(ei_idx),
+                        'test_log_prob': torch.tensor(log_prob_list),
+                        'test_mse': torch.tensor(mse_list),
                         }, batch_ack_output_file)
+                    sys.stdout.flush()
                     
             main_f.write(str(ack_batch_size) + "\t" + s + "\n")
