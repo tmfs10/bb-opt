@@ -265,7 +265,7 @@ for filename in filenames:
                     #assert preds_for_ei.shape == preds.shape, str(preds_for_ei.shape)
 
                     idx = list({i for i in range(Y.shape[0])}.difference(skip_idx_ei))
-                    log_prob_list, mse_list = bopt.get_log_prob(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
+                    log_prob_list, mse_list = bopt.get_pred_stats(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
 
                     print('log_prob_list:', log_prob_list)
                     print('mse_list:', mse_list)

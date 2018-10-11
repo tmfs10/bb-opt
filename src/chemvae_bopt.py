@@ -6,7 +6,7 @@ import hsic
 import torch
 import torch.nn as nn
 
-import non_matlab_utils as utils
+import non_matplotlib_utils as utils
 import reparam_trainer as reparam
 from tqdm import tnrange
 

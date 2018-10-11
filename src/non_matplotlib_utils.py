@@ -133,3 +133,17 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_lengt
     if iteration == total:
         sys.stdout.write('\n')
     sys.stdout.flush()
+
+def get_path(*path_segments):
+    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
+
+def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
+    os.makedirs(os.path.dirname(fname), exist_ok=True)
+
+    checkpoint = {"model_state": model.state_dict()}
+    if optimizer:
+        checkpoint["optimizer_state"] = optimizer.state_dict()
+
+    torch.save(checkpoint, fname)
+
+

@@ -44,7 +44,7 @@ from bb_opt.src.hsic import (
 )
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
-from bb_opt.src.utils import get_path, save_checkpoint
+from bb_opt.src.non_matplotlib_utils import get_path, save_checkpoint
 from bb_opt.src import reparam_trainer as reparam
 
 
@@ -1735,7 +1735,7 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
     return pdts_idx
 
 
-def get_log_prob(preds, labels, label_mean_factor, label_std_factor, output_dist_fn, output_std, test_idx):
+def get_pred_stats(preds, labels, label_mean_factor, label_std_factor, output_dist_fn, output_std, test_idx):
     assert preds.shape[1] == labels.shape[0]
     print('label_mean_factor', label_mean_factor)
     print('label_std_factor', label_std_factor)
@@ -1746,6 +1746,7 @@ def get_log_prob(preds, labels, label_mean_factor, label_std_factor, output_dist
 
     log_prob_list = []
     mse_list = []
+    std_list = []
     for frac in [1., 0.1]:
         labels_sort_idx = torch.sort(labels, descending=True)[1].cpu().numpy()
         n = int(labels_sort_idx.shape[0] * frac)
@@ -1754,13 +1755,16 @@ def get_log_prob(preds, labels, label_mean_factor, label_std_factor, output_dist
         labels2 = labels[labels_sort_idx].repeat([m])
 
         output_dist = output_dist_fn(preds[:, labels_sort_idx].view(-1), output_std)
+
         log_prob_list += [torch.mean(output_dist.log_prob(labels2)).item()]
         mse_list += [torch.sqrt(torch.mean((preds[:, labels_sort_idx].view(-1)-labels2)**2)).item()]
+        std = preds[:, labels_sort_idx].std(dim=0)
+        std_list += [[std.mean().item(), std.std().item(), std.max().item(), std.min().item()]]
 
     max_idx = labels_sort_idx[0]
     log_prob_list += [torch.mean(output_dist_fn(preds[:, max_idx], output_std).log_prob(labels[max_idx])).item()]
     mse_list += [torch.sqrt(torch.mean((preds[:, max_idx]-labels[max_idx])**2)).item()]
 
-    return log_prob_list, mse_list
+    return log_prob_list, mse_list, std_list
 
 

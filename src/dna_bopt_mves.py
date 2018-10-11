@@ -279,7 +279,7 @@ for filename in filenames:
                     #print("done predictions")
 
                     idx = list({i for i in range(Y.shape[0])}.difference(skip_idx_mves))
-                    log_prob_list, mse_list = bopt.get_log_prob(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
+                    log_prob_list, mse_list = bopt.get_pred_stats(preds, Y.cpu(), train_label_mean, train_label_std, params.output_dist_fn, params.output_dist_std, idx)
 
                     print('log_prob_list:', log_prob_list)
                     print('mse_list:', mse_list)

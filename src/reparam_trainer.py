@@ -6,9 +6,15 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import random
 import numpy as np
-from bb_opt.src import utils
 import ops
 
+
+def collated_expand(X, num_samples):
+    X = X.unsqueeze(1)
+    X = X.repeat([1] + [num_samples] + [1] * (len(X.shape) - 2)).view(
+        [-1] + list(X.shape[2:])
+    )
+    return X
 
 class GaussianQz(nn.Module):
     def __init__(self, num_latent, prior_std=1):
@@ -266,42 +272,6 @@ def train(batch_size, lr, X, Y, model, qz, e_dist):
             loss.backward()
             optim.step()
     return mu_z, std_z
-
-
-class Qz(nn.Module):
-    def __init__(self, num_latent, prior_std=1):
-        super(Qz, self).__init__()
-        self.mu_z = torch.zeros(num_latent)
-        self.std_z = torch.ones(num_latent) * prior_std
-
-    def forward(self, e):
-        return self.mu_z.unsqueeze(0) + e * self.std_z.unsqueeze(0)
-
-
-class DnaNN(nn.Module):
-    def __init__(self, n_inputs, num_latent, num_hidden, activation):
-        super(DnaNN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(n_inputs + num_latent, num_hidden),
-            #nn.Linear(n_inputs, num_hidden),
-            getattr(nn, activation)(),
-            nn.Linear(num_hidden, 2),
-        )
-
-    def forward(self, x, z, resize_at_end=False):
-        assert x.ndimension() == 2
-        num_samples = z.shape[0]
-        N = x.shape[0]
-
-        x = utils.collated_expand(x, num_samples)
-        z = z.repeat([N, 1])
-        x = torch.cat([x, z], dim=1)
-
-        x = self.net(x)
-
-        if resize_at_end:
-            x = x.view([N, num_samples]).transpose()
-        return x
 
 
 def get_model_reparam(
