@@ -40,7 +40,7 @@ from bb_opt.src.hsic import (
     precompute_batch_hsic_stats,
     compute_point_hsics,
     total_hsic,
-    total_hsic_batched,
+    total_hsic_with_batch,
 )
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
