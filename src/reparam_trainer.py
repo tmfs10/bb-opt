@@ -5,9 +5,9 @@ import torch.nn as nn
 from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import random
+import hsic
 import numpy as np
 import ops
-
 
 def collated_expand(X, num_samples):
     X = X.unsqueeze(1)
@@ -21,10 +21,9 @@ class GaussianQz(nn.Module):
         super(GaussianQz, self).__init__()
         self.mu_z = Parameter(torch.zeros(num_latent))
         self.std_z = Parameter(torch.ones(num_latent)*prior_std)
-
+        
     def forward(self, e):
         return self.mu_z.unsqueeze(0) + e*self.std_z.unsqueeze(0)
-
 
 def gaussian_kl(mean, std, prior_std, device):
     assert std.ndimension() == 1
@@ -33,7 +32,6 @@ def gaussian_kl(mean, std, prior_std, device):
     k = mean.shape[0]
     return 0.5 * (torch.sum(var * 1./prior_var) + 1./prior_var*torch.sum(mean**2) - k + torch.sum(-torch.log(var) + torch.log(prior_var)))
     #return 0.5 * torch.sum((1+torch.log(var)) - mean**2 - var)
-
 
 def init_train(batch_size, lr, model_parameters, X, Y):
     assert X.shape[0] == Y.shape[0]
@@ -46,12 +44,10 @@ def init_train(batch_size, lr, model_parameters, X, Y):
 
     return batches, optim
 
-
 def expand_to_sample(X, num_samples):
     X = X.unsqueeze(1)
     X = X.repeat([1] + [num_samples] + [1]*(len(X.shape)-2)).view([-1]+list(X.shape[2:]))
     return X
-
 
 def predict_no_resize(X, model, qz, e, device='cuda', output_device='cuda', batch_size=0, expansion_size=0, all_pairs=True):
     model = model.to(device)
@@ -244,19 +240,16 @@ def generate_prior_samples(num_samples, e_dist, device='cuda'):
     e = torch.stack(e, dim=0)
     return e
 
-
 def train(batch_size, lr, X, Y, model, qz, e_dist):
     assert X.shape[0] == Y.shape[0]
 
-    model, qz, e_dist, params = model
-
     N = X.shape[0]
-    num_batches = N // batch_size
+    num_batches = N//params.batch_size
 
     model_parameters = model.parameters() + qz.parameters()
     batches, optim = init_train(batch_size, lr, model_parameters, X, Y)
 
-    for epoch_iter in n_epochs:
+    for epoch_iter in params.num_epochs:
         for bi in num_batches:
             bs = batches[bi]
             be = batches[bi+1]
@@ -266,7 +259,9 @@ def train(batch_size, lr, X, Y, model, qz, e_dist):
             bY = Y[bs:be]
 
             e = generate_prior_samples(params.num_samples, e_dist)
-            loss, log_prob_loss, kl_loss, hsic_loss, _, _ = compute_loss(params, bX, bY, model, qz, e, hsic_lambda=20.0)
+            loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, bX, bY, model, qz, e)
+            train_losses += [log_prob_loss]
+            train_kl_losses += [kl_loss]
 
             optim.zero_grad()
             loss.backward()
@@ -274,18 +269,25 @@ def train(batch_size, lr, X, Y, model, qz, e_dist):
     return mu_z, std_z
 
 
-def get_model_reparam(
-    n_inputs: int = 512,
-    num_latent: int = 20,
-    prior_mean: float = 0.0,
-    prior_std: float = 1.0,
-    device='cpu',
-    batch_size = None,
-    ):
+class Qz(nn.Module):
+    def __init__(self, num_latent):
+        super(Qz, self).__init__()
+        self.mu_z = torch.zeros(num_latent)
+        self.std_z = torch.ones(num_latent)
+        
+    def forward(self, e):
+        return self.mu_z.unsqueeze(0) + e*self.std_z.unsqueeze(0)
+        
+def get_model_nn(n_inputs: int = 512, num_latent: int = 20, device='cpu'):
+    device = device or "cpu"
     N_HIDDEN = 100
     NON_LINEARITY = "ReLU"
 
-    model = DnaNN(n_inputs, num_latent, N_HIDDEN, NON_LINEARITY).to(device)
+    model = nn.Sequential(
+        nn.Linear(n_inputs + num_latent, N_HIDDEN),
+        getattr(nn, NON_LINEARITY)(),
+        nn.Linear(N_HIDDEN, 2),
+    ).to(device)
 
     def init_weights(module):
         if isinstance(module, nn.Linear):
@@ -295,41 +297,12 @@ def get_model_reparam(
 
     model.apply(init_weights)
     model.train()
-
-    qz = Qz(num_latent, prior_std).to(device)
-    qz.train()
-
-    mu_e = torch.zeros(num_latent, requires_grad=False).to(device)
-    std_e = torch.ones(num_latent, requires_grad=False).to(device)
-
-    e_dist = tdist.Normal(mu_e + prior_mean, std_e * prior_std)
-
-    Params = namedtuple('params', [
-        'lr',
-        'num_latents',
-        'output_dist_std',
-        'output_dist_fn',
-        'prior_mean',
-        'prior_std',
-        'num_epochs',
-        'num_samples',
-        'batch_size',
-        'device',
-        'exp_noise_samples'
-    ])
-
-    params = Params(
-        batch_size=100,
-        num_latents=20,
-        output_dist_std=0.01,
-        output_dist_fn=tdist.Normal,
-        num_samples=10,
-        exp_noise_samples=2,
-        lr=1e-3,
-        prior_mean=0.,
-        prior_std=1.,
-        device=device,
-        num_epochs=1000
-    )
-
-    return model, qz, e_dist, params
+    
+    qz = Qz(num_latent)
+    
+    mu_e = torch.zeros(num_latent, requires_grad=False)
+    std_e = torch.ones(num_latent, requires_grad=False)
+    
+    e_dist = tdist.Normal(mu_e + params.prior_mean, std_e*params.prior_std)
+    
+    return model, qz, e_dist
