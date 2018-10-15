@@ -2,7 +2,7 @@ import torch
 import numpy as np
 import sys
 from typing import Sequence, Callable, Optional, Union
-import ops
+from bb_opt.src import ops
 
 
 def sqdist(X1, X2=None, do_mean=False, collect=True):

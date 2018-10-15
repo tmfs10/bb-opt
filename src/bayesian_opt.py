@@ -44,7 +44,7 @@ from bb_opt.src.hsic import (
 )
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
-import ops
+from bb_opt.src import ops
 
 def get_path(*path_segments):
     return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
@@ -1000,7 +1000,7 @@ def acquire_batch_via_grad_mves(
         loss = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
         postfix = {'loss' : loss.item()}
         progress.set_postfix(postfix)
-        
+
         optim.zero_grad()
         loss.backward()
         optim.step()
@@ -1037,7 +1037,7 @@ def ei_diversity_selection_hsic(
     chosen_idx = [num_ei-1]
     batch_dist_matrix = hsic.sqdist(preds[:, -1].unsqueeze(-1)) # (n, n, 1)
     self_kernel_matrix = kernel_fn(batch_dist_matrix).detach().repeat([1, 1, 2])
-    normalizer = torch.log(hsic.total_hsic(self_kernel_matrix)) 
+    normalizer = torch.log(hsic.total_hsic(self_kernel_matrix))
 
     all_dist_matrix = hsic.sqdist(preds) # (n, n, m)
     all_kernel_matrix = kernel_fn(all_dist_matrix) # (n, n, m)
@@ -1181,7 +1181,7 @@ def acquire_batch_self_hsic(
         best_idx = None
         best_idx_dist_matrix = None
         best_hsic = None
-        
+
         num_remaining = len(remaining_idx_set)
         num_batches = num_remaining // mves_compute_batch_size + 1
         remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
@@ -1198,8 +1198,8 @@ def acquire_batch_self_hsic(
             dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size)
 
             assert list(dist_matrix.shape) == [
-            num_samples, 
-            num_samples, 
+            num_samples,
+            num_samples,
             cur_batch_size], str(dist_matrix.shape) + " == " \
                     + str([num_samples, num_samples, cur_batch_size])
 
@@ -1212,9 +1212,9 @@ def acquire_batch_self_hsic(
                     .unsqueeze(-1) # (m, n, n, 1)
 
             assert list(batch_kernel_matrix.shape) == [
-                    cur_batch_size, 
-                    num_samples, 
-                    num_samples, 
+                    cur_batch_size,
+                    num_samples,
+                    num_samples,
                     1], str(batch_kernel_matrix.shape) + " == " \
                             + str([cur_batch_size, num_samples, num_samples, 2])
 
@@ -1256,7 +1256,7 @@ def acquire_batch_self_hsic(
         remaining_idx_set.remove(best_idx)
         batch_idx.update({best_idx})
 
-    return batch_idx, best_hsic 
+    return batch_idx, best_hsic
 
 
 
@@ -1321,7 +1321,7 @@ def acquire_batch_mves_sid(
         best_idx = None
         best_idx_dist_matrix = None
         best_hsic = None
-        
+
         num_remaining = len(remaining_idx_set)
         num_batches = num_remaining // mves_compute_batch_size + 1
         remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
@@ -1426,7 +1426,7 @@ def acquire_batch_mves_sid(
         best_hsic = idx_hsic_values[-1]
 
     print('best_hsic_vec', best_hsic_vec)
-    return batch_idx, best_hsic 
+    return batch_idx, best_hsic
 
 
 def acquire_batch_via_grad_er(
@@ -1462,8 +1462,8 @@ def acquire_batch_via_grad_er(
 
 
 def optimize_model_input(
-    params, 
-    input_shape, 
+    params,
+    input_shape,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     seed=None,
     hsic_diversity_lambda=0.
@@ -1505,8 +1505,8 @@ def optimize_model_input(
 
 
 def optimize_model_input_pdts(
-    params, 
-    input_shape, 
+    params,
+    input_shape,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     num_points_to_optimize,
     seed=None,

@@ -13,7 +13,7 @@ import torch
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
-from typing import Tuple, Optional, Dict, Callable
+from typing import Tuple, Optional, Dict, Callable, Sequence
 
 
 class NN(torch.nn.Module):
@@ -206,6 +206,7 @@ def get_model_deep_ensemble(
     n_hidden: int = 100,
     adversarial_epsilon: Optional = None,
     device=None,
+    nonlinearity_names: Sequence[str] = None,
 ):
     device = device or "cpu"
 
@@ -224,32 +225,47 @@ def get_model_deep_ensemble(
     def swish(x):
         return x * torch.sigmoid(x)
 
-    non_linearities = [
-        torch.nn.ELU,
+    non_linearities = {
+        "ELU": torch.nn.ELU,
         #     torch.nn.GLU,
         #     torch.nn.Hardshrink,
-        torch.nn.Hardtanh,
-        torch.nn.LeakyReLU,
-        torch.nn.PReLU,
-        torch.nn.ReLU,
-        torch.nn.SELU,
-        torch.nn.Sigmoid,
-        torch.nn.Softmin,  # /
-        torch.nn.Softplus,
+        "Hardtanh": torch.nn.Hardtanh,
+        "LeakyReLU": torch.nn.LeakyReLU,
+        "PReLU": torch.nn.PReLU,
+        "ReLU": torch.nn.ReLU,
+        "SELU": torch.nn.SELU,
+        "Sigmoid": torch.nn.Sigmoid,
+        "Softmin": torch.nn.Softmin,  # /
+        "Softplus": torch.nn.Softplus,
         #     torch.nn.Softshrink,
-        torch.nn.Softsign,
-        torch.nn.Tanh,
-        torch.nn.Tanhshrink,
-        lambda: gelu,
-        lambda: swish,
-    ]
+        "Softsign": torch.nn.Softsign,
+        "Tanh": torch.nn.Tanh,
+        "Tanhshrink": torch.nn.Tanhshrink,
+        "gelu": lambda: gelu,
+        "swish": lambda: swish,
+    }
+
+    if nonlinearity_names:
+        assert len(nonlinearity_names) == n_models
+        random_nonlinearity = False
+        non_linearities = [non_linearities[name] for name in nonlinearity_names]
+    else:
+        random_nonlinearity = True
+        non_linearities = list(non_linearities.values())
 
     def model_kwargs():
         kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden}
+        non_linearity_idx = 0
         while True:
             kw = kwargs.copy()
             kw["weight_max"] = np.random.uniform(0.1, 20)
-            kw["non_linearity"] = np.random.choice(non_linearities)
+
+            if random_nonlinearity:
+                kw["non_linearity"] = np.random.choice(non_linearities)
+            else:
+                kw["non_linearity"] = non_linearities[non_linearity_idx]
+                non_linearity_idx += 1
+
             yield kw
 
     model = NNEnsemble(
