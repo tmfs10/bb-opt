@@ -8,12 +8,14 @@ This implementation also only supports training all models in the ensemble at on
 on the same GPU; modifications would be needed to use this for larger models.
 """
 
+import pickle
 import numpy as np
 import torch
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
-from typing import Tuple, Optional, Dict, Callable, Sequence
+from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any
+from bb_opt.src.utils import save_checkpoint, load_checkpoint
 
 
 class NN(torch.nn.Module):
@@ -296,3 +298,90 @@ def train_model_deep_ensemble(
             negative_log_likelihood.backward()
             optimizer.step()
     model.eval()
+
+
+def save_model_deep_ensemble(
+    model: NNEnsemble, fname: str, optimizer: Optional = None
+) -> None:
+    """
+    WARNING - saving/loading an ensemble using this function assumes that each model
+    in the ensemble has the same number of hidden units and that the ensemble is
+    constructable by `get_model_deep_ensemble` (which uses `RandomNN`).
+
+    :param fname: path to .pth file to which to save `model`'s weights
+      A .pkl file with the same base name/path will be used to save the
+      nonlinearity names and a few other variables.
+    """
+    nonlinearity_names = []
+    for m in model.models:
+        try:
+            name = m.non_linearity.__name__
+        except AttributeError:
+            name = type(m.non_linearity).__name__
+        nonlinearity_names.append(name)
+
+    kwargs = {
+        "n_inputs": next(
+            m.children()
+        ).in_features,  # all have to take the same input shape
+        "n_models": model.n_models,
+        "n_hidden": next(
+            m.children()
+        ).out_features,  # assumption: all have same hidden size; true in the models I use (so far)
+        "adversarial_epsilon": model.adversarial_epsilon,
+        "nonlinearity_names": nonlinearity_names,
+    }
+
+    with open(fname.replace(".pth", ".pkl"), "wb") as f:
+        pickle.dump(kwargs, f)
+
+    save_checkpoint(fname, model, optimizer)
+
+
+def load_model_deep_ensemble(
+    fname: str, device="cpu", optimizer_func: Optional[Callable] = None
+) -> Union[NNEnsemble, Tuple[NNEnsemble, Any]]:
+    """
+    WARNING - saving/loading an ensemble using this function assumes that each model
+    in the ensemble has the same number of hidden units and that the ensemble is
+    constructable by `get_model_deep_ensemble` (which uses `RandomNN`).
+
+    :param fname: path to .pth file with weights to load
+      There must also be a .pkl file with the same base name/path with
+      a list of the activation function names to use.
+    :param device: device onto which to load the model
+    :optimizer_func: a function which takes in model parameters and returns an optimizer
+      If None, Adam is used (with lr=0.01).
+    :returns: (model, optimizer) if optimizer state was saved otherwise model
+    """
+    batch_size = 1  # this isn't used
+
+    with open(fname.replace(".pth", ".pkl"), "rb") as f:
+        kwargs = pickle.load(f)
+        n_models = kwargs["n_models"]
+        n_inputs = kwargs["n_inputs"]
+        n_hidden = kwargs["n_hidden"]
+        adversarial_epsilon = kwargs["adversarial_epsilon"]
+        nonlinearity_names = kwargs["nonlinearity_names"]
+
+    model = get_model_deep_ensemble(
+        n_inputs,
+        batch_size,
+        n_models,
+        n_hidden,
+        adversarial_epsilon,
+        device,
+        nonlinearity_names,
+    )
+
+    try:
+        optimizer = (
+            optimizer_func(model.parameters())
+            if optimizer_func
+            else torch.optim.Adam(model.parameters(), lr=0.01)
+        )
+        load_checkpoint(fname, model, optimizer)
+        return model, optimizer
+    except KeyError:
+        load_checkpoint(fname, model)
+        return model

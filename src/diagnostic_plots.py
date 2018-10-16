@@ -431,11 +431,25 @@ def diagnostic_plots(
     guide=None,
     gaussian_approx: bool = False,
     plot_list: Sequence[str] = (),
+    n_subsample: int = 0,
 ):
+    """
+    :param n_subsample: number of points to use for `plot_preds_with_conf_intervals` (0 means all)
+    """
+
     pred_means = preds.mean(0)
     pred_stds = preds.std(0)
 
-    plot_preds_with_conf_intervals(preds, labels, conf_level=conf_level)
+    if n_subsample:
+        subsample_idx = np.random.choice(
+            range(len(labels)), replace=False, size=n_subsample
+        )
+        plot_preds_with_conf_intervals(
+            preds[:, subsample_idx], labels[subsample_idx], conf_level=conf_level
+        )
+    else:
+        plot_preds_with_conf_intervals(preds, labels, conf_level=conf_level)
+
     plot_pdfs(preds, labels, gaussian_approx=gaussian_approx)
     plot_means_stds(pred_means, pred_stds)
     plot_calibration(
