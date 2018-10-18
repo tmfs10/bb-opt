@@ -14,8 +14,10 @@ import torch
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
-from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any
+from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.utils import save_checkpoint, load_checkpoint
+
+_NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
 
 class NN(torch.nn.Module):
@@ -349,8 +351,11 @@ class NNEnsemble(torch.nn.Module):
 
     @classmethod
     def load_model(
-        cls, fname: str, device: str = "cpu", optimizer_func: Optional[Callable] = None
-    ) -> Union[NNEnsemble, Tuple[NNEnsemble, Any]]:
+        cls: Type[_NNEnsemble],
+        fname: str,
+        device: str = "cpu",
+        optimizer_func: Optional[Callable] = None,
+    ) -> Union[_NNEnsemble, Tuple[_NNEnsemble, Any]]:
         """
         WARNING - saving/loading an ensemble using this function assumes that each model
         in the ensemble has the same number of hidden units and that the ensemble is
