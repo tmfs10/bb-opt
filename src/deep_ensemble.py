@@ -318,7 +318,7 @@ class NNEnsemble(torch.nn.Module):
         """
         WARNING - saving/loading an ensemble using this function assumes that each model
         in the ensemble has the same number of hidden units and that the ensemble is
-        constructable by `NNEnsemble.get_model` (which uses `RandomNN`).
+        constructable by `NNEnsemble.get_model`.
 
         :param fname: path to .pth file to which to save weights
         A .pkl file with the same base name/path will be used to save the
@@ -348,13 +348,13 @@ class NNEnsemble(torch.nn.Module):
         save_checkpoint(fname, self, optimizer)
 
     @classmethod
-    def load_model_deep_ensemble(
-        cls, fname: str, device="cpu", optimizer_func: Optional[Callable] = None
+    def load_model(
+        cls, fname: str, device: str = "cpu", optimizer_func: Optional[Callable] = None
     ) -> Union[NNEnsemble, Tuple[NNEnsemble, Any]]:
         """
         WARNING - saving/loading an ensemble using this function assumes that each model
         in the ensemble has the same number of hidden units and that the ensemble is
-        constructable by `get_model_deep_ensemble` (which uses `RandomNN`).
+        constructable by `NNEnsemble.get_model`.
 
         :param fname: path to .pth file with weights to load
         There must also be a .pkl file with the same base name/path with
