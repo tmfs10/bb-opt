@@ -16,6 +16,7 @@ from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.utils import save_checkpoint, load_checkpoint
+from bb_opt.src.bo_model import BOModel
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -88,7 +89,7 @@ def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
             module.bias.data.uniform_(min_val, max_val)
 
 
-class NNEnsemble(torch.nn.Module):
+class NNEnsemble(BOModel, torch.nn.Module):
     """
     Ensemble of `NN`s, trained individually but whose predictions can be combined.
     Adversarial training will be used if `adversarial_epsilon` is not `None`.
@@ -157,6 +158,13 @@ class NNEnsemble(torch.nn.Module):
             return means, variances
 
         return self.combine_means_variances(means, variances)
+
+    def predict(self, inputs: torch.Tensor) -> torch.Tensor:
+        with torch.no_grad():
+            pred_means, pred_vars = self(inputs)
+
+        pred_means = pred_means.cpu()
+        return pred_means
 
     @staticmethod
     def combine_means_variances(
