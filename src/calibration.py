@@ -5,12 +5,21 @@ from typing import Tuple
 
 
 class CDF:
-    def __init__(self, preds: np.ndarray, gaussian_approx: bool = False):
+    def __init__(
+        self,
+        preds: np.ndarray,
+        gaussian_approx: bool = False,
+        calibration_method: str = "cdf",
+    ):
         """
         :param preds: samples to use in construction the (e)CDFs; there will be one CDF
           per input (shape n_samples x n_inputs)
         :param gaussian_approx: whether to approximate the CDF as a Gaussian. If not,
           the emprical CDF (eCDF) is used instead
+        :param calibration_method: one of {cdf, conf}
+          cdf uses the method from https://arxiv.org/pdf/1807.00263.pdf (inputs/outputs are CDF probabilities)
+          conf regresses on the calibration curve itself (inputs/outputs are confidence levels)
+          conf is only supported for calibrating confidence intervals, not sampling or computing CDF probabilties
         """
         self.gaussian_approx = gaussian_approx
         self.n_samples, self.n_inputs = preds.shape
@@ -21,7 +30,9 @@ class CDF:
         else:
             self.preds = np.sort(preds, axis=0)
 
+        self.calibration_method = calibration_method
         self.calibration_regressor = None
+        self._expected_conf = self._observed_conf = None
 
     def get_cdf_probs(self, x: np.ndarray, calibrated: bool = False) -> np.ndarray:
         """
@@ -34,27 +45,65 @@ class CDF:
         if not calibrated:
             return cdf_probs
 
+        assert self.calibration_method == "cdf"
+
         return self.calibrate_cdf_probs(cdf_probs)
+
+    def get_calibration_curve(
+        self, labels: np.ndarray, n_conf_levels: int = 101
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        if (
+            self._expected_conf is not None
+            and len(self._expected_conf) == n_conf_levels
+        ):
+            return self._expected_conf, self._observed_conf
+
+        expected_conf = np.linspace(0, 1, n_conf_levels)
+
+        observed_conf = []
+        for conf_level in expected_conf:
+            lower, upper = self.get_confidence_intervals(conf_level=conf_level)
+            observed_conf.append(((lower <= labels) & (labels <= upper)).mean())
+        observed_conf = np.array(observed_conf)
+
+        self._expected_conf = expected_conf
+        self._observed_conf = observed_conf
+
+        return expected_conf, observed_conf
 
     def train_cdf_calibrator(self, labels: np.ndarray) -> np.ndarray:
         """
         Trains a regressor to calibrate the CDF probabilities based on emprical results `x`.
-        Follows the method from https://arxiv.org/pdf/1807.00263.pdf.
         """
-        cdf_probs = self.get_cdf_probs(labels).squeeze()
-        empirical_cdf_probs = []
-        for cdf_prob in cdf_probs:
-            empirical_cdf_probs.append((cdf_probs <= cdf_prob).mean())
-        empirical_cdf_probs = np.array(empirical_cdf_probs)
-
         calibration_regressor = IsotonicRegression(
             y_min=0, y_max=1, out_of_bounds="clip"
         )
-        calibrated_cdf_probs = calibration_regressor.fit_transform(
-            cdf_probs, empirical_cdf_probs
-        )
         self.calibration_regressor = calibration_regressor
-        return calibrated_cdf_probs
+
+        if self.calibration_method == "cdf":
+            cdf_probs = self.get_cdf_probs(labels).squeeze()
+            empirical_cdf_probs = []
+            for cdf_prob in cdf_probs:
+                empirical_cdf_probs.append((cdf_probs <= cdf_prob).mean())
+            empirical_cdf_probs = np.array(empirical_cdf_probs)
+
+            calibrated_cdf_probs = calibration_regressor.fit_transform(
+                cdf_probs, empirical_cdf_probs
+            )
+            return calibrated_cdf_probs
+        else:
+            assert self.calibration_method == "conf"
+
+            if self._expected_conf is not None:
+                expected_conf = self._expected_conf
+                observed_conf = self._observed_conf
+            else:
+                expected_conf, observed_conf = self.get_calibration_curve(labels)
+
+            calibrated_confs = calibration_regressor.fit_transform(
+                observed_conf, expected_conf
+            )
+            return calibrated_confs
 
     def calibrate_cdf_probs(self, cdf_probs: np.ndarray) -> np.ndarray:
         """
@@ -75,6 +124,7 @@ class CDF:
         Compute the lower and upper bounds of a credible region containing `conf_level` probability mass.
         """
         if self.gaussian_approx:
+            assert not calibrated or self.calibration_method == "cdf"
             return self._get_confidence_interval_gaussian(conf_level, calibrated)
         return self._get_confidence_interval_ecdf(conf_level, calibrated)
 
@@ -85,6 +135,7 @@ class CDF:
         :param n_samples: number of samples to draw from each CDF.
         :returns: array with `n_samples` samples from each CDF (shape n_inputs x n_samples)
         """
+        assert not calibrated or self.calibration_method == "cdf"
         if self.gaussian_approx:
             return self._sample_gaussian(n_samples, calibrated)
         return self._sample_ecdf(n_samples, calibrated)
@@ -176,9 +227,13 @@ class CDF:
         assert (
             0 <= conf_level <= 1
         ), f"conf_level was {conf_level} but must be in [0, 1]."
+
+        if calibrated and self.calibration_method == "conf":
+            conf_level = self.calibration_regressor.transform([conf_level])[0]
+
         lower_quantile, upper_quantile = self._get_confidence_interval_cdf(conf_level)
 
-        if calibrated:
+        if calibrated and self.calibration_method == "cdf":
             cdf_probs = self._get_cdf_probs_of_preds(calibrated)
 
             lower_idx = np.searchsorted(cdf_probs, lower_quantile)
@@ -222,3 +277,28 @@ class CDF:
         upper_bound = 1 - lower_bound
         assert np.isclose(upper_bound - lower_bound, conf_level)
         return lower_bound, upper_bound
+
+    @staticmethod
+    def compute_aucc(
+        expected_conf: np.ndarray,
+        observed_conf: np.ndarray,
+        zero_center: bool = True,
+        scale_to_one: bool = True,
+    ) -> float:
+        """
+        Compute the area under the calibration curve (AUCC).
+        An AUCC of 0.5 corresponds to perfect calibration (or AUCC = 0 if zero-centered).
+        A higher AUCC means underconfidence; lower means overconfidence.
+
+        :param zero_center: normally the AUCC is in [0, 1] with 0.5 being optimal. Zero-centering
+          subtracts 0.5 so that the AUCC is in [-0.5, 0.5] with 0 being optimal.
+        :param scale_to_one: if the AUCC is zero-centered, setting this to True multiples by 2
+          so that the AUCC is in [-1, 1]. If `zero_center == False`, this argument is ignored.
+        """
+
+        aucc = np.trapz(observed_conf, expected_conf)
+        if zero_center:
+            aucc -= 0.5
+            if scale_to_one:
+                aucc *= 2
+        return aucc
