@@ -145,16 +145,6 @@ def all_scores(smiles_mol, add_hs=False):
     return [Descriptors.MolLogP(m, add_hs), QED.qed(m), sascorer.calculateScore(m)]
 
 
-def save_pyro_model(base_path: str, optimizer):
-    pyro.get_param_store().save(f"{base_path}.params")
-    optimizer.save(f"{base_path}.opt")
-
-
-def load_pyro_model(base_path: str, optimizer):
-    pyro.get_param_store().load(f"{base_path}.params")
-    optimizer.load(f"{base_path}.opt")
-
-
 def train_val_test_split(n, split, shuffle=True):
     if type(n) == int:
         idx = np.arange(n)
@@ -279,3 +269,24 @@ def load_data_saber(
         ]
     )
     return dataset
+
+
+def get_early_stopping(
+    max_patience: int, threshold: float = 1.0
+) -> Callable[[float], bool]:
+    old_min = float("inf")
+    patience = max_patience
+
+    def early_stopping(metric: float) -> bool:
+        nonlocal old_min
+        nonlocal patience
+        nonlocal max_patience
+        if metric < threshold * old_min:
+            old_min = metric
+            patience = max_patience
+        else:
+            patience -= 1
+
+        return patience == 0
+
+    return early_stopping

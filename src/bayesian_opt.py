@@ -45,6 +45,7 @@ from bb_opt.src.hsic import (
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src import ops
+from bb_opt.src.bnn import make_bnn_model, make_guide
 
 def get_path(*path_segments):
     return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
@@ -74,19 +75,6 @@ def ExtendedGamma(shape, scale, ndimension=0):
     sign = pyro.sample("signX", Bernoulli(torch.tensor(0.5, device=device)))
     sign = sign * 2 - 1
     return sign * pyro.sample("egX", Gamma(shape, beta).independent(ndimension))
-
-
-def normal_priors(
-    model: torch.nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
-    priors = {}
-    for name, param in model.named_parameters():
-        priors[name] = Normal(
-            torch.full_like(param, fill_value=mean),
-            torch.full_like(param, fill_value=std),
-        ).independent(param.ndimension())
-
-    return priors
 
 
 def laplace_priors(
@@ -169,21 +157,6 @@ def spike_slab_priors(
     return priors
 
 
-def normal_variationals(
-    model: torch.nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
-    variational_dists = {}
-    for name, param in model.named_parameters():
-        location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
-        log_scale = pyro.param(
-            f"g_{name}_log_scale", torch.randn_like(param) + np.log(np.exp(std) - 1)
-        )
-        variational_dists[name] = Normal(
-            location, torch.nn.Softplus()(log_scale)
-        ).independent(param.ndimension())
-    return variational_dists
-
-
 def laplace_variationals(
     model: torch.nn.Module, mean: float = 0., b: float = 1.
 ) -> Dict[str, TorchDistribution]:
@@ -233,37 +206,6 @@ def iaf_variationals(
         iaf = InverseAutoregressiveFlow()
 
         variational_dists[name] = TransformedDistribution(base_dist, [iaf])
-
-
-def make_bnn_model(
-    model: torch.nn.Module,
-    priors: Callable[[], Dict[str, TorchDistribution]],
-    batch_size: int = 128,
-) -> Callable:
-    def bnn_model(inputs, labels):
-        bnn = pyro.random_module("bnn", model, priors())
-        nn_sample = bnn()
-        nn_sample.train()  # train mode on
-        with pyro.iarange("i", len(inputs), subsample_size=batch_size) as i:
-            pred = nn_sample(inputs[i]).squeeze()
-            pyro.sample(
-                "obs", Normal(pred, torch.ones_like(pred)), obs=labels[i].squeeze()
-            )
-
-    return bnn_model
-
-
-def make_guide(
-    model: torch.nn.Module,
-    variational_dists: Callable[[], Dict[str, TorchDistribution]],
-) -> Callable:
-    def guide(inputs=None, labels=None):
-        bnn = pyro.random_module("bnn", model, variational_dists())
-        nn_sample = bnn()
-        nn_sample.train()
-        return nn_sample
-
-    return guide
 
 
 def optimize(
@@ -501,28 +443,6 @@ def train_model_nn(model, inputs, labels, n_epochs, batch_size):
             loss.backward()
             optimizer.step()
     model.eval()
-
-
-def get_model_bnn(
-    n_inputs: int = 512,
-    batch_size: int = 200,
-    prior_mean: float = 0,
-    prior_std: float = 1.0,
-    device=None,
-):
-    device = device or "cpu"
-    model = nn.Sequential(
-        nn.Linear(n_inputs, N_HIDDEN),
-        getattr(nn, NON_LINEARITY)(),
-        nn.Linear(N_HIDDEN, 1),
-    ).to(device)
-
-    priors = lambda: normal_priors(model, prior_mean, prior_std)
-    variational_dists = lambda: normal_variationals(model, prior_mean, prior_std)
-
-    bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
-    guide = make_guide(model, variational_dists)
-    return bnn_model, guide
 
 
 def get_model_bnn_laplace(
@@ -1563,92 +1483,6 @@ def acquire_batch_pi(
 
     assert len(batch) == batch_size or not acquirable_idx
     return batch
-
-
-def train_model_bnn(model, inputs, labels, n_epochs: int, batch_size: int):
-    global SVI
-    bnn_model, guide = model
-    optimizer = pyro.optim.Adam({})
-    pyro.clear_param_store()
-    svi = pyro.infer.SVI(bnn_model, guide, optimizer, loss=pyro.infer.Trace_ELBO())
-    if n_epochs == -1:
-        n_steps = 10000000000000
-    else:
-        n_steps = int(len(inputs) / batch_size * n_epochs)
-    SVI = svi
-    train(svi, n_steps, inputs, labels)
-
-
-def partial_train_model_bnn(model, inputs, labels, n_steps: int):
-    global SVI
-    if SVI is None:
-        bnn_model, guide = model
-        optimizer = pyro.optim.Adam({})
-        svi = pyro.infer.SVI(bnn_model, guide, optimizer, loss=pyro.infer.Trace_ELBO())
-        SVI = svi
-    train(SVI, n_steps, inputs, labels)
-
-
-def get_early_stopping(
-    max_patience: int, threshold: float = 1.0
-) -> Callable[[float], bool]:
-    old_min = float("inf")
-    patience = max_patience
-
-    def early_stopping(metric: float) -> bool:
-        nonlocal old_min
-        nonlocal patience
-        nonlocal max_patience
-        if metric < threshold * old_min:
-            old_min = metric
-            patience = max_patience
-        else:
-            patience -= 1
-
-        if patience == 0:
-            return True
-        return False
-
-    return early_stopping
-
-
-def train(
-    svi,
-    n_steps: int,
-    inputs,
-    labels,
-    verbose: bool = False,
-    max_patience: int = 3,
-    n_steps_early_stopping: int = 300,
-):
-    losses = []
-    early_stopping = get_early_stopping(max_patience)
-
-    try:
-        for step in range(n_steps):
-            loss = svi.step(inputs, labels)
-            losses.append(loss)
-            if step % n_steps_early_stopping == 0:
-                if verbose:
-                    print(f"[S{step:04}] loss: {loss:,.0f}")
-
-                stop_now = early_stopping(min(losses[-n_steps_early_stopping:]))
-                if stop_now:
-                    break
-    except KeyboardInterrupt:
-        pass
-    return losses
-
-
-def bnn_predict(guide: Callable, inputs: torch.Tensor, n_samples: int) -> np.ndarray:
-    preds = []
-
-    with torch.no_grad():
-        for _ in range(n_samples):
-            nn_sample = guide()
-            nn_sample.eval()
-            preds.append(nn_sample(inputs).cpu().squeeze().numpy())
-    return np.array(preds)
 
 
 def optimize_inputs(

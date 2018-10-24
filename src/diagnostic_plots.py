@@ -4,7 +4,8 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.isotonic import IsotonicRegression
 from sklearn.neighbors import NearestNeighbors
-from typing import Callable, Tuple, Sequence
+from scipy.spatial.distance import cdist
+from typing import Callable, Tuple, Sequence, Optional
 from bb_opt.src.utils import jointplot
 
 
@@ -243,6 +244,28 @@ def plot_nn_dist_mse_std(
         )
 
 
+def plot_avg_dist_mse_std(
+    train_inputs, inputs, pred_means, pred_stds, labels, dist_metric="l2"
+):
+    avg_train_dist = cdist(train_inputs, inputs, metric=dist_metric).mean(0)
+
+    mses = (pred_means - labels) ** 2
+
+    if (avg_train_dist != 0).any():
+        jointplot(
+            avg_train_dist,
+            mses,
+            ("Avg. Dist. to Train", "MSE"),
+            title="Avg. Dist. to Train vs MSE",
+        )
+        jointplot(
+            avg_train_dist,
+            pred_stds,
+            ("Avg. Dist. to Train", "Pred. Std. Dev."),
+            title="Avg. Dist. to Train vs Std Dev",
+        )
+
+
 def plot_pdfs(
     preds: np.ndarray,
     labels: np.ndarray,
@@ -423,18 +446,38 @@ def get_calibrated_conf_level(calibration_regressor, conf_level: float) -> float
 
 
 def diagnostic_plots(
-    inputs,
-    train_inputs,
-    preds,
-    labels,
-    conf_level,
-    guide=None,
+    inputs: np.ndarray,
+    train_inputs: np.ndarray,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    cred_level: float,
+    guide: Optional = None,
     gaussian_approx: bool = False,
     plot_list: Sequence[str] = (),
     n_subsample: int = 0,
+    input_dist_metric: str = "euclidean",
 ):
     """
+    Make several plots to analyze the uncertainty estimates from a model.
+
+    Many references are made to conf levels in this file - these should all actually be
+    credibility levels because the intervals are credible intervals, not confidence intervals.
+
+    :param inputs: shape n_inputs x n_features
+    :param train_inputs: shape n_train_inputs x n_features; used to calculate the distance
+      between `inputs` and `train_inputs` to see how this relates to the uncertainty
+    :param preds: shape n_samples x n_inputs
+    :param labels: shape n_inputs
+    :param cred_level: the credibility level for the interval to plot (e.g. a 95% credible
+      interval; enter 0.95). The credible interval will be centered on the mean.
+    :param guide: guide for BNN; if given, additional plots are made using distances in the
+      representation space instead of the input space (the expected represetation is used)
+    :param gaussian_approx: whether to approximate the marginal distributions as Gaussian to
+      compute the credible intervals (otherwise the empirical CDFs are used)
+    :param plot_list: list of plots to include (not yet supported)
     :param n_subsample: number of points to use for `plot_preds_with_conf_intervals` (0 means all)
+    :param input_dist_metric: distance metric to use on the input space when computing
+      distances between `train_inputs` and `inputs`
     """
 
     pred_means = preds.mean(0)
@@ -445,10 +488,10 @@ def diagnostic_plots(
             range(len(labels)), replace=False, size=n_subsample
         )
         plot_preds_with_conf_intervals(
-            preds[:, subsample_idx], labels[subsample_idx], conf_level=conf_level
+            preds[:, subsample_idx], labels[subsample_idx], conf_level=cred_level
         )
     else:
-        plot_preds_with_conf_intervals(preds, labels, conf_level=conf_level)
+        plot_preds_with_conf_intervals(preds, labels, conf_level=cred_level)
 
     plot_pdfs(preds, labels, gaussian_approx=gaussian_approx)
     plot_means_stds(pred_means, pred_stds)
@@ -460,7 +503,12 @@ def diagnostic_plots(
         gaussian_approx=gaussian_approx,
     )
     plot_std_vs_mse(pred_means, pred_stds, labels)
-    plot_nn_dist_mse_std(train_inputs, inputs, pred_means, pred_stds, labels, "hamming")
+    plot_nn_dist_mse_std(
+        train_inputs, inputs, pred_means, pred_stds, labels, input_dist_metric
+    )
+    plot_avg_dist_mse_std(
+        train_inputs, inputs, pred_means, pred_stds, labels, input_dist_metric
+    )
 
     if guide:
         train_hidden_reprs = get_hidden_reprs_bnn(guide, train_inputs)
