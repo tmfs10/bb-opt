@@ -37,8 +37,10 @@ class NN(torch.nn.Module):
     def forward(self, x):
         hidden = self.non_linearity(self.hidden(x))
         output = self.output(hidden)
-        mean = output[:, 0]
-        variance = self.softplus(output[:, 1]) + self.min_variance
+        mean =torch.sigmoid(output[:,0])
+        variance =torch.sigmoid(output[:,1])*0.05+self.min_variance
+        #mean = output[:, 0]
+        #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
 
 
@@ -55,6 +57,7 @@ class RandomNN(torch.nn.Module):
         weight_max: Optional[float] = None,
         non_linearity: Callable = torch.nn.ReLU,
         min_variance: float = 1e-5,
+        c: list=[1.0,0.1]
     ):
         super().__init__()
         self.hidden = Linear(n_inputs, n_hidden)
@@ -62,6 +65,7 @@ class RandomNN(torch.nn.Module):
         self.non_linearity = non_linearity()
         self.softplus = Softplus()
         self.min_variance = min_variance
+        self.c = c
 
         if weight_max is None and weight_min and weight_min < 0:
             weight_max = -weight_min
@@ -76,8 +80,8 @@ class RandomNN(torch.nn.Module):
     def forward(self, x):
         hidden = self.non_linearity(self.hidden(x))
         output = self.output(hidden)
-        mean = output[:, 0]
-        variance = self.softplus(output[:, 1]) + self.min_variance
+        mean =torch.sigmoid(output[:,0])*self.c[0]
+        variance =torch.sigmoid(output[:,1])*self.c[1]+self.min_variance
         return mean, variance
 
 
@@ -200,6 +204,22 @@ class NNEnsemble(BOModel, torch.nn.Module):
             return negative_log_likelihood, mse
         return negative_log_likelihood
 
+    def report_metric(
+        labels, means, variances, return_mse: bool = False
+    ):
+        m = means.mean(dim=0)
+        v = (variances + means ** 2).mean(dim=0)-m ** 2
+        mse_m= (labels - m) ** 2
+        mse = (labels - means) ** 2
+        negative_log_likelihood1 = 0.5 * (torch.log(variances) + mse / variances)
+        negative_log_likelihood1 = negative_log_likelihood1.mean(dim=-1).mean()
+        negative_log_likelihood2 = 0.5*(torch.log(v)+ mse_m/v)
+        negative_log_likelihood2 = negative_log_likelihood2.mean()
+
+        if return_mse:
+            return negative_log_likelihood1,negative_log_likelihood2, mse_m.mean()
+        return negative_log_likelihood1,negative_log_likelihood2
+
     @staticmethod
     def compute_weighted_nll(labels, means, variances, return_mse: bool = False):
         mse = (labels - means) ** 2
@@ -321,6 +341,73 @@ class NNEnsemble(BOModel, torch.nn.Module):
                     labels, means, variances
                 )
                 negative_log_likelihood.backward()
+                optimizer.step()
+        self.eval()
+
+    def train_model_var(
+        self,
+        inputs,
+        labels,
+        n_epochs,
+        batch_size,
+	out_size,
+	out_weight,
+        optimizer_kwargs: Optional[Dict] = None,
+    ):
+        optimizer_kwargs = optimizer_kwargs or {}
+        data = TensorDataset(inputs, labels)
+        loader = DataLoader(data, batch_size=batch_size, shuffle=True)
+        optimizer = torch.optim.Adam(self.parameters(), **optimizer_kwargs)
+        self.train()
+        for epoch in range(n_epochs):
+            for batch in loader:
+                inputs, labels = batch
+                optimizer.zero_grad()
+                means, variances = self(inputs)
+
+                negative_log_likelihood = self.compute_negative_log_likelihood(
+                    labels, means, variances
+                )
+                z = np.zeros((8*out_size,4))
+                z[range(8*out_size),np.random.randint(4,size=8*out_size)]=1
+                out_data = torch.from_numpy(z).view((-1,32))
+                means_o, variances_o = self(out_data)
+                loss=negative_log_likelihood+out_weight*(means_o.var(dim=0).mean())
+                loss.backward()
+                optimizer.step()
+        self.eval()
+
+    def train_model_mean(
+        self,
+        inputs,
+        labels,
+        n_epochs,
+        batch_size,
+        out_size,
+        out_weight,
+	default_mean,
+        optimizer_kwargs: Optional[Dict] = None,
+    ):
+        optimizer_kwargs = optimizer_kwargs or {}
+        data = TensorDataset(inputs, labels)
+        loader = DataLoader(data, batch_size=batch_size, shuffle=True)  
+        optimizer = torch.optim.Adam(self.parameters(), **optimizer_kwargs)
+        self.train()
+        for epoch in range(n_epochs):
+            for batch in loader:
+                inputs, labels = batch
+                optimizer.zero_grad()  
+                means, variances = self(inputs)
+
+                negative_log_likelihood = self.compute_negative_log_likelihood(
+                    labels, means, variances
+                )
+                z = np.zeros((8*out_size,4))
+                z[range(8*out_size),np.random.randint(4,size=8*out_size)]=1
+                out_data = torch.from_numpy(z).view((-1,32))
+                means_o, variances_o = self(out_data)
+                loss=negative_log_likelihood+out_weight*(self.compute_negative_log_likelihood(default_mean,means_o,variances_o))
+                loss.backward()
                 optimizer.step()
         self.eval()
 

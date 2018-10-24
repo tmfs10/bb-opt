@@ -6,16 +6,18 @@ import os
 import pickle
 from typing import Dict, Tuple, Sequence, Union, Callable, Optional
 from collections import namedtuple
-from rdkit import Chem
-from rdkit.Chem import Descriptors, QED
-import bb_opt.src.sascorer as sascorer
-import pyro
+#from rdkit import Chem
+#from rdkit.Chem import Descriptors, QED
+#import bb_opt.src.sascorer as sascorer
+#import pyro
 import torch
 from sklearn.model_selection import train_test_split
 
 _Input_Labels = namedtuple("Input_Labels", ["inputs", "labels"])
 _Dataset = namedtuple("Dataset", ["train", "val", "test"])
 
+def sigmoid(x):
+  return 1.0 / (1.0 + np.exp(-x))
 
 def load_fraction_best(average: bool = True):
     data_dir = os.path.realpath(os.path.join(__file__, "../../figures/plot_data"))
@@ -218,7 +220,7 @@ def collated_expand(X, num_samples):
     return X
 
 
-def load_data(
+def load_data_saber(
     data_root: str,
     project: str,
     dataset: str,
@@ -233,6 +235,7 @@ def load_data(
     data_dir = get_path(data_root, project, dataset)
     inputs = np.load(get_path(data_dir, "inputs.npy"))
     labels = np.load(get_path(data_dir, "labels.npy"))
+    labels = np.log(labels)
 
     train_inputs, test_inputs, train_labels, test_labels = train_test_split(
         inputs, labels, train_size=train_size, random_state=random_state
@@ -246,14 +249,15 @@ def load_data(
         val_inputs = val_labels = None
 
     if standardize_labels:
+	
         train_label_mean = train_labels.mean()
         train_label_std = train_labels.std()
 
-        train_labels = (train_labels - train_label_mean) / train_label_std
-        test_labels = (test_labels - train_label_mean) / train_label_std
+        train_labels = sigmoid((train_labels - train_label_mean) / train_label_std)
+        test_labels = sigmoid((test_labels - train_label_mean) / train_label_std)
 
         if val_inputs is not None:
-            val_labels = (val_labels - train_label_mean) / train_label_std
+            val_labels =sigmoid((val_labels - train_label_mean) / train_label_std)
 
     train_inputs = torch.tensor(train_inputs).float().to(device)
     train_labels = torch.tensor(train_labels).float().to(device)
