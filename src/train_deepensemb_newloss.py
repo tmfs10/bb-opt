@@ -12,11 +12,11 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.model_selection import train_test_split
-from bb_opt.src.deep_ensemble import (
+from bb_opt.src.deep_ensemble_saber import (
     NNEnsemble,
     RandomNN,
 )
-from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data
+from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber
 from gpu_utils.utils import gpu_init
 
 def parse_args():
@@ -29,7 +29,9 @@ def parse_args():
     parser.add_argument("-m", "--modelpath",dest='model_dir',help="File to save model")
     parser.add_argument("-ex", "--extra",dest='extra_random',type=bool,default=False,help="Extra randomness")
     parser.add_argument("-e", "--ensize",dest="ensem_size",type=int,default=20,help="size of ensemble")
-    parser.add_argument("-l", "--learnrate",dest="lr",type=float,default=0.001,help="size of ensemble")
+    parser.add_argument("-l", "--learnrate",dest="lr",type=float,default=0.001,help="learning rate")
+    parser.add_argument("-hd", "--hidden",dest="hidden",type=int,default=100,help="num hidden neurons")
+    parser.add_argument("-l2", "--l2",dest="l2",type=float,default=1e-4,help="l2 weight")
     return parser.parse_args()
 
 def sample_uniform(out_size):
@@ -42,19 +44,19 @@ if __name__ == "__main__":
 	args = parse_args()
 	#gpu_id = gpu_init()
 	torch.cuda.set_device(args.gpu)
-	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}.pth'.format(args.loss_type,args.sample_size,args.hyper,args.lr,args.ensem_size))
+	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}.pth'.format(args.loss_type,args.sample_size,args.hyper,args.lr,args.ensem_size,args.hidden))
 	print(model_path)
 	device = torch.device('cuda:'+str(args.gpu) if torch.cuda.is_available() else 'cpu')
 	n_train = 1000
 	n_val = 100
 	batch_size = 128
-	n_hidden = 10
+	n_hidden = args.hidden
 	non_linearity = 'ReLU'
 	top_k_percent = 1
 	data_root = "/cluster/nhunt/github/bb_opt/data"
 	project = "dna_binding"
 	dataset = "crx_ref_r1"
-	data = load_data(data_root, project, dataset, n_train, n_val, standardize_labels=True, device=device)
+	data = load_data_saber(data_root, project, dataset, n_train, n_val, standardize_labels=True, device=device)
 	n_inputs = data.train.inputs.shape[1]
 	train_loader = DataLoader(TensorDataset(data.train.inputs, data.train.labels),batch_size=batch_size,shuffle=True)
 	n_models = args.ensem_size
@@ -62,7 +64,7 @@ if __name__ == "__main__":
 	maxes = data.train.inputs.max(dim=0)[0]
 	adversarial_epsilon = None
 	model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device,extra_random=args.extra_random)
-	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
 	myhist={'train_nll':[],'train_nll_mix':[],'train_mse':[],'train_loss':[],'train_var':[],'test_nll':[],'test_nll_mix':[],'test_mse':[],'test_var':[],'val_nll':[],'val_nll_mix':[],'val_mse':[]}
 	min_loss= float("inf")
 	train_newloss=[]

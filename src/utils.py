@@ -327,6 +327,63 @@ def load_data_saber(
     )
     return dataset
 
+def load_data_top(
+    data_root: str,
+    project: str,
+    dataset: str,
+    train_size,
+    val_size: None,
+    standardize_labels: bool = False,
+    random_state: int = 521,
+    device: Optional = None,
+) -> _Dataset:
+    device = device or "cpu"
+
+    data_dir = get_path(data_root, project, dataset)
+    inputs = np.load(get_path(data_dir, "inputs.npy"))
+    labels = np.load(get_path(data_dir, "labels.npy"))
+
+    train_inputs, test_inputs, train_labels, test_labels = top_split(
+        inputs, labels, train_size=train_size, random_state=random_state
+    )
+
+    if val_size:
+        train_inputs, val_inputs, train_labels, val_labels = train_test_split(
+            train_inputs, train_labels, test_size=val_size, random_state=random_state
+        )
+    else:
+        val_inputs = val_labels = None
+
+    if standardize_labels:
+        train_label_mean = train_labels.mean()
+        train_label_std = train_labels.std()
+
+        train_labels = (train_labels - train_label_mean) / train_label_std
+        test_labels = (test_labels - train_label_mean) / train_label_std
+
+        if val_inputs is not None:
+            val_labels = (val_labels - train_label_mean) / train_label_std
+
+    train_inputs = torch.tensor(train_inputs).float().to(device)
+    train_labels = torch.tensor(train_labels).float().to(device)
+
+    if val_inputs is not None:
+        val_inputs = torch.tensor(val_inputs).float().to(device)
+        val_labels = torch.tensor(val_labels).float().to(device)
+
+    test_inputs = torch.tensor(test_inputs).float().to(device)
+    test_labels = torch.tensor(test_labels).float().to(device)
+
+    dataset = _Dataset(
+        *[
+            _Input_Labels(inputs, labels)
+            for inputs, labels in zip(
+                [train_inputs, val_inputs, test_inputs],
+                [train_labels, val_labels, test_labels],
+            )
+        ]
+    )
+    return dataset
 
 def get_early_stopping(
     max_patience: int, threshold: float = 1.0
