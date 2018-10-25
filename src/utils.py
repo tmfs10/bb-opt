@@ -404,3 +404,34 @@ def get_early_stopping(
         return patience == 0
 
     return early_stopping
+
+def load_data_maxvar(data_dir, exclude_top, device=None):
+    device = device or "cpu"
+    data_dir = data_dir + "/"
+
+    train_inputs = np.load(data_dir+'inputs_crx_ref_r1_train_' + str(exclude_top) + '.npy')
+    val_inputs = np.load(data_dir+'inputs_crx_ref_r1_val_' + str(exclude_top) + '.npy')
+    test_inputs = np.load(data_dir+'inputs_crx_ref_r1_test_' + str(exclude_top) + '.npy')
+
+    train_labels = np.load(data_dir+'labels_crx_ref_r1_train_' + str(exclude_top) + '.npy')
+    val_labels = np.load(data_dir+'labels_crx_ref_r1_val_' + str(exclude_top) + '.npy')
+    test_labels = np.load(data_dir+'labels_crx_ref_r1_test_' + str(exclude_top) + '.npy')
+
+    train_inputs = torch.tensor(train_inputs).float().to(device)
+    val_inputs = torch.tensor(val_inputs).float().to(device)
+    test_inputs = torch.tensor(test_inputs).float().to(device)
+
+    train_labels = torch.tensor(train_labels).float().to(device)
+    val_labels = torch.tensor(val_labels).float().to(device)
+    test_labels = torch.tensor(test_labels).float().to(device)
+
+    dataset = _Dataset(
+        *[
+            _Input_Labels(inputs, labels)
+            for inputs, labels in zip(
+                [train_inputs, val_inputs, test_inputs],
+                [train_labels, val_labels, test_labels],
+            )
+        ]
+    )
+    return dataset
