@@ -16,7 +16,7 @@ from bb_opt.src.deep_ensemble_saber import (
     NNEnsemble,
     RandomNN,
 )
-from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber
+from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber, load_data_maxvar
 from gpu_utils.utils import gpu_init
 
 def parse_args():
@@ -28,10 +28,12 @@ def parse_args():
     parser.add_argument("-i", "--hyper", dest="hyper",type=float, default=1.0,help="hyperparam for extra loss")
     parser.add_argument("-m", "--modelpath",dest='model_dir',help="File to save model")
     parser.add_argument("-ex", "--extra",dest='extra_random',type=bool,default=False,help="Extra randomness")
-    parser.add_argument("-e", "--ensize",dest="ensem_size",type=int,default=20,help="size of ensemble")
+    parser.add_argument("-e", "--ensize",dest="ensem_size",type=int,default=4,help="size of ensemble")
     parser.add_argument("-l", "--learnrate",dest="lr",type=float,default=0.001,help="learning rate")
     parser.add_argument("-hd", "--hidden",dest="hidden",type=int,default=100,help="num hidden neurons")
     parser.add_argument("-l2", "--l2",dest="l2",type=float,default=1e-4,help="l2 weight")
+    parser.add_argument("-d","--data",dest="data_type",type=str,default='rand',help="specify which train/val/test")
+    parser.add_argument("-ep", "--epoch",dest="epoch",type=int,default=3000,help="num training epoch")
     return parser.parse_args()
 
 def sample_uniform(out_size):
@@ -44,7 +46,7 @@ if __name__ == "__main__":
 	args = parse_args()
 	#gpu_id = gpu_init()
 	torch.cuda.set_device(args.gpu)
-	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}.pth'.format(args.loss_type,args.sample_size,args.hyper,args.lr,args.ensem_size,args.hidden))
+	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}.pth'.format(args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden))
 	print(model_path)
 	device = torch.device('cuda:'+str(args.gpu) if torch.cuda.is_available() else 'cpu')
 	n_train = 1000
@@ -56,12 +58,13 @@ if __name__ == "__main__":
 	data_root = "/cluster/nhunt/github/bb_opt/data"
 	project = "dna_binding"
 	dataset = "crx_ref_r1"
-	data = load_data_saber(data_root, project, dataset, n_train, n_val, standardize_labels=True, device=device)
+	if args.data_type =='rand':
+		data = load_data_saber(data_root, project, dataset, n_train, n_val, standardize_labels=True, device=device)
+	elif args.data_type =='top':
+		data = load_data_maxvar('/cluster/geliu/bayesian/bb_opt/maxvar_data',0.1,standardize_labels=True, device=device)
 	n_inputs = data.train.inputs.shape[1]
 	train_loader = DataLoader(TensorDataset(data.train.inputs, data.train.labels),batch_size=batch_size,shuffle=True)
 	n_models = args.ensem_size
-	mins = data.train.inputs.min(dim=0)[0]
-	maxes = data.train.inputs.max(dim=0)[0]
 	adversarial_epsilon = None
 	model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device,extra_random=args.extra_random)
 	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
@@ -70,7 +73,7 @@ if __name__ == "__main__":
 	train_newloss=[]
 	epoch = 0
 	default_mean=data.train.labels.mean().item()
-	for epoch in range(epoch, epoch + 15_000):
+	for epoch in range(epoch, epoch + args.epoch):
 		model.train()
 		for batch in train_loader:
 			inputs, labels = batch

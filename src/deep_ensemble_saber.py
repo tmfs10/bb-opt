@@ -11,7 +11,7 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
-from torch.nn import Linear, ReLU, Softplus
+from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
@@ -38,7 +38,32 @@ class NN(torch.nn.Module):
         hidden = self.non_linearity(self.hidden(x))
         output = self.output(hidden)
         mean =torch.sigmoid(output[:,0])
-        variance =torch.sigmoid(output[:,1])*0.05+self.min_variance
+        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        #mean = output[:, 0]
+        #variance = self.softplus(output[:, 1]) + self.min_variance
+        return mean, variance
+
+class NN2(torch.nn.Module):
+    """
+    Single-layer MLP that predicts a Gaussian for each point.
+    """
+
+    def __init__(self, n_inputs: int, n_hidden: int, min_variance: float = 1e-5):
+        super().__init__()
+        self.hidden1 = Linear(n_inputs, n_hidden)
+        self.hidden2 = Linear(n_hidden, n_hidden)
+        self.output = Linear(n_hidden, 2)
+        self.non_linearity = non_linearity()
+        self.dropout = Dropout(0.5)
+        self.min_variance = min_variance
+
+    def forward(self, x):
+        hidden1 = self.non_linearity(self.hidden1(x))
+        hidden2 = self.non_linearity(self.hidden2(hidden1))
+        dropout2 = self.dropout(hidden2)
+        output = self.output(dropout2)
+        mean =torch.sigmoid(output[:,0])
+        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
@@ -60,9 +85,11 @@ class RandomNN(torch.nn.Module):
         c: list=[1.0,0.1]
     ):
         super().__init__()
-        self.hidden = Linear(n_inputs, n_hidden)
+        self.hidden1 = Linear(n_inputs, n_hidden)
+        self.hidden2 = Linear(n_hidden, n_hidden)
         self.output = Linear(n_hidden, 2)
         self.non_linearity = non_linearity()
+        self.dropout = Dropout(0.5)
         self.softplus = Softplus()
         self.min_variance = min_variance
         self.c = c
@@ -78,8 +105,10 @@ class RandomNN(torch.nn.Module):
             self.weight_max = weight_max
 
     def forward(self, x):
-        hidden = self.non_linearity(self.hidden(x))
-        output = self.output(hidden)
+        hidden1 = self.non_linearity(self.hidden1(x))
+        hidden2 = self.non_linearity(self.hidden2(hidden1))
+        dropout2 = self.dropout(hidden2)
+        output = self.output(dropout2)
         mean =torch.sigmoid(output[:,0])*self.c[0]
         variance =torch.sigmoid(output[:,1])*self.c[1]+self.min_variance
         return mean, variance
@@ -243,14 +272,20 @@ class NNEnsemble(BOModel, torch.nn.Module):
         device=None,
         nonlinearity_names: Sequence[str] = None,
         extra_random: bool = True,
+        single_layer:bool = True
     ):
         device = device or "cpu"
 
         if not extra_random:
             model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden}
-            model = cls(
-                n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon
-            ).to(device)
+            if single_layer:
+                model = cls(
+                    n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                ).to(device)
+            else:
+                model = cls(
+                    n_models, NN2, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                ).to(device)
             return model
 
         def gelu(x):

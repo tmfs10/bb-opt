@@ -405,7 +405,7 @@ def get_early_stopping(
 
     return early_stopping
 
-def load_data_maxvar(data_dir, exclude_top, device=None):
+def load_data_maxvar(data_dir, exclude_top,standardize_labels=True, device=None):
     device = device or "cpu"
     data_dir = data_dir + "/"
 
@@ -416,6 +416,17 @@ def load_data_maxvar(data_dir, exclude_top, device=None):
     train_labels = np.load(data_dir+'labels_crx_ref_r1_train_' + str(exclude_top) + '.npy')
     val_labels = np.load(data_dir+'labels_crx_ref_r1_val_' + str(exclude_top) + '.npy')
     test_labels = np.load(data_dir+'labels_crx_ref_r1_test_' + str(exclude_top) + '.npy')
+
+    if standardize_labels:
+
+        train_label_mean = train_labels.mean()
+        train_label_std = train_labels.std()
+
+        train_labels = sigmoid((train_labels - train_label_mean) / train_label_std)
+        test_labels = sigmoid((test_labels - train_label_mean) / train_label_std)
+
+        if val_inputs is not None:
+            val_labels =sigmoid((val_labels - train_label_mean) / train_label_std)
 
     train_inputs = torch.tensor(train_inputs).float().to(device)
     val_inputs = torch.tensor(val_inputs).float().to(device)
