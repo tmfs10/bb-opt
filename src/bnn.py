@@ -6,7 +6,7 @@ from torch import nn
 import pyro
 from pyro.distributions import Normal, TorchDistribution
 from bb_opt.src.bo_model import BOModel
-from bb_opt.src.utils import get_early_stopping
+from bb_opt.src.non_matplotlib_utils import get_early_stopping
 
 _BNN = TypeVar("BNN", bound="BNN")
 

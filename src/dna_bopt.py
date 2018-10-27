@@ -11,6 +11,17 @@ import torch.distributions as tdist
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
 
+from deep_ensemble_saber import (
+    NNEnsemble,
+    RandomNN,
+)
+
+def sample_uniform(out_size):
+    z = np.zeros((8*out_size,4))
+    z[range(8*out_size),np.random.randint(4,size=8*out_size)] = 1
+    out_data = torch.from_numpy(z).view((-1,32)).float().cuda()
+    return out_data
+
 class Qz(nn.Module):
     def __init__(self, num_latent, prior_std):
         super(Qz, self).__init__()
@@ -67,6 +78,98 @@ def get_model_nn(
     e_dist = tdist.Normal(mu_e + prior_mean, std_e*prior_std)
     
     return model, qz, e_dist
+
+
+def get_model_nn_ensemble(
+    num_inputs,
+    batch_size,
+    num_models,
+    num_hidden,
+    device,
+    extra_random: bool = False,
+):
+    model = NNEnsemble.get_model(num_inputs, batch_size, num_models, num_hidden, device, extra_random=extra_random)
+    model = model.to(device)
+    return model
+
+def train_ensemble(
+        params,
+        batch_size,
+        num_epochs,
+        data,
+        model_ensemble,
+        optim,
+        unseen_reg="normal",
+        gamma=0.0,
+        jupyter=False,
+):
+    train_X, train_Y, val_X, val_Y = data
+    N = train_X.shape[0]
+    print("training:")
+    print(str(batch_size) + " batch_size")
+    print(str(num_epochs) + " num_epochs")
+    print(str(gamma) + " gamma")
+
+    num_batches = N//batch_size+1
+    batches = [i*batch_size  for i in range(num_batches)] + [N]
+
+    corrs = []
+    val_corrs = []
+
+    if jupyter:
+        progress = tnrange(num_epochs)
+    else:
+        progress = trange(num_epochs)
+
+    for epoch_iter in progress:
+        model_ensemble.train()
+        for bi in range(num_batches):
+            bs = batches[bi]
+            be = batches[bi+1]
+            bN = be-bs
+            if bN <= 0:
+                continue
+
+            bX = train_X[bs:be]
+            bY = train_Y[bs:be]
+
+            optim.zero_grad()
+            means, variances = model_ensemble(bX)
+            assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
+            negative_log_likelihood, mse = NNEnsemble.compute_negative_log_likelihood(bY, means, variances, return_mse=True)
+            loss = negative_log_likelihood
+
+            if unseen_reg != "normal":
+                assert gamma > 0
+                out_data = sample_uniform(bN)
+                means_o, variances_o = model_ensemble(out_data)
+
+                if unseen_reg == "maxvar":
+                    var = means_o.var(dim=0).mean()
+                    loss -= gamma*var
+                elif unseen_reg == "defmean":
+                    nll = NNEnsemble.compute_negative_log_likelihood(default_mean,means_o,variances_o)
+                    loss += gamma*nll
+
+            loss.backward()
+            optim.step()
+
+        model_ensemble.eval()
+        with torch.no_grad():
+            means, variances = model_ensemble(train_X)
+            means = means.mean(0)
+            assert means.shape == train_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
+            corr = kendalltau(means, train_Y)[0]
+            corrs += [corr]
+
+            means, variances = model_ensemble(val_X)
+            means = means.mean(0)
+            assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
+            val_corr = kendalltau(means, val_Y)[0]
+            val_corrs += [val_corr]
+            progress.set_description(f"Corr: {val_corr:.3f}")
+
+    return [corrs, val_corrs], optim
 
 def train(
         params,
