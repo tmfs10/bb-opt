@@ -115,6 +115,8 @@ def train_ensemble(
 
     corrs = []
     val_corrs = []
+    train_nlls = []
+    train_mses = []
 
     if jupyter:
         progress = tnrange(num_epochs)
@@ -136,8 +138,10 @@ def train_ensemble(
             optim.zero_grad()
             means, variances = model_ensemble(bX)
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            negative_log_likelihood, mse = NNEnsemble.compute_negative_log_likelihood(bY, means, variances, return_mse=True)
-            loss = negative_log_likelihood
+            nll, mse = NNEnsemble.compute_negative_log_likelihood(bY, means, variances, return_mse=True)
+            loss = nll
+            train_nlls += [nll.item()]
+            train_mses += [mse.item()]
 
             if unseen_reg != "normal":
                 assert gamma > 0
@@ -148,7 +152,7 @@ def train_ensemble(
                     var = means_o.var(dim=0).mean()
                     loss -= gamma*var
                 elif unseen_reg == "defmean":
-                    nll = NNEnsemble.compute_negative_log_likelihood(default_mean,means_o,variances_o)
+                    nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
                     loss += gamma*nll
 
             loss.backward()
@@ -169,7 +173,7 @@ def train_ensemble(
             val_corrs += [val_corr]
             progress.set_description(f"Corr: {val_corr:.3f}")
 
-    return [corrs, val_corrs], optim
+    return [corrs, val_corrs, train_nlls, train_mses], optim
 
 def train(
         params,
