@@ -4,6 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from scipy.stats import kendalltau
 from rdkit.Chem import MolFromSmiles
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect as get_fingerprint
 import torch
@@ -67,7 +68,6 @@ SVI = None
 InputType = torch.Tensor
 LabelType = torch.Tensor
 ModelType = Callable[[InputType], LabelType]
-
 
 def ExtendedGamma(shape, scale, ndimension=0):
     device = "cuda" if scale.is_cuda else "cpu"
@@ -1549,32 +1549,65 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
     return pdts_idx
 
 
-def get_log_prob(preds, labels, label_mean_factor, label_std_factor, output_dist_fn, output_std, test_idx):
-    assert preds.shape[1] == labels.shape[0]
-    print('label_mean_factor', label_mean_factor)
-    print('label_std_factor', label_std_factor)
-    labels = (labels-label_mean_factor)/label_std_factor
+def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx):
+    assert preds.shape[1] == Y.shape[0]
+    assert preds.shape == std.shape, "%s == %s" % (str(preds.shape), str(std.shape))
 
     preds = preds[:, test_idx]
-    labels = labels[test_idx]
+    std = std[:, test_idx]
+    Y = Y[test_idx]
 
     log_prob_list = []
     mse_list = []
+    kt_corr_list = []
+
     for frac in [1., 0.1]:
-        labels_sort_idx = torch.sort(labels, descending=True)[1].cpu().numpy()
+        labels_sort_idx = torch.sort(Y, descending=True)[1].cpu().numpy()
         n = int(labels_sort_idx.shape[0] * frac)
         m = preds.shape[0]
         labels_sort_idx = labels_sort_idx[:n]
-        labels2 = labels[labels_sort_idx].repeat([m])
+        labels2 = Y[labels_sort_idx]
 
-        output_dist = output_dist_fn(preds[:, labels_sort_idx].view(-1), output_std)
-        log_prob_list += [torch.mean(output_dist.log_prob(labels2)).item()]
-        mse_list += [torch.sqrt(torch.mean((preds[:, labels_sort_idx].view(-1)-labels2)**2)).item()]
+        output_dist = output_dist_fn(
+                preds[:, labels_sort_idx].view(-1), 
+                std[:, labels_sort_idx].view(-1))
+        log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
+
+        pred_means = preds[:, labels_sort_idx].mean(0)
+        mse_list += [torch.sqrt(torch.mean((pred_means-labels2)**2)).item()]
+        kt_corr_list += [kendalltau(pred_means, unscaled_Y[test_idx][labels_sort_idx])[0]]
 
     max_idx = labels_sort_idx[0]
-    log_prob_list += [torch.mean(output_dist_fn(preds[:, max_idx], output_std).log_prob(labels[max_idx])).item()]
-    mse_list += [torch.sqrt(torch.mean((preds[:, max_idx]-labels[max_idx])**2)).item()]
+    log_prob_list += [torch.mean(-output_dist_fn(preds[:, max_idx], std[:, max_idx]).log_prob(Y[max_idx])).item()]
+    mse_list += [torch.abs(preds[:, max_idx].mean(0)-Y[max_idx]).item()]
+    kt_corr_list += [0]
 
-    return log_prob_list, mse_list
+    return log_prob_list, mse_list, kt_corr_list
 
+def compute_ir_regret_ensemble(
+        model_ensemble,
+        X,
+        Y,
+        ack_all,
+        top_frac_idx,
+        ack_batch_size,
+):
+    preds, _ = model_ensemble(X) # (num_candidate_points, num_samples)
+    preds = preds.detach()
+    ei = preds.mean(dim=0).view(-1).cpu().numpy()
+    ei_sortidx = np.argsort(ei)[-50:]
+    ack = list(ack_all.union(list(ei_sortidx)))
+    best_10 = np.sort(Y[ack])[-10:]
+    best_batch_size = np.sort(Y[ack])[-ack_batch_size:]
 
+    idx_frac = [len(ack_all.intersection(k))/len(k) for k in top_frac_idx]
+
+    s = "\t".join([str(k) for k in [
+        best_10.mean(), 
+        best_10.max(), 
+        best_batch_size.mean(), 
+        best_batch_size.max(),
+        str(idx_frac)
+        ]])
+
+    return s, idx_frac, ei, ei_sortidx
