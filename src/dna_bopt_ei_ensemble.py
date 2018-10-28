@@ -142,11 +142,8 @@ for filename in filenames:
     sort_idx2 = labels_sort_idx[:-int(labels.shape[0]*exclude_top)]
     idx = idx[sort_idx2]
 
-    train_idx, _, _ = utils.train_val_test_split(idx, split=[n_train, 0])
-    train_idx2, _, test_idx2 = utils.train_val_test_split(n_train, split=[0.9, 0])
-
-    val_idx = train_idx[test_idx2]
-    train_idx = train_idx[train_idx2]
+    train_idx, _, test_idx = utils.train_val_test_split(idx, split=[n_train, 0])
+    val_idx = np.random.choice(test_idx, size=100, replace=False)
 
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
@@ -213,6 +210,7 @@ for filename in filenames:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
         for ack_batch_size in [5]:
+            print('doing batch', ack_batch_size)
             batch_output_dir = main_output_dir + "/" + str(ack_batch_size)
             try:
                 os.mkdir(batch_output_dir)
@@ -358,7 +356,7 @@ for filename in filenames:
                     print("train_X_ei.shape", train_X_ei.shape)
                     
                     expected_num_points = (ack_iter+1)*ack_batch_size
-                    assert train_X_ei.shape[0] == int(n_train*0.9) + expected_num_points, str(train_X_ei.shape) + "[0] == " + str(int(n_train*0.9) + expected_num_points)
+                    assert train_X_ei.shape[0] == int(n_train) + expected_num_points, str(train_X_ei.shape) + "[0] == " + str(int(n_train*0.9) + expected_num_points)
                     assert train_Y_ei.shape[0] == train_X_ei.shape[0]
                     data = [train_X_ei, train_Y_ei, val_X, val_Y]
                     optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
