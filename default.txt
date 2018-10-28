@@ -1,0 +1,29 @@
+
+--seed 1111
+--device cuda
+--clean False
+
+--exclude_top 0.1
+--init_train_examples 20
+--init_train_epochs 200
+--train_lr 0.01
+--train_batch_size 10
+--retrain_num_epochs 200
+--retrain_lr 0.01
+--retrain_batch_size 10
+
+--num_hidden 100
+--output_dist_fn Normal
+--train_l2 0.035
+--retrain_l2 0.035
+
+--unseen_reg normal
+--gamma 0.0
+
+--data_dir ../data/paper_data
+--filename_file ../data/tatsu_pbm/test_files
+--output_dir ../experiments/ensemble/o
+
+--ack_batch_size 5
+--num_acks 20
+
