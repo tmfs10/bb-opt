@@ -9,6 +9,7 @@ import bb_opt.src.sascorer as sascorer
 import pyro
 import torch
 import sys
+import argparse
 
 def sigmoid(x, exp=np.exp):
   return 1.0 / (1.0 + exp(-x))
@@ -162,3 +163,13 @@ def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
 def sigmoid_standardization(labels, mean, std, exp=np.exp):
     labels = sigmoid((labels - mean) / std, exp)
     return labels
+
+class LoadFromFile(argparse.Action):
+	def __call__ (self, parser, namespace, values, option_string=None):
+		with values as f:
+			contents = f.read()
+
+		data = parser.parse_args(contents.split(), namespace=namespace)
+		for k, v in vars(data).items():
+			if v and k != option_string.lstrip('-'):
+				setattr(namespace, k, v)
