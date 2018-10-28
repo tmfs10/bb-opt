@@ -27,7 +27,11 @@ parsing.add_parse_args(parser)
 parsing.add_parse_args_ei(parser)
 parsing.add_parse_args_ensemble(parser)
 
-params = parser.parse_args()
+params = parsing.parse_args(parser)
+
+print('PARAMS:')
+for k, v in vars(params).items():
+    print(k, v)
 
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
