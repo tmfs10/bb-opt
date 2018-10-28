@@ -19,12 +19,15 @@ from gpu_utils.utils import gpu_init
 from tqdm import tnrange
 import pandas as pd
 import copy
+import non_matplotlib_utils as utils
 
-if len(sys.argv) < 15:
-    print("Usage: python", sys.argv[0], "<num_diversity> <init_train_epochs> <init_lr> <retrain_epochs> <retrain_lr> <ack_batch_size> <mves_greedy?> <compare w old> <pred_weighting> <divide_by_std> <condense> <data dir> <filename file> <output dir> <suffix>")
+param_names = ["<num_diversity>", "<init_train_epochs>", "<init_lr>", "<retrain_epochs>", "<retrain_lr>", "<ack_batch_size>", "<mves_greedy?>", "<compare w old>", "<pred_weighting>", "<divide_by_std>", "<condense>", "<unseen reg>", "<gamma>", "<data dir>", "<filename file>", "<output dir>", "<suffix>"]
+
+if len(sys.argv) < len(param_names)+1:
+    print("Usage: python", sys.argv[0], " ".join(param_names))
     sys.exit(1)
 
-num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, mves_greedy, compare_w_old, pred_weighting, divide_by_std, condense, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
+num_diversity, init_train_epochs, train_lr, retrain_num_epochs, retrain_lr, ack_batch_size, mves_greedy, compare_w_old, pred_weighting, divide_by_std, condense, unseen_reg, gamma, data_dir, filename_file, output_dir, suffix = sys.argv[1:]
 
 if output_dir[-1] == "/":
     output_dir = output_dir[:-1]
@@ -67,6 +70,8 @@ Params = namedtuple('params', [
     'pred_weighting',
     'divide_by_std',
     'condense',
+    'unseen_reg',
+    'gamma',
     
     'num_train_latent_samples',
     'num_latent_vars',
@@ -108,12 +113,17 @@ params = Params(
     compare_w_old=int(compare_w_old) == 1,
     pred_weighting=int(pred_weighting),
     condense=int(condense),
+    unseen_reg=unseen_reg.lower(),
+    gamma=float(gamma),
     
     train_batch_size=10,
     num_latent_vars=15,
     num_train_latent_samples=20,
     hsic_train_lambda=20.,
     divide_by_std=int(divide_by_std) == 1,
+
+    unseen_reg=unseen_reg,
+    gamma=float(gamma),
     
     ack_batch_size=int(ack_batch_size),
     num_acks=20,
@@ -178,17 +188,14 @@ for filename in filenames:
     sort_idx2 = labels_sort_idx[:-int(labels.shape[0]*exclude_top)]
     idx = idx[sort_idx2]
 
-    train_idx, _, _ = train_val_test_split(idx, split=[n_train, 0])
-    train_idx2, _, test_idx2 = train_val_test_split(n_train, split=[0.9, 0])
-
-    test_idx = train_idx[test_idx2]
-    train_idx = train_idx[train_idx2]
+    train_idx, _, test_idx = utils.train_val_test_split(idx, split=[n_train, 0])
+    val_idx = np.random.choice(test_idx, size=100, replace=False)
 
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
 
-    val_inputs = inputs[test_idx]
-    val_labels = labels[test_idx]
+    val_inputs = inputs[val_idx]
+    val_labels = labels[val_idx]
 
     labels_sort_idx = labels.argsort()
     top_idx = [set(labels_sort_idx[-int(labels.shape[0]*per):].tolist()) for per in [0.01, 0.05, 0.1, 0.2]]
@@ -198,15 +205,15 @@ for filename in filenames:
     train_label_mean = float(train_labels.mean())
     train_label_std = float(train_labels.std())
 
-    train_labels = (train_labels - train_label_mean) / train_label_std
-    val_labels = (val_labels - train_label_mean) / train_label_std
+    train_labels = utils.sigmoid_standardization(train_labels, train_label_mean, train_label_std)
+    val_labels = utils.sigmoid_standardization(val_labels, train_label_mean, train_label_std)
 
     train_X = torch.FloatTensor(train_inputs).to(device)
     train_Y = torch.FloatTensor(train_labels).to(device)
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model = dbopt.get_model_nn_ensemble(inputs.shape[1], params.batch_size, params.num_models, params.num_hidden, device=params.device)
+    model = dbopt.get_model_nn_ensemble(inputs.shape[1], params.train_batch_size, params.num_models, params.num_hidden, device=params.device)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = main_output_dir + "/init_model.pth"
@@ -219,13 +226,17 @@ for filename in filenames:
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
+        optim = torch.optim.Adam(list(model.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
         logging, optim = dbopt.train_ensemble(
                 params, 
-                params.train_batch_size, 
+                params.train_batch_size,
                 params.num_epochs, 
-                data, 
-                model)
-
+                data,
+                model,
+                optim,
+                unseen_reg=params.unseen_reg,
+                gamma=params.gamma,
+                )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
 
@@ -259,7 +270,6 @@ for filename in filenames:
 
             skip_idx_mves = set(train_idx)
             ack_all_mves = set()
-            e = reparam.generate_prior_samples(params.ack_num_model_samples, e_dist)
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
                 print('already done batch', ack_batch_size)
@@ -417,22 +427,23 @@ for filename in filenames:
                     train_label_mean = float(Y_mean.item())
                     train_label_std = float(Y_std.item())
 
-                    train_Y_mves = (train_Y_mves-Y_mean)/Y_std
+                    train_Y_mves = utils.sigmoid_standardization(train_Y_mves, Y_mean, Y_std, exp=torch.exp)
+                    val_Y = utils.sigmoid_standardization(Y[val_idx], Y_mean, Y_std, exp=torch.exp)
 
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_mves.shape[0] == int(n_train*0.9) + expected_num_points, str(train_X_mves.shape) + "[0] == " + str(int(n_train*0.9) + expected_num_points)
                     assert train_Y_mves.shape[0] == train_X_mves.shape[0]
                     data = [train_X_mves, train_Y_mves, val_X, val_Y]
+                    optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
                     logging, optim = dbopt.train_ensemble(
-                        params,
+                        params, 
                         params.retrain_batch_size, 
-                        params.retrain_lr,
-                        params.retrain_l2,
                         params.retrain_num_epochs, 
-                        params.hsic_retrain_lambda, 
-                        params.num_retrain_latent_samples, 
                         data, 
                         model_mves,
+                        optim,
+                        unseen_reg=params.unseen_reg,
+                        gamma=params.gamma,
                         )
 
                     print('logging:', [k[-1] for k in logging])
@@ -478,8 +489,8 @@ for filename in filenames:
                         'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
                         'ei_idx': torch.tensor(ei_idx),
-                        'test_log_prob': torch.tensor(log_prob_list),
-                        'test_mse': torch.tensor(mse_list),
+                        #'test_log_prob': torch.tensor(log_prob_list),
+                        #'test_mse': torch.tensor(mse_list),
                         }, batch_ack_output_file)
                     sys.stdout.flush()
                     
