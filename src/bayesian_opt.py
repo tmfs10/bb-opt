@@ -1549,33 +1549,40 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
     return pdts_idx
 
 
-def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx):
+def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_gaussian=True):
     assert preds.shape[1] == Y.shape[0]
     assert preds.shape == std.shape, "%s == %s" % (str(preds.shape), str(std.shape))
 
     preds = preds[:, test_idx]
     std = std[:, test_idx]
     Y = Y[test_idx]
+    unscaled_Y = unscaled_Y[test_idx]
 
     log_prob_list = []
     mse_list = []
     kt_corr_list = []
 
     for frac in [1., 0.1]:
-        labels_sort_idx = torch.sort(Y, descending=True)[1].cpu().numpy()
+        labels_sort_idx = torch.sort(unscaled_Y, descending=True)[1].cpu().numpy()
         n = int(labels_sort_idx.shape[0] * frac)
         m = preds.shape[0]
         labels_sort_idx = labels_sort_idx[:n]
         labels2 = Y[labels_sort_idx]
 
-        output_dist = output_dist_fn(
-                preds[:, labels_sort_idx].view(-1), 
-                std[:, labels_sort_idx].view(-1))
-        log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
+        if single_gaussian:
+            output_dist = output_dist_fn(
+                    preds[:, labels_sort_idx].mean(0),
+                    std[:, labels_sort_idx].mean(0))
+            log_prob_list += [torch.mean(-output_dist.log_prob(labels2)).item()]
+        else:
+            output_dist = output_dist_fn(
+                    preds[:, labels_sort_idx].view(-1), 
+                    std[:, labels_sort_idx].view(-1))
+            log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
 
         pred_means = preds[:, labels_sort_idx].mean(0)
         mse_list += [torch.sqrt(torch.mean((pred_means-labels2)**2)).item()]
-        kt_corr_list += [kendalltau(pred_means, unscaled_Y[test_idx][labels_sort_idx])[0]]
+        kt_corr_list += [kendalltau(pred_means, unscaled_Y[labels_sort_idx])[0]]
 
     max_idx = labels_sort_idx[0]
     log_prob_list += [torch.mean(-output_dist_fn(preds[:, max_idx], std[:, max_idx]).log_prob(Y[max_idx])).item()]
