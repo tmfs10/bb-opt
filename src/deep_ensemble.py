@@ -294,6 +294,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
         model = cls(
             n_models, RandomNN, model_kwargs(), adversarial_epsilon=adversarial_epsilon
         ).to(device)
+        model.device = device
         return model
 
     def train_model(
@@ -304,6 +305,9 @@ class NNEnsemble(BOModel, torch.nn.Module):
         batch_size,
         optimizer_kwargs: Optional[Dict] = None,
     ):
+        inputs = self._to_tensor(inputs)
+        labels = self._to_tensor(labels)
+
         optimizer_kwargs = optimizer_kwargs or {}
         data = TensorDataset(inputs, labels)
         loader = DataLoader(data, batch_size=batch_size, shuffle=True)
@@ -330,9 +334,9 @@ class NNEnsemble(BOModel, torch.nn.Module):
         in the ensemble has the same number of hidden units and that the ensemble is
         constructable by `NNEnsemble.get_model`.
 
-        :param fname: path to .pth file to which to save weights
-        A .pkl file with the same base name/path will be used to save the
-        nonlinearity names and a few other variables.
+        :param fname: base path to location where model will be saved.
+          Weights are saved to `{fname}.pth`
+          Required keyword arguments (nonlinearity names, etc.) will be saved to `{fname}.pth`.
         """
         nonlinearity_names = []
         for m in self.models:
@@ -352,10 +356,10 @@ class NNEnsemble(BOModel, torch.nn.Module):
             "nonlinearity_names": nonlinearity_names,
         }
 
-        with open(fname.replace(".pth", ".pkl"), "wb") as f:
+        with open(fname + ".pkl", "wb") as f:
             pickle.dump(kwargs, f)
 
-        save_checkpoint(fname, self, optimizer)
+        save_checkpoint(fname + ".pth", self, optimizer)
 
     @classmethod
     def load_model(
@@ -369,9 +373,9 @@ class NNEnsemble(BOModel, torch.nn.Module):
         in the ensemble has the same number of hidden units and that the ensemble is
         constructable by `NNEnsemble.get_model`.
 
-        :param fname: path to .pth file with weights to load
-        There must also be a .pkl file with the same base name/path with
-        a list of the activation function names to use.
+        :param fname: base path to model save files
+          Weights will be loaded from `{fname}.pth`.
+          Keyword arguments will be loaded from `{fname}.pkl`.
         :param device: device onto which to load the model
         :optimizer_func: a function which takes in model parameters and returns an optimizer
         If None, Adam is used (with lr=0.01).
@@ -379,7 +383,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
         """
         batch_size = 1  # this isn't used
 
-        with open(fname.replace(".pth", ".pkl"), "rb") as f:
+        with open(fname + ".pkl", "rb") as f:
             kwargs = pickle.load(f)
             n_models = kwargs["n_models"]
             n_inputs = kwargs["n_inputs"]
@@ -403,8 +407,14 @@ class NNEnsemble(BOModel, torch.nn.Module):
                 if optimizer_func
                 else torch.optim.Adam(model.parameters(), lr=0.01)
             )
-            load_checkpoint(fname, model, optimizer)
+            load_checkpoint(fname + ".pth", model, optimizer)
             return model, optimizer
         except KeyError:
-            load_checkpoint(fname, model)
+            load_checkpoint(fname + ".pth", model)
             return model
+
+    def reset(self):
+        for model in self.models:
+            for layer in model.children():
+                if isinstance(layer, torch.nn.Linear):
+                    layer.reset_parameters()
