@@ -11,7 +11,7 @@ import torch.distributions as tdist
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
 
-from deep_ensemble_saber import (
+from deep_ensemble_sid import (
     NNEnsemble,
     RandomNN,
 )
@@ -86,9 +86,10 @@ def get_model_nn_ensemble(
     num_models,
     num_hidden,
     device,
+    sigmoid_coeff,
     extra_random: bool = False,
 ):
-    model = NNEnsemble.get_model(num_inputs, batch_size, num_models, num_hidden, device, extra_random=extra_random)
+    model = NNEnsemble.get_model(num_inputs, batch_size, num_models, num_hidden, device, sigmoid_coeff=sigmoid_coeff, extra_random=extra_random)
     model = model.to(device)
     return model
 
@@ -101,6 +102,7 @@ def train_ensemble(
         optim,
         unseen_reg="normal",
         gamma=0.0,
+        choose_type="last",
         jupyter=False,
 ):
     train_X, train_Y, val_X, val_Y = data
@@ -115,6 +117,8 @@ def train_ensemble(
 
     corrs = []
     val_corrs = []
+    val_nlls = []
+    val_mses = []
     train_nlls = []
     train_mses = []
 
@@ -122,6 +126,9 @@ def train_ensemble(
         progress = tnrange(num_epochs)
     else:
         progress = trange(num_epochs)
+
+    best_nll = float('inf')
+    best_model = None
 
     for epoch_iter in progress:
         model_ensemble.train()
@@ -138,10 +145,16 @@ def train_ensemble(
             optim.zero_grad()
             means, variances = model_ensemble(bX)
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            nll, mse = NNEnsemble.compute_negative_log_likelihood(bY, means, variances, return_mse=True)
+            nll = NNEnsemble.compute_negative_log_likelihood(
+                    bY,
+                    means, 
+                    variances, 
+                    return_mse=False)
+
             loss = nll
             train_nlls += [nll.item()]
-            train_mses += [mse.item()]
+            mse = torch.sqrt(torch.mean((means-bY)**2)).item()
+            train_mses += [mse]
 
             if unseen_reg != "normal":
                 assert gamma > 0
@@ -161,19 +174,53 @@ def train_ensemble(
         model_ensemble.eval()
         with torch.no_grad():
             means, variances = model_ensemble(train_X)
+            if choose_type == "train":
+                nll = NNEnsemble.compute_negative_log_likelihood(
+                        train_Y, 
+                        means, 
+                        variances, 
+                        return_mse=False)
+                nll = nll.item()
+
+                if nll < best_nll:
+                    best_nll = nll
+                    best_model = model_ensemble.state_dict()
             means = means.mean(0)
             assert means.shape == train_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
             corr = kendalltau(means, train_Y)[0]
             corrs += [corr]
 
             means, variances = model_ensemble(val_X)
+            nll = NNEnsemble.compute_negative_log_likelihood(
+                    val_Y,
+                    means,
+                    variances,
+                    return_mse=False)
+            nll = nll.item()
+            mse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
+            val_nlls += [nll]
+            val_mses += [mse]
+            if choose_type == "val" and nll < best_nll:
+                best_nll = nll
+                best_model = model_ensemble.state_dict()
+
             means = means.mean(0)
             assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
             val_corr = kendalltau(means, val_Y)[0]
             val_corrs += [val_corr]
             progress.set_description(f"Corr: {val_corr:.3f}")
 
-    return [corrs, val_corrs, train_nlls, train_mses], optim
+    if choose_type in ("val", "train"):
+        if best_model is not None:
+            model_ensemble.load_state_dict(best_model)
+        else:
+            assert num_epochs == 0
+            corrs = [0]
+            val_corrs = [0]
+            train_nlls = [0]
+            train_mses = [0]
+
+    return [corrs, train_nlls, train_mses, val_corrs, val_nlls, val_mses], optim
 
 def train(
         params,

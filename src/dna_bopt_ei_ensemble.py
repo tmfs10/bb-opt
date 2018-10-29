@@ -50,9 +50,8 @@ params.output_dir = params.output_dir + "_" + params.ei_diversity_measure + "_" 
 if not os.path.exists(params.output_dir):
     os.mkdir(params.output_dir)
 
-filenames = [k.strip() for k in open(params.filename_file).readlines()]
+filenames = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
 
-print('clean:', params.clean, type(params.clean))
 print('output_dir:', params.output_dir)
 
 for filename in filenames:
@@ -92,6 +91,9 @@ for filename in filenames:
     Y_mean = float(train_labels.mean())
     Y_std = float(train_labels.std())
 
+    train_Y_mean = Y_mean
+    train_Y_std = Y_std
+
     train_labels = utils.sigmoid_standardization(train_labels, Y_mean, Y_std)
     val_labels = utils.sigmoid_standardization(val_labels, Y_mean, Y_std)
 
@@ -100,7 +102,14 @@ for filename in filenames:
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model = dbopt.get_model_nn_ensemble(inputs.shape[1], params.train_batch_size, params.num_models, params.num_hidden, device=params.device)
+    model = dbopt.get_model_nn_ensemble(
+            inputs.shape[1], 
+            params.train_batch_size, 
+            params.num_models, 
+            params.num_hidden, 
+            sigmoid_coeff=params.sigmoid_coeff, 
+            device=params.device
+            )
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = file_output_dir + "/init_model.pth"
@@ -123,6 +132,7 @@ for filename in filenames:
                 optim,
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
+                choose_type=params.choose_type,
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -194,8 +204,8 @@ for filename in filenames:
                         indices = list({i for i in range(Y.shape[0])}.difference(skip_idx_ei))
                         standardized_Y = utils.sigmoid_standardization(
                                 Y,
-                                train_Y_ei.mean(),
-                                train_Y_ei.std(),
+                                train_Y_mean,
+                                train_Y_std,
                                 exp=torch.exp)
 
                         log_prob_list, mse_list, kt_corr_list = bopt.get_pred_stats(
@@ -204,7 +214,9 @@ for filename in filenames:
                                 standardized_Y,
                                 Y,
                                 params.output_dist_fn, 
-                                indices)
+                                indices,
+                                single_gaussian=params.single_gaussian_test_nll
+                                )
 
                         print('log_prob_list:', log_prob_list)
                         print('mse_list:', mse_list)
@@ -289,15 +301,15 @@ for filename in filenames:
                     train_X_ei = X.new_tensor(X[new_idx])
                     train_Y_ei = Y.new_tensor(Y[new_idx])
 
-                    Y_mean = train_Y_ei.mean()
-                    Y_std = train_Y_ei.std()
+                    train_Y_mean = train_Y_ei.mean().item()
+                    train_Y_std = train_Y_ei.std().item()
 
                     train_Y_ei = utils.sigmoid_standardization(
                             train_Y_ei, 
-                            Y_mean, 
-                            Y_std, 
+                            train_Y_mean, 
+                            train_Y_std, 
                             exp=torch.exp)
-                    val_Y = utils.sigmoid_standardization(Y[val_idx], Y_mean, Y_std, exp=torch.exp)
+                    val_Y = utils.sigmoid_standardization(Y[val_idx], train_Y_mean, train_Y_std, exp=torch.exp)
                     
                     print("train_X_ei.shape", train_X_ei.shape)
                     
@@ -315,6 +327,7 @@ for filename in filenames:
                         optim,
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
+                        choose_type=params.choose_type,
                         )
 
                     print(filename)
@@ -327,6 +340,7 @@ for filename in filenames:
 
                     print('best so far:', labels[ack_array].max())
                     
+                    # inference regret computation using retrained ensemble
                     s, idx_frac, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
                             model_ei,
                             X,

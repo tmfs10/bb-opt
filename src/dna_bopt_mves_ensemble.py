@@ -17,17 +17,21 @@ from gpu_utils.utils import gpu_init
 import pandas as pd
 import copy
 import non_matplotlib_utils as utils
-import argparse
 import datetime
 import parsing
 import argparse
+import ops
 
 parser = argparse.ArgumentParser()
 parsing.add_parse_args(parser)
 parsing.add_parse_args_mves(parser)
 parsing.add_parse_args_ensemble(parser)
 
-params = parser.parse_args()
+params = parsing.parse_args(parser)
+
+print('PARAMS:')
+for k, v in vars(params).items():
+    print(k, v)
 
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
@@ -37,7 +41,7 @@ params.device = device
 np.random.seed(params.seed)
 torch.manual_seed(params.seed)
 
-# output dir
+# main output dir
 random_label = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 if params.output_dir[-1] == "/":
     params.output_dir = params.output_dir[:-1]
@@ -46,7 +50,9 @@ params.output_dir = params.output_dir + "_" + params.measure + "_" + params.suff
 if not os.path.exists(params.output_dir):
     os.mkdir(params.output_dir)
 
-filenames = [k.strip() for k in open(params.filename_file).readlines()]
+filenames = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
+
+print('output_dir:', params.output_dir)
 
 for filename in filenames:
     filedir = params.data_dir + "/" + filename + "/"
@@ -64,6 +70,7 @@ for filename in filenames:
         pass
 
     indices = np.arange(labels.shape[0])
+
     labels_sort_idx = labels.argsort()
     sort_idx = labels_sort_idx[:-int(labels.shape[0]*params.exclude_top)]
     indices = indices[sort_idx]
@@ -97,7 +104,7 @@ for filename in filenames:
 
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
-    if os.path.isfile(init_model_path):
+    if os.path.isfile(init_model_path) and not params.clean:
         loaded = True
         checkpoint = torch.load(init_model_path)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -115,6 +122,7 @@ for filename in filenames:
                 optim,
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
+                choose_type=params.choose_type,
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -150,14 +158,14 @@ for filename in filenames:
             skip_idx_mves = set(train_idx)
             ack_all_mves = set()
 
-            if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth"):
+            if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth") and not params.clean:
                 print('already done batch', ack_batch_size)
                 continue
 
             with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
-                    if os.path.exists(batch_ack_output_file):
+                    if os.path.exists(batch_ack_output_file) and not params.clean:
                         checkpoint = torch.load(batch_ack_output_file)
                         model_mves.load_state_dict(checkpoint['model_state_dict'])
                         logging = checkpoint['logging']
@@ -191,7 +199,9 @@ for filename in filenames:
                             standardized_Y, 
                             Y,
                             params.output_dist_fn, 
-                            indices)
+                            indices,
+                            single_gaussian=params.single_gaussian_test_nll
+                            )
 
                     print('log_prob_list:', log_prob_list)
                     print('mse_list:', mse_list)
@@ -315,7 +325,11 @@ for filename in filenames:
                     Y_mean = train_Y_mves.mean()
                     Y_std = train_Y_mves.std()
 
-                    train_Y_mves = utils.sigmoid_standardization(train_Y_mves, Y_mean, Y_std, exp=torch.exp)
+                    train_Y_mves = utils.sigmoid_standardization(
+                            train_Y_mves, 
+                            Y_mean, 
+                            Y_std, 
+                            exp=torch.exp)
                     val_Y = utils.sigmoid_standardization(Y[val_idx], Y_mean, Y_std, exp=torch.exp)
 
                     expected_num_points = (ack_iter+1)*ack_batch_size
@@ -332,9 +346,12 @@ for filename in filenames:
                         optim,
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
+                        choose_type=params.choose_type,
                         )
 
+                    print(filename)
                     print('logging:', [k[-1] for k in logging])
+
                     f.write(str([k[-1] for k in logging]) + "\n")
                     logging = [torch.tensor(k) for k in logging]
 
@@ -343,7 +360,7 @@ for filename in filenames:
                     print('best so far:', labels[ack_array].max())
 
                     # inference regret computation using retrained ensemble
-                    s, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
+                    s, idx_frac, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
                             model_mves,
                             X,
                             labels,

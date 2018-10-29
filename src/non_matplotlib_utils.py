@@ -161,4 +161,5 @@ def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
 
 def sigmoid_standardization(labels, mean, std, exp=np.exp):
     labels = sigmoid((labels - mean) / std, exp)
+    #labels = (labels - mean) / std
     return labels
