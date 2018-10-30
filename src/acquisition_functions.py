@@ -12,8 +12,8 @@ class AcquisitionFunction(ABC):
     def acquire(
         self,
         model: BOModel,
-        inputs,
-        sampled_labels,
+        inputs: np.ndarray,
+        sampled_labels: np.ndarray,
         sampled_idx: Set[int],
         batch_size: int,
     ) -> List[int]:
@@ -57,23 +57,30 @@ class Uniform(ExhaustiveAcquisitionFunction):
         return acquire_samples
 
 
-class ExpectedReward(ExhaustiveAcquisitionFunction):
+class UCB(ExhaustiveAcquisitionFunction):
     """
-    The expected reward for a point is the posterior mean for that point.
-    The points acquired by this AF are those with highest expected reward.
+    The GP-UCB metric is f(x) = mu(x) + beta * sigma(x).
     """
 
     def __init__(
-        self, exp: Optional = None, n_samples: int = 100, calibrated: bool = False
+        self,
+        beta: float,
+        exp: Optional = None,
+        n_samples: int = 100,
+        calibrated: bool = False,
+        gaussian_approx: bool = False,
     ):
         """
         :param exp: a CometML experiment to use in logging metrics
-        :param n_bnn_samples: how many samples to draw from the posterior to compute its mean
+        :param n_samples: how many samples to draw from the posterior to compute its mean and std
         :param calibrated: whether to compute the posterior mean from a calibrated distribution or not
         """
+        super().__init__()
+        self.beta = beta
         self.exp = exp
         self.n_samples = n_samples
         self.calibrated = calibrated
+        self.gaussian_approx = gaussian_approx
 
     def acquire(
         self,
@@ -90,42 +97,53 @@ class ExpectedReward(ExhaustiveAcquisitionFunction):
             non_sampled_idx = set(range(len(inputs))).difference(sampled_idx)
             test_inputs = inputs[list(non_sampled_idx)]
 
-        if isinstance(model, BNN):
-            if self.calibrated:
-                preds = model.predict(train_inputs)
-                cdf_train = CDF(preds)
-                cdf_train.train_cdf_calibrator(sampled_labels)
-
+            if isinstance(model, BNN):
+                preds_train = model.predict(train_inputs, n_samples=self.n_samples)
+                preds = model.predict(test_inputs, n_samples=self.n_samples)
+            elif isinstance(model, NNEnsemble):
+                preds_train = model.predict(train_inputs)
                 preds = model.predict(test_inputs)
-                cdf_test = CDF(
-                    preds, calibration_regressor=cdf_train.calibration_regressor
-                )
-
-                means = cdf_test.sample(self.n_samples, self.calibrated).mean(1)
             else:
-                means = model.predict(inputs, n_samples=self.n_samples).mean(0)
-        elif isinstance(model, NNEnsemble):
-            if self.calibrated:
-                # TODO: use a Gaussian for NNEnsemble
-                preds = model.predict(train_inputs)
-                cdf_train = CDF(preds)
-                cdf_train.train_cdf_calibrator(sampled_labels)
+                assert (
+                    False
+                ), "Should never reach this point; update the types allowed in this function."
 
-                preds = model.predict(test_inputs)
-                cdf_test = CDF(
-                    preds, calibration_regressor=cdf_train.calibration_regressor
-                )
+            cdf_train = CDF(preds_train, gaussian_approx=self.gaussian_approx)
+            cdf_train.train_cdf_calibrator(sampled_labels)
 
-                means = cdf_test.sample(self.n_samples, self.calibrated).mean(1)
-            else:
-                means = model.predict(inputs).mean(0)
+            cdf_test = CDF(
+                preds,
+                calibration_regressor=cdf_train.calibration_regressor,
+                gaussian_approx=self.gaussian_approx,
+            )
+
+            samples = cdf_test.sample(self.n_samples, self.calibrated).T
         else:
-            assert (
-                False
-            ), "Should never reach this point; update the types allowed in this function."
+            if isinstance(model, BNN):
+                samples = model.predict(inputs, n_samples=self.n_samples)
+            elif isinstance(model, NNEnsemble):
+                samples = model.predict(inputs)
+            else:
+                assert (
+                    False
+                ), "Should never reach this point; update the types allowed in this function."
 
-        sorted_idx = np.argsort(means)
+        means = samples.mean(0)
+        stds = samples.std(0)
+        ucb = means + self.beta * stds
+
+        sorted_idx = np.argsort(ucb)
         sorted_idx = [i for i in sorted_idx if i not in sampled_idx]
         acquire_samples = sorted_idx[-batch_size:]  # sorted in descending order
 
         return acquire_samples
+
+
+class ExpectedReward(UCB):
+    """
+    The expected reward for a point is the posterior mean for that point.
+    The points acquired by this AF are those with highest expected reward.
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(beta=0.0, **kwargs)
