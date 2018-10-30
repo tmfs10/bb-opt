@@ -1,46 +1,70 @@
 import numpy as np
 from scipy.special import erfinv
 from sklearn.isotonic import IsotonicRegression
-from typing import Tuple
+from typing import Tuple, Optional
 
 
 class CDF:
     def __init__(
         self,
-        preds: np.ndarray,
+        preds: Optional[np.ndarray] = None,
+        calibration_regressor: Optional = None,
         gaussian_approx: bool = False,
+        pred_means_stds: Optional[Tuple[np.ndarray, np.ndarray]] = None,
         calibration_method: str = "cdf",
     ):
         """
         :param preds: samples to use in construction the (e)CDFs; there will be one CDF
           per input (shape n_samples x n_inputs)
+        :param calibration_regressor: a trained regressor (e.g. IsotonicRegression) that takes
+          in uncalibrated CDF probabilities and returns calibrated ones. This is most often used
+          if you've trained a regressor on a `CDF` for the training data and now want to use it to
+          calibrate a `CDF` on the test data
         :param gaussian_approx: whether to approximate the CDF as a Gaussian. If not,
           the emprical CDF (eCDF) is used instead
+        :param pred_means_stds: only used if `gaussian_approx == True`; these are the means
+          and standard deviations of each of the Gaussians. If not given, these are generated
+          by taking computing the mean + std. dev. across the samples for each input (shapes: n_inputs)
         :param calibration_method: one of {cdf, conf}
           cdf uses the method from https://arxiv.org/pdf/1807.00263.pdf (inputs/outputs are CDF probabilities)
           conf regresses on the calibration curve itself (inputs/outputs are confidence levels)
           conf is only supported for calibrating confidence intervals, not sampling or computing CDF probabilties
         """
         self.gaussian_approx = gaussian_approx
-        self.n_samples, self.n_inputs = preds.shape
+        self.n_samples, self.n_inputs = (
+            preds.shape if preds is not None else (None, None)
+        )
 
         if gaussian_approx:
-            self.pred_means = preds.mean(0)
-            self.pred_stds = preds.std(0)
+            if pred_means_stds:
+                self.pred_means, self.pred_stds = pred_means_stds
+                self.n_inputs = len(self.pred_means)
+            else:
+                self.pred_means = preds.mean(0)
+                self.pred_stds = preds.std(0)
         else:
+            assert (
+                preds is not None
+            ), "Must pass `preds` unless using `gaussian_approx`."
             self.preds = np.sort(preds, axis=0)
 
         self.calibration_method = calibration_method
-        self.calibration_regressor = None
+        self.calibration_regressor = calibration_regressor
         self._expected_conf = self._observed_conf = None
 
     def get_cdf_probs(self, x: np.ndarray, calibrated: bool = False) -> np.ndarray:
         """
         Get the probability of each element of `x` under the corresponding CDF.
+
+        :param x: (shape: n_inputs or n_inputs x n_queries)
+        :returns: (shape: n_inputs x n_queries)
         """
+        x = x if x.ndim == 2 else x[:, None]  # add n_queries dimension
+
         if self.gaussian_approx:
             cdf_probs = self._get_gaussian_cdf_probs(x)
-        cdf_probs = self._get_ecdf_probs(x)
+        else:
+            cdf_probs = self._get_ecdf_probs(x)
 
         if not calibrated:
             return cdf_probs
@@ -50,24 +74,18 @@ class CDF:
         return self.calibrate_cdf_probs(cdf_probs)
 
     def get_calibration_curve(
-        self, labels: np.ndarray, n_conf_levels: int = 101
+        self, labels: np.ndarray, calibrated: bool = False, n_conf_levels: int = 101
     ) -> Tuple[np.ndarray, np.ndarray]:
-        if (
-            self._expected_conf is not None
-            and len(self._expected_conf) == n_conf_levels
-        ):
-            return self._expected_conf, self._observed_conf
-
+        """
+        :returns: expected_conf, observed_conf
+        """
         expected_conf = np.linspace(0, 1, n_conf_levels)
 
         observed_conf = []
         for conf_level in expected_conf:
-            lower, upper = self.get_confidence_intervals(conf_level=conf_level)
+            lower, upper = self.get_confidence_intervals(conf_level, calibrated)
             observed_conf.append(((lower <= labels) & (labels <= upper)).mean())
         observed_conf = np.array(observed_conf)
-
-        self._expected_conf = expected_conf
-        self._observed_conf = observed_conf
 
         return expected_conf, observed_conf
 
@@ -94,11 +112,7 @@ class CDF:
         else:
             assert self.calibration_method == "conf"
 
-            if self._expected_conf is not None:
-                expected_conf = self._expected_conf
-                observed_conf = self._observed_conf
-            else:
-                expected_conf, observed_conf = self.get_calibration_curve(labels)
+            expected_conf, observed_conf = self.get_calibration_curve(labels)
 
             calibrated_confs = calibration_regressor.fit_transform(
                 observed_conf, expected_conf
@@ -113,9 +127,8 @@ class CDF:
         assert (
             self.calibration_regressor is not None
         ), "A calibrator must be trained by `train_cdf_calibrator` first."
-        return self.calibration_regressor.transform(cdf_probs.ravel()).reshape(
-            cdf_probs.shape
-        )
+        calibrated = self.calibration_regressor.transform(cdf_probs.ravel())
+        return calibrated.reshape(cdf_probs.shape)
 
     def get_confidence_intervals(
         self, conf_level: float = 0.95, calibrated: bool = False
@@ -141,21 +154,24 @@ class CDF:
         return self._sample_ecdf(n_samples, calibrated)
 
     def _get_gaussian_cdf_probs(self, x: np.ndarray) -> np.ndarray:
-        # TODO - support 2D x like eCDF does
-        assert x.ndim == 1, "Gaussian CDF only supports 1D queries right now."
-        cdf_probs = 0.5 * (
-            1 + np.erf((x - self.pred_means) / (self.pred_stds * np.sqrt(2.0)))
-        )
+        """
+        Compute the probability of each element of x under the Gaussian for the corresponding input.
+
+        :param x: (shape: n_inputs x n_queries)
+        :returns: (shape: n_inputs x n_queries)
+        """
+        scaled_std = self.pred_stds[:, None] * np.sqrt(2.0)
+        cdf_probs = (x - self.pred_means[:, None]) / scaled_std
+        cdf_probs = 0.5 * (1 + np.erf(cdf_probs))
         return cdf_probs
 
     def _get_ecdf_probs(self, x: np.ndarray) -> np.ndarray:
         """
         Compute the probability of each element of x under the eCDF for the corresponding input.
 
-        :param x: (shape n_inputs or n_inputs x n_queries)
-        :returns: (shape n_inputs x n_queries)
+        :param x: (shape: n_inputs x n_queries)
+        :returns: (shape: n_inputs x n_queries)
         """
-        x = x if x.ndim == 2 else x[:, None]  # add n_queries dimension
         ecdf_idx = np.array(
             [np.searchsorted(self.preds[:, i], x[i, :]) for i in range(self.n_inputs)]
         )
@@ -165,6 +181,8 @@ class CDF:
     def _sample_gaussian(
         self, n_samples: int = 1, calibrated: bool = False
     ) -> np.ndarray:
+        uniform_samples = np.random.uniform(size=(self.n_inputs, n_samples))
+
         # TODO: implement this; could try like below with test points or do a vectorized binary search
         # where you halve the bounds on all points at each step
         raise NotImplementedError
@@ -276,6 +294,8 @@ class CDF:
         lower_bound = (1 - conf_level) / 2
         upper_bound = 1 - lower_bound
         assert np.isclose(upper_bound - lower_bound, conf_level)
+        lower_bound = round(lower_bound, 10)
+        upper_bound = round(upper_bound, 10)
         return lower_bound, upper_bound
 
     @staticmethod
@@ -302,3 +322,12 @@ class CDF:
             if scale_to_one:
                 aucc *= 2
         return aucc
+
+    def plot_calibration_curve(self, labels, calibrated: bool = False, **plot_kwargs):
+        import matplotlib.pyplot as plt
+
+        expected_conf, observed_conf = self.get_calibration_curve(labels, calibrated)
+        plt.plot(expected_conf, observed_conf, **plot_kwargs)
+        plt.xlabel("Expected Confidence Level")
+        plt.ylabel("Observed Confidence Level")
+        plt.title("Calibration Curve")
