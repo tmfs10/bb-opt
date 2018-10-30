@@ -185,9 +185,6 @@ class CDF:
     def _sample_gaussian(
         self, n_samples: int = 1, calibrated: bool = False
     ) -> np.ndarray:
-        assert (
-            not calibrated
-        ), "Sampling from a calibrated Gaussian is not yet supported."
         uniform_samples = np.random.uniform(size=(self.n_inputs, n_samples))
 
         n_std = 10
@@ -202,10 +199,15 @@ class CDF:
             mid_x = (max_x - min_x) / 2 + min_x
             cdf_probs = self.get_cdf_probs(mid_x)
 
+            if calibrated:
+                cdf_probs = self.calibrate_cdf_probs(cdf_probs)
+
             max_x[cdf_probs > uniform_samples] = mid_x[cdf_probs > uniform_samples]
             min_x[cdf_probs < uniform_samples] = mid_x[cdf_probs < uniform_samples]
 
-        assert np.isclose(((cdf_probs - uniform_samples) ** 2).mean(), 0)
+        if not calibrated:  # the calibration can make this harder; it may move in jumps
+            mse = ((cdf_probs - uniform_samples) ** 2).mean()
+            assert np.isclose(mse, 0), mse
         return min_x
 
     def _sample_ecdf(self, n_samples: int = 1, calibrated: bool = False) -> np.ndarray:
