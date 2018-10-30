@@ -211,6 +211,7 @@ def train_ensemble(
                 if nll < best_nll:
                     best_nll = nll
                     best_model = copy.deepcopy(model_ensemble.state_dict())
+                    best_optim = copy.deepcopy(optim.state_dict())
             means = means.mean(0)
             assert means.shape == train_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
             corr = kendalltau(means, train_Y)[0]
@@ -240,6 +241,7 @@ def train_ensemble(
     if choose_type in ("val", "train"):
         if best_model is not None:
             model_ensemble.load_state_dict(best_model)
+            optim.load_state_dict(best_optim)
         else:
             assert num_epochs == 0
     if num_epochs == 0:
