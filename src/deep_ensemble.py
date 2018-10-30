@@ -11,6 +11,8 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
+from os import makedirs
+from os.path import dirname
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
@@ -364,6 +366,8 @@ class NNEnsemble(BOModel, torch.nn.Module):
             "adversarial_epsilon": self.adversarial_epsilon,
             "nonlinearity_names": nonlinearity_names,
         }
+
+        makedirs(dirname(fname), exist_ok=True)
 
         with open(fname + ".pkl", "wb") as f:
             pickle.dump(kwargs, f)

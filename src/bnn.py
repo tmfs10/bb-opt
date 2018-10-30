@@ -1,5 +1,7 @@
 import pickle
 import numpy as np
+from os import makedirs
+from os.path import dirname
 from typing import TypeVar, Type, Optional, Callable, Union, Tuple, Any, Dict, List
 import torch
 from torch import nn
@@ -221,6 +223,8 @@ class BNN(BOModel):
         :param optimizer: optimizer whose parameters should be saved as well. If not given,
           self.optimizer is used, if it exists (e.g. after doing any training)
         """
+        makedirs(dirname(fname), exist_ok=True)
+
         pyro.get_param_store().save(f"{fname}.params")
 
         optimizer = optimizer or self.optimizer
