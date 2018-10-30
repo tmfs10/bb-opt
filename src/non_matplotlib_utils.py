@@ -10,6 +10,29 @@ import pyro
 import torch
 import sys
 
+def sigmoid(x, exp=np.exp):
+  return 1.0 / (1.0 + exp(-x))
+
+def get_early_stopping(
+    max_patience: int, threshold: float = 1.0
+) -> Callable[[float], bool]:
+    old_min = float("inf")
+    patience = max_patience
+
+    def early_stopping(metric: float) -> bool:
+        nonlocal old_min
+        nonlocal patience
+        nonlocal max_patience
+        if metric < threshold * old_min:
+            old_min = metric
+            patience = max_patience
+        else:
+            patience -= 1
+
+        return patience == 0
+
+    return early_stopping
+
 def logp(smiles_mol, add_hs=False):
     m = Chem.MolFromSmiles(smiles_mol)
     if m is None:
@@ -68,22 +91,12 @@ def train_val_test_split(n, split, shuffle=True):
     return idx[:train_end], idx[train_end:val_end], idx[val_end:]
 
 
-def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
-    os.makedirs(os.path.dirname(fname), exist_ok=True)
-
-    checkpoint = {"model_state": model.state_dict()}
-    if optimizer:
-        checkpoint["optimizer_state"] = optimizer.state_dict()
-
-    torch.save(checkpoint, fname)
-
-
 def load_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
     checkpoint = torch.load(fname)
     model.load_state_dict(checkpoint["model_state"])
+    model.eval()
     if optimizer:
         optimizer.load_state_dict(checkpoint["optimizer_state"])
-
 
 def jointplot(
     x, y, axis_labels: Tuple[str, str] = ("Predicted", "True"), title: str = ""
@@ -146,4 +159,7 @@ def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
 
     torch.save(checkpoint, fname)
 
-
+def sigmoid_standardization(labels, mean, std, exp=np.exp):
+    labels = sigmoid((labels - mean) / std, exp)
+    #labels = (labels - mean) / std
+    return labels

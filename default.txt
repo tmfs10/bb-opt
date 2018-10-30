@@ -1,0 +1,33 @@
+
+--seed 1111
+--device cuda
+--clean False
+
+--exclude_top 0.1
+--init_train_examples 200
+--init_train_epochs 200
+--train_lr 0.01
+--train_batch_size 128
+--retrain_num_epochs 200
+--retrain_lr 0.01
+--retrain_batch_size 10
+
+--num_hidden 100
+--sigmoid_coeff 1.0
+--output_dist_fn Normal
+--train_l2 0.035
+--retrain_l2 0.035
+
+--unseen_reg normal
+--gamma 0.0
+
+--data_dir ../data/paper_data2
+--filename_file ../data/tatsu_pbm/test_files
+--output_dir ../experiments/ensemble/o
+--num_test_tfs 10
+
+--ack_batch_size 100
+--num_acks 20
+
+--single_gaussian_test_nll True
+--choose_type last
