@@ -204,6 +204,7 @@ class BNN(BOModel):
         :returns: (shape: n_samples x n_inputs)
         """
         preds = []
+        inputs = self._to_tensor(inputs)
 
         with torch.no_grad():
             for _ in range(n_samples):
