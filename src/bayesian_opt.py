@@ -45,28 +45,9 @@ from bb_opt.src.hsic import (
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src import ops
-from bb_opt.src.bnn import make_bnn_model, make_guide
-
-def get_path(*path_segments):
-    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
-
-def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
-    os.makedirs(os.path.dirname(fname), exist_ok=True)
-
-    checkpoint = {"model_state": model.state_dict()}
-    if optimizer:
-        checkpoint["optimizer_state"] = optimizer.state_dict()
-
-    torch.save(checkpoint, fname)
-
-
-N_HIDDEN = 100
-NON_LINEARITY = "ReLU"
-SVI = None
-
-InputType = torch.Tensor
-LabelType = torch.Tensor
-ModelType = Callable[[InputType], LabelType]
+from bb_opt.src.utils import get_path
+from bb_opt.src.bo_model import BOModel
+from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
 
 
 def ExtendedGamma(shape, scale, ndimension=0):
@@ -209,13 +190,8 @@ def iaf_variationals(
 
 
 def optimize(
-    # TODO: how to do the typing for inputs to `get_model`? needs batch_size and device somewhere
-    get_model: Callable[..., ModelType],
-    # TODO: need a similar typing update for acquisition (some required args, can be any other optional ones too)
-    acquisition_func: Callable[
-        [ModelType, InputType, LabelType, Set[int], int], Iterable[int]
-    ],
-    train_model: Callable[[ModelType, InputType, LabelType], None],
+    model: BOModel,
+    acquisition_func: AcquisitionFunction,
     inputs: Union[torch.Tensor, np.ndarray],
     labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
@@ -224,17 +200,13 @@ def optimize(
     device: Optional[torch.device] = None,
     verbose: bool = False,
     exp: Optional = None,
-    acquisition_args: Optional[dict] = None,
     n_batches: int = -1,
     retrain_every: int = 1,
-    partial_train_steps: int = 10,
-    partial_train_func: Optional[Callable] = None,
+    partial_train_epochs: int = 10,
     save_key: str = "",
-    acquisition_func_greedy: Optional[Callable] = None,
+    acquisition_func_greedy: Optional[AcquisitionFunction] = None,
 ) -> np.ndarray:
 
-    acquisition_args = acquisition_args or {}
-    acquisition_func_greedy = acquisition_func_greedy or acquisition_func
     n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
 
     if isinstance(labels, pd.Series):
@@ -256,15 +228,12 @@ def optimize(
         labels = labels.to(device)
 
     try:
-        model = get_model(
-            n_inputs=inputs.shape[1], batch_size=batch_size, device=device
-        )
         sampled_idx = set()
         fraction_best_sampled = []
 
         for step in range(n_batches):
             if step == 0:
-                acquire_samples = acquire_batch_uniform(
+                acquire_samples = Uniform.acquire(
                     model,
                     inputs,
                     labels[list(sampled_idx)],
@@ -279,19 +248,18 @@ def optimize(
                     labels[list(sampled_idx)],
                     sampled_idx,
                     batch_size,
-                    exp=exp,
-                    **acquisition_args,
                 )
 
-            acquire_samples_greedy = acquisition_func_greedy(
-                model,
-                inputs,
-                labels[list(sampled_idx)],
-                sampled_idx,
-                batch_size,
-                exp=exp,
-                **acquisition_args,
-            )
+            if acquisition_func_greedy:
+                acquire_samples_greedy = acquisition_func_greedy(
+                    model,
+                    inputs,
+                    labels[list(sampled_idx)],
+                    sampled_idx,
+                    batch_size,
+                )
+            else:
+                acquire_samples_greedy = acquire_samples
 
             greedy_sampled_idx = sampled_idx.copy()
             sampled_idx.update(acquire_samples)
@@ -327,39 +295,32 @@ def optimize(
                 break
 
             if step % retrain_every == 0:
-                train_model(
-                    model,
+                model.reset()
+                model.train_model(
                     inputs[list(sampled_idx)],
                     labels[list(sampled_idx)],
                     n_epochs,
-                    batch_size,
                 )
             else:
-                if partial_train_func:
-                    partial_train_func(
-                        model,
-                        inputs[list(acquire_samples)],
-                        labels[list(acquire_samples)],
-                        partial_train_steps,
-                    )
+                model.train_model(
+                    inputs[acquire_samples],
+                    labels[acquire_samples],
+                    partial_train_epochs,
+                )
 
             if save_key:
                 save_fname = get_path(
                     __file__, "..", "..", "models_nathan", save_key, step
                 )
 
-                if "de" in save_key:
-                    save_checkpoint(f"{save_fname}.pth", model)
-                elif "bnn" in save_key:
-                    pyro.get_param_store().save(f"{save_fname}.params")
-
+                model.save_model(save_fname)
         assert (len(sampled_idx) == min(len(labels), batch_size * n_batches)) or (
             fraction_best == 1.0
         )
     except KeyboardInterrupt:
         pass
 
-    return model, SVI
+    return model
 
 
 def get_model_uniform(*args, **kwargs):
