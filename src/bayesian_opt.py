@@ -328,9 +328,9 @@ def get_model_uniform(*args, **kwargs):
 
 
 def acquire_batch_uniform(
-    model: ModelType,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    model,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -365,9 +365,9 @@ def get_model_nn(n_inputs: int = 512, batch_size: int = 200, device: Optional = 
 
 
 def acquire_batch_nn_greedy(
-    model: ModelType,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    model,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -454,8 +454,8 @@ def get_model_bnn_extended_gamma(
 
 def acquire_batch_ei(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -483,8 +483,8 @@ def acquire_batch_ei(
 
 def acquire_batch_pdts(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -514,8 +514,8 @@ def acquire_batch_pdts(
 
 def acquire_batch_hsic_mean_std(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -598,8 +598,8 @@ def acquire_batch_hsic_mean_std(
 
 def acquire_batch_hsic_pdts(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -672,8 +672,8 @@ def acquire_batch_hsic_pdts(
 
 def acquire_batch_mves(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -699,8 +699,8 @@ def acquire_batch_mves(
 
 def acquire_batch_es(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -1420,8 +1420,8 @@ def optimize_model_input_pdts(
 
 def acquire_batch_pi(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -1537,7 +1537,7 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
             log_prob_list += [torch.mean(-output_dist.log_prob(labels2)).item()]
         else:
             output_dist = output_dist_fn(
-                    preds[:, labels_sort_idx].view(-1), 
+                    preds[:, labels_sort_idx].view(-1),
                     std[:, labels_sort_idx].view(-1))
             log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
 
@@ -1571,9 +1571,9 @@ def compute_ir_regret_ensemble(
     idx_frac = [len(ack_all.intersection(k))/len(k) for k in top_frac_idx]
 
     s = "\t".join([str(k) for k in [
-        best_10.mean(), 
-        best_10.max(), 
-        best_batch_size.mean(), 
+        best_10.mean(),
+        best_10.max(),
+        best_batch_size.mean(),
         best_batch_size.max(),
         str(idx_frac)
         ]])
