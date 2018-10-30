@@ -24,7 +24,8 @@ import ops
 
 parser = argparse.ArgumentParser()
 parsing.add_parse_args(parser)
-parsing.add_parse_args_ei(parser)
+parsing.add_parse_args_mves(parser)
+parsing.add_parse_args_grad(parser)
 parsing.add_parse_args_ensemble(parser)
 
 params = parsing.parse_args(parser)
@@ -45,7 +46,7 @@ torch.manual_seed(params.seed)
 random_label = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 if params.output_dir[-1] == "/":
     params.output_dir = params.output_dir[:-1]
-params.output_dir = params.output_dir + "_" + params.ei_diversity_measure + "_" + params.suffix
+params.output_dir = params.output_dir + "_" + params.measure + "_" + params.suffix
 
 if not os.path.exists(params.output_dir):
     os.mkdir(params.output_dir)
@@ -75,31 +76,38 @@ for filename in filenames:
     sort_idx = labels_sort_idx[:-int(labels.shape[0]*params.exclude_top)]
     indices = indices[sort_idx]
 
-    # reading data
-    train_idx, _, test_idx = utils.train_val_test_split(indices, split=[params.init_train_examples, 0])
+    train_idx, _, _ = utils.train_val_test_split(indices, split=[params.init_train_examples, 0])
 
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
+
+    train_Y_mean = float(train_labels.mean())
+    train_Y_std = float(train_labels.std())
 
     top_frac_idx = [set(labels_sort_idx[-int(labels.shape[0]*per):].tolist()) for per in [0.01, 0.05, 0.1, 0.2]]
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
 
+    if params.sigmoid_coeff > 0:
+        train_labels = utils.sigmoid_standardization(train_labels, train_Y_mean, train_Y_std)
+    else:
+        train_labels = utils.normal_standardization(train_labels, train_Y_mean, train_Y_std)
+
     train_X = torch.FloatTensor(train_inputs).to(device)
     train_Y = torch.FloatTensor(train_labels).to(device)
+    val_X = torch.FloatTensor(val_inputs).to(device)
+    val_Y = torch.FloatTensor(val_labels).to(device)
 
-    # creates model
     model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
             params.train_batch_size, 
             params.num_models, 
             params.num_hidden, 
             sigmoid_coeff=params.sigmoid_coeff, 
-            device=params.device
-            )
+            device=params.device)
+
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
-
     if os.path.isfile(init_model_path) and not params.clean:
         loaded = True
         checkpoint = torch.load(init_model_path)
@@ -119,7 +127,7 @@ for filename in filenames:
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
                 choose_type=params.choose_type,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
+                normalize_fn=utils.sigmoid_standardization
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -147,13 +155,13 @@ for filename in filenames:
             except OSError as e:
                 pass
 
-            train_X_ei = train_X.clone()
-            train_Y_ei = train_Y.clone()
+            train_X_cur = train_X.clone()
+            train_Y_cur = train_Y.clone()
 
-            model_ei = copy.deepcopy(model)
+            model_cur = copy.deepcopy(model)
 
-            skip_idx_ei = set(train_idx)
-            ack_all_ei = set()
+            skip_idx_mves = set(train_idx)
+            ack_all_mves = set()
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth") and not params.clean:
                 print('already done batch', ack_batch_size)
@@ -164,48 +172,44 @@ for filename in filenames:
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
                     if os.path.exists(batch_ack_output_file) and not params.clean:
                         checkpoint = torch.load(batch_ack_output_file)
-                        model_ei.load_state_dict(checkpoint['model_state_dict'])
+                        model_cur.load_state_dict(checkpoint['model_state_dict'])
                         logging = checkpoint['logging']
 
-                        model_parameters = list(model_ei.parameters())
+                        model_parameters = list(model_cur.parameters())
                         optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                         optim = optim.load_state_dict(checkpoint['optim'])
 
                         ack_idx = list(checkpoint['ack_idx'].numpy())
-                        ack_all_ei.update(ack_idx)
-                        skip_idx_ei.update(ack_idx)
+                        ack_all_mves.update(ack_idx)
+                        skip_idx_mves.update(ack_idx)
                         continue
 
-                    # test stats computation
-                    print('doing ack_iter', ack_iter)
+                    print('doing ack_iter', ack_iter, 'with suffix', params.suffix)
+
                     with torch.no_grad():
-                        model_ensemble = model_ei
-                        preds, preds_vars = model_ensemble(X) # (num_candidate_points, num_samples)
+                        preds, preds_vars = model_cur(X) # (num_samples, num_candidate_points)
                         preds = preds.detach()
                         preds_vars = preds_vars.detach()
-                        assert preds.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(preds.shape), str(Y.shape))
+                        #print("done predictions")
 
-                        #preds_for_ei = torch.max(preds - train_Y_ei.max(), torch.tensor(0.).to(params.device))
-                        #assert preds_for_ei.shape == preds.shape, str(preds_for_ei.shape)
-
-                        indices = list({i for i in range(Y.shape[0])}.difference(skip_idx_ei))
+                        indices = list({i for i in range(Y.shape[0])}.difference(skip_idx_mves))
                         if params.sigmoid_coeff > 0:
                             standardized_Y = utils.sigmoid_standardization(
                                     Y,
-                                    train_Y.mean(),
-                                    train_Y.std(),
+                                    train_Y_mean,
+                                    train_Y_std,
                                     exp=torch.exp)
                         else:
                             standardized_Y = utils.normal_standardization(
                                     Y,
-                                    train_Y.mean(),
-                                    train_Y.std(),
+                                    train_Y_mean,
+                                    train_Y_std,
                                     exp=torch.exp)
 
                         log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
                                 preds,
                                 torch.sqrt(preds_vars),
-                                standardized_Y,
+                                standardized_Y, 
                                 Y,
                                 params.output_dist_fn, 
                                 indices,
@@ -218,102 +222,105 @@ for filename in filenames:
                         print('std_list:', std_list)
                         print('mse_std_corr:', mse_std_corr)
 
+                        preds[:, list(skip_idx_mves)] = preds.min()
                         ei = preds.mean(dim=0).view(-1).cpu().numpy()
                         std = preds.std(dim=0).view(-1).cpu().numpy()
+                        
+                        top_k = params.num_diversity
+                        
+                        sorted_preds_idx = torch.sort(preds)[1].cpu().numpy()
+                        f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
+                        sorted_preds = torch.sort(preds, dim=1)[0]    
 
-                        print('filename:', filename, '; measure:', params.ei_diversity_measure, '; output folder', params.output_dir)
-                        if "var" in params.ei_diversity_measure:
-                            ei_sortidx = np.argsort(ei/std)
-                        elif "ucb" in params.ei_diversity_measure:
-                            ei_sortidx = np.argsort(ei + params.ucb*std)
-
-                    if "none" in params.ei_diversity_measure:
-                        ei_idx = []
-                        for idx in ei_sortidx[::-1]:
-                            if idx not in skip_idx_ei:
-                                ei_idx += [idx]
-                            if len(ei_idx) >= ack_batch_size:
-                                break
-                    elif "hsic" in params.ei_diversity_measure:
-                        ei_idx = bopt.ei_diversity_selection_hsic(
+                    if params.measure == "pdts_condense":
+                        points, preds = bopt.optimize_model_input_pdts(
                                 params, 
-                                preds, 
-                                skip_idx_ei, 
-                                device=params.device)
-                    elif "detk" in params.ei_diversity_measure:
-                        ei_idx = bopt.ei_diversity_selection_detk(
-                                params, 
-                                preds, 
-                                skip_idx_ei, 
-                                device=params.device)
-                    elif "pdts" in params.ei_diversity_measure:
-                        ei_idx = set()
-                        ei_sortidx = np.argsort(ei)
-                        sorted_preds_idx = []
-                        for i in range(preds.shape[0]):
-                            sorted_preds_idx += [np.argsort(preds[i].numpy())]
-                        sorted_preds_idx = np.array(sorted_preds_idx)
-                        if "density" in params.ei_diversity_measure:
-                            counts = np.zeros(sorted_preds_idx.shape[1])
-                            for rank in range(sorted_preds_idx.shape[1]):
-                                counts[:] = 0
-                                for idx in sorted_preds_idx[:, rank]:
-                                    counts[idx] += 1
-                                counts_idx = counts.argsort()[::-1]
-                                j = 0
-                                while len(ei_idx) < ack_batch_size and j < counts_idx.shape[0] and counts[counts_idx[j]] > 0:
-                                    idx = int(counts_idx[j])
-                                    ei_idx.update({idx})
-                                    j += 1
-                                if len(ei_idx) >= ack_batch_size:
-                                    break
-                        else:
-                            assert params.ei_diversity_measure == "pdts", params.ei_diversity_measure
-                            for i_model in range(sorted_preds_idx.shape[0]):
-                                for idx in sorted_preds_idx[i_model]:
-                                    idx2 = int(idx)
-                                    if idx2 not in ei_idx:
-                                        ei_idx.update({idx2})
-                                        break
-                                if len(ei_idx) >= ack_batch_size:
-                                    break
-                        ei_idx = list(ei_idx)
+                                input_shape, 
+                                model_ensemble, 
+                                params.ack_num_model_samples
+                                )
+                        opt_values = preds
+                    elif params.measure == "er_condense":
+                        assert False, "Not implemented"
                     else:
-                        assert False, "Not implemented " + params.ei_diversity_measure
-                    assert len(ei_idx) == ack_batch_size, len(ei_idx)
+                        assert False, str(params.measure) + " not implemented"
 
-                    best_ei_10 = labels[ei_sortidx[-10:]]
-                    f.write('best_ei_10\t' + str(best_ei_10.mean()) + "\t" + str(best_ei_10.max()) + "\t")
+                    hsic_batch = bopt.acquire_batch_via_grad_hsic(
+                            params, 
+                            model_ensemble, 
+                            input_shape, 
+                            opt_values, 
+                            ack_batch_size)
 
-                    ack_all_ei.update(ei_idx)
-                    skip_idx_ei.update(ei_idx)
-                    print("ei_idx:", ei_idx)
+                    print('ei_idx', ei_idx)
+                    print('mves_idx', mves_idx)
+                    print('intersection size', len(set(mves_idx).intersection(set(ei_idx.tolist()))))
+
+                    if len(mves_idx) < ack_batch_size:
+                        for idx in ei_idx[::-1]:
+                            idx = int(idx)
+                            if len(mves_idx) >= ack_batch_size:
+                                break
+                            if idx in mves_idx and idx not in skip_idx_mves:
+                                continue
+                            mves_idx += [idx]
+                    assert len(mves_idx) == ack_batch_size
+                    assert len(set(mves_idx)) == ack_batch_size
+
                     print('ei_labels', labels[ei_idx])
+                    print('mves_labels', labels[list(mves_idx)])
 
-                    new_idx = list(skip_idx_ei)
+                    print('best_hsic\t' + str(best_hsic))
+                    print("train_X.shape:", train_X_cur.shape)
+
+                    f.write('best_hsic\t' + str(best_hsic) + "\n")
+                    f.write('train_X.shape\t' + str(train_X_cur.shape) + "\n")
+
+                    skip_idx_mves.update(mves_idx)
+                    ack_all_mves.update(mves_idx)
+                    print('num_ack:', len(mves_idx), 'num_skip:', len(skip_idx_mves), 'num_all_ack:', len(ack_all_mves))
+                    mves_idx = torch.tensor(list(mves_idx)).to(params.device)
+
+                    new_idx = list(skip_idx_mves)
                     random.shuffle(new_idx)
                     new_idx = torch.LongTensor(new_idx)
 
-                    train_X_ei = X.new_tensor(X[new_idx])
-                    train_Y_ei = Y.new_tensor(Y[new_idx])
-
-                    print("train_X_ei.shape", train_X_ei.shape)
+                    ack_mves = X[mves_idx]
                     
+                    train_X_cur = X.new_tensor(X[new_idx])
+                    train_Y_cur = Y.new_tensor(Y[new_idx])
+
+                    train_Y_mean = train_Y_cur.mean()
+                    train_Y_std = train_Y_cur.std()
+
+                    if params.sigmoid_coeff > 0:
+                        train_Y_cur = utils.sigmoid_standardization(
+                                train_Y_cur, 
+                                train_Y_mean, 
+                                train_Y_std, 
+                                exp=torch.exp)
+                    else:
+                        train_Y_cur = utils.normal_standardization(
+                                train_Y_cur, 
+                                train_Y_mean, 
+                                train_Y_std, 
+                                exp=torch.exp)
+
                     expected_num_points = (ack_iter+1)*ack_batch_size
-                    assert train_X_ei.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_ei.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
-                    assert train_Y_ei.shape[0] == train_X_ei.shape[0]
-                    optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                    assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
+                    assert train_Y_cur.shape[0] == train_X_cur.shape[0]
+                    optim = torch.optim.Adam(list(model_cur.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
                     logging, optim = dbopt.train_ensemble(
                         params, 
                         params.retrain_batch_size, 
                         params.retrain_num_epochs, 
-                        [train_X_ei, train_Y_ei], 
-                        model_ei,
+                        [train_X_cur, train_Y_cur], 
+                        model_cur,
                         optim,
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
                         choose_type=params.choose_type,
-                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
+                        normalize_fn=utils.sigmoid_standardization,
                         )
 
                     print(filename)
@@ -322,16 +329,16 @@ for filename in filenames:
                     f.write(str([k[-1] for k in logging]) + "\n")
                     logging = [torch.tensor(k) for k in logging]
 
-                    ack_array = np.array(list(ack_all_ei), dtype=np.int32)
+                    ack_array = np.array(list(ack_all_mves), dtype=np.int32)
 
                     print('best so far:', labels[ack_array].max())
-                    
+
                     # inference regret computation using retrained ensemble
-                    s, idx_frac, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
-                            model_ei,
+                    s, idx_frac, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
+                            model_cur,
                             X,
                             labels,
-                            ack_all_ei,
+                            ack_all_mves,
                             top_frac_idx,
                             params.ack_batch_size
                         )
@@ -340,14 +347,17 @@ for filename in filenames:
                     f.write(s + "\n")
 
                     torch.save({
-                        'model_state_dict': model_ei.state_dict(), 
+                        'model_state_dict': model_cur.state_dict(), 
                         'logging': logging,
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
-                        'ir_batch_ei': torch.from_numpy(ei),
-                        'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
+                        'best_hsic': best_hsic,
+                        'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
+                        'ir_batch': torch.from_numpy(ir),
+                        'ir_batch_idx': torch.from_numpy(ir_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
+                        'ei_idx': torch.tensor(ei_idx),
                         'test_log_prob': torch.tensor(log_prob_list),
                         'test_mse': torch.tensor(mse_list),
                         'test_kt_corr': torch.tensor(kt_corr_list),

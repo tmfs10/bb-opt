@@ -7,10 +7,10 @@
 --init_train_examples 200
 --init_train_epochs 200
 --train_lr 0.01
---train_batch_size 128
+--train_batch_size 40
 --retrain_num_epochs 200
 --retrain_lr 0.01
---retrain_batch_size 128
+--retrain_batch_size 40
 
 --num_hidden 100
 --sigmoid_coeff 1.0
@@ -26,8 +26,13 @@
 --output_dir ../experiments/ensemble/o
 --num_test_tfs 10
 
---ack_batch_size 100
---num_acks 10
+--ack_batch_size 40
+--num_acks 20
 
 --single_gaussian_test_nll True
 --choose_type last
+
+--ei_diversity_measure none_ucb
+--ucb 0.0
+
+--num_models 100

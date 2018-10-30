@@ -88,18 +88,22 @@ for filename in filenames:
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
 
-    Y_mean = float(train_labels.mean())
-    Y_std = float(train_labels.std())
+    train_Y_mean = float(train_labels.mean())
+    train_Y_std = float(train_labels.std())
 
-    train_labels = utils.sigmoid_standardization(train_labels, Y_mean, Y_std)
-    val_labels = utils.sigmoid_standardization(val_labels, Y_mean, Y_std)
+    if params.sigmoid_coeff > 0:
+        train_labels = utils.sigmoid_standardization(train_labels, train_Y_mean, train_Y_std)
+        val_labels = utils.sigmoid_standardization(val_labels, train_Y_mean, train_Y_std)
+    else:
+        train_labels = utils.normal_standardization(train_labels, train_Y_mean, train_Y_std)
+        val_labels = utils.normal_standardization(val_labels, train_Y_mean, train_Y_std)
 
     train_X = torch.FloatTensor(train_inputs).to(device)
     train_Y = torch.FloatTensor(train_labels).to(device)
     val_X = torch.FloatTensor(val_inputs).to(device)
     val_Y = torch.FloatTensor(val_labels).to(device)
 
-    model = dbopt.get_model_nn_ensemble(inputs.shape[1], params.train_batch_size, params.num_models, params.num_hidden, device=params.device)
+    model = dbopt.get_model_nn_ensemble(inputs.shape[1], params.train_batch_size, params.num_models, params.num_hidden, sigmoid_coeff=params.sigmoid_coeff, device=params.device)
     data = [train_X, train_Y, val_X, val_Y]
 
     init_model_path = file_output_dir + "/init_model.pth"
@@ -138,11 +142,11 @@ for filename in filenames:
     X = torch.tensor(inputs, device=device)
     Y = torch.tensor(labels, device=device)
 
-    with open(file_output_dir + "/stats.txt", 'a') as main_f:
+    with open(file_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as main_f:
         if not loaded:
             main_f.write(str([k[-1] for k in logging]) + "\n")
 
-        for ack_batch_size in [5]:
+        for ack_batch_size in [params.ack_batch_size]:
             print('doing batch', ack_batch_size)
             batch_output_dir = file_output_dir + "/" + str(ack_batch_size)
             try:
@@ -162,7 +166,7 @@ for filename in filenames:
                 print('already done batch', ack_batch_size)
                 continue
 
-            with open(batch_output_dir + "/stats.txt", 'a', buffering=1) as f:
+            with open(batch_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
                     if os.path.exists(batch_ack_output_file) and not params.clean:
@@ -180,20 +184,28 @@ for filename in filenames:
                         continue
 
                     test_points_idx = list(set([i for i in range(X.shape[0])]).difference(skip_idx_mves))
-                    print('doing ack_iter', ack_iter, 'for mves with suffix', suffix)
+                    print('doing ack_iter', ack_iter, 'for mves with suffix', params.suffix)
                     model_ensemble = model_mves
-                    preds, _ = model_ensemble(X) # (num_candidate_points, num_samples)
-                    preds = preds.transpose(0, 1)
+                    preds, preds_vars = model_ensemble(X) # (num_candidate_points, num_samples)
+                    preds = preds.detach()
+                    preds_vars = preds_vars.detach()
                     #print("done predictions")
 
                     indices = list({i for i in range(Y.shape[0])}.difference(skip_idx_mves))
-                    standardized_Y = utils.sigmoid_standardization(
-                            Y,
-                            train_Y_ei.mean(),
-                            train_Y_ei.std(),
-                            exp=torch.exp)
+                    if params.sigmoid_coeff > 0:
+                        standardized_Y = utils.sigmoid_standardization(
+                                Y,
+                                train_Y_mean,
+                                train_Y_std,
+                                exp=torch.exp)
+                    else:
+                        standardized_Y = utils.normal_standardization(
+                                Y,
+                                train_Y_mean,
+                                train_Y_std,
+                                exp=torch.exp)
 
-                    log_prob_list, mse_list, kt_corr_list = bopt.get_pred_stats(
+                    log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
                             preds,
                             torch.sqrt(preds_vars),
                             standardized_Y, 
@@ -206,6 +218,8 @@ for filename in filenames:
                     print('log_prob_list:', log_prob_list)
                     print('mse_list:', mse_list)
                     print('kt_corr_list:', kt_corr_list)
+                    print('std_list:', std_list)
+                    print('mse_std_corr:', mse_std_corr)
 
                     if not params.compare_w_old:
                         preds[:, list(skip_idx_mves)] = preds.min()
@@ -217,9 +231,9 @@ for filename in filenames:
                         ei = preds2.mean(dim=0).view(-1).cpu().numpy()
                         std = preds2.std(dim=0).view(-1).cpu().numpy()
                     
-                    top_k = params.mves_diversity
+                    top_k = params.num_diversity
                     
-                    sorted_preds_idx = bopt.argsort_preds(preds)
+                    sorted_preds_idx = torch.sort(preds)[1].cpu().numpy()
                     f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
                     sorted_preds = torch.sort(preds, dim=1)[0]    
                     #best_pred = preds.max(dim=1)[0].view(-1)
@@ -229,20 +243,20 @@ for filename in filenames:
                     if params.measure == 'ei_mves_mix':
                         print(filename, 'ei_mves_mix')
                         ei_sortidx = np.argsort(ei)
-                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
                         best_pred = torch.cat([preds[:, ei_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
                     elif params.measure == 'ei_condense':
                         print(filename, 'ei_condense')
                         ei_sortidx = np.argsort(ei)
-                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
                         best_pred = preds[:, ei_idx]
                         opt_weighting = torch.tensor((ei[ei_idx]-ei[ei_idx].min()))
                     elif params.measure == 'ei_pdts_mix':
                         print(filename, 'ei_pdts_mix')
                         ei_sortidx = np.argsort(ei)
-                        pdts_idx = bopt.get_pdts_idx(preds, params.mves_diversity*ack_batch_size, density=True)
+                        pdts_idx = bopt.get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True)
                         print('pdts_idx:', pdts_idx)
-                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
                         best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx]], dim=-1)
                     elif params.measure == 'cma_es':
                         print(filename, 'cma_es')
@@ -252,11 +266,11 @@ for filename in filenames:
                         assert indices.ndimension() == 1
                         best_pred = preds[:, indices[-10:]]
                         ei_sortidx = np.argsort(ei)
-                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
                     elif params.measure == 'mves':
                         print(filename, 'mves')
                         ei_sortidx = np.argsort(ei)
-                        ei_idx = ei_sortidx[-params.mves_diversity*ack_batch_size:]
+                        ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
                         best_pred = sorted_preds[:, -top_k:]
                     else:
                         assert False
@@ -264,25 +278,24 @@ for filename in filenames:
                     print('best_pred.shape\t' + str(best_pred.shape))
                     f.write('best_pred.shape\t' + str(best_pred.shape))
 
-                    print('best_pred:', best_pred.mean(0), best_pred.std(0))
+                    print('best_pred:', best_pred.mean(0).mean(), best_pred.std(0).mean())
 
-                    #best_pred = (best_pred - best_pred.mean(0))/best_pred.std()
-                    
-                    mves_compute_batch_size = params.mves_compute_batch_size
-                    #ack_batch_size=params.ack_batch_size
                     mves_idx, best_hsic = bopt.acquire_batch_mves_sid(
                             params,
                             best_pred, 
                             preds, 
                             skip_idx_mves, 
-                            mves_compute_batch_size, 
+                            params.mves_compute_batch_size, 
                             ack_batch_size, 
                             true_labels=labels, 
                             greedy_ordering=params.mves_greedy, 
                             pred_weighting=params.pred_weighting, 
                             normalize=True, 
                             divide_by_std=params.divide_by_std, 
-                            opt_weighting=None)
+                            opt_weighting=None,
+                            min_hsic_increase=params.min_hsic_increase,
+                            double=True,
+                            )
 
                     print('ei_idx', ei_idx)
                     print('mves_idx', mves_idx)
@@ -322,21 +335,29 @@ for filename in filenames:
                     train_X_mves = X.new_tensor(X[new_idx])
                     train_Y_mves = Y.new_tensor(Y[new_idx])
 
-                    Y_mean = train_Y_mves.mean()
-                    Y_std = train_Y_mves.std()
+                    train_Y_mean = train_Y_mves.mean()
+                    train_Y_std = train_Y_mves.std()
 
-                    train_Y_mves = utils.sigmoid_standardization(
-                            train_Y_mves, 
-                            Y_mean, 
-                            Y_std, 
-                            exp=torch.exp)
-                    val_Y = utils.sigmoid_standardization(Y[val_idx], Y_mean, Y_std, exp=torch.exp)
+                    if params.sigmoid_coeff > 0:
+                        train_Y_mves = utils.sigmoid_standardization(
+                                train_Y_mves, 
+                                train_Y_mean, 
+                                train_Y_std, 
+                                exp=torch.exp)
+                        val_Y = utils.sigmoid_standardization(Y[val_idx], train_Y_mean, train_Y_std, exp=torch.exp)
+                    else:
+                        train_Y_mves = utils.normal_standardization(
+                                train_Y_mves, 
+                                train_Y_mean, 
+                                train_Y_std, 
+                                exp=torch.exp)
+                        val_Y = utils.normal_standardization(Y[val_idx], train_Y_mean, train_Y_std, exp=torch.exp)
 
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_mves.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_mves.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_mves.shape[0] == train_X_mves.shape[0]
                     data = [train_X_mves, train_Y_mves, val_X, val_Y]
-                    optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                    optim = torch.optim.Adam(list(model_mves.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
                     logging, optim = dbopt.train_ensemble(
                         params, 
                         params.retrain_batch_size, 
@@ -360,7 +381,7 @@ for filename in filenames:
                     print('best so far:', labels[ack_array].max())
 
                     # inference regret computation using retrained ensemble
-                    s, idx_frac, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
+                    s, idx_frac, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
                             model_mves,
                             X,
                             labels,
@@ -380,13 +401,15 @@ for filename in filenames:
                         'ack_labels': torch.from_numpy(labels[ack_array]),
                         'best_hsic': best_hsic,
                         'diversity': len(set(sorted_preds_idx[:, -top_k:].flatten())),
-                        'ir_batch_ei': torch.from_numpy(ir_ei),
-                        'ir_batch_ei_idx': torch.from_numpy(ir_ei_sortidx),
+                        'ir_batch': torch.from_numpy(ir),
+                        'ir_batch_idx': torch.from_numpy(ir_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
                         'ei_idx': torch.tensor(ei_idx),
                         'test_log_prob': torch.tensor(log_prob_list),
                         'test_mse': torch.tensor(mse_list),
                         'test_kt_corr': torch.tensor(kt_corr_list),
+                        'test_std_list': torch.tensor(std_list),
+                        'test_mse_std_corr': torch.tensor(mse_std_corr),
                         }, batch_ack_output_file)
                     sys.stdout.flush()
                     

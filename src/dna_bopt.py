@@ -5,8 +5,10 @@ from scipy.stats import kendalltau
 import hsic
 import torch
 import torch.nn as nn
+import copy
 from torch.nn.parameter import Parameter
 import torch.distributions as tdist
+import non_matplotlib_utils as utils
 
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
@@ -103,11 +105,32 @@ def train_ensemble(
         unseen_reg="normal",
         gamma=0.0,
         choose_type="last",
+        normalize_fn=None,
+        val_frac=0.1,
         jupyter=False,
 ):
-    train_X, train_Y, val_X, val_Y = data
+    train_X, train_Y = data
+    N = train_X.shape[0]
+    assert val_frac >= 0.01
+    assert val_frac <= 0.9
+
+    train_idx, val_idx, _ = utils.train_val_test_split(N, [1-val_frac, val_frac])
+
+    val_X = train_X[val_idx]
+    train_X = train_X[train_idx]
+    val_Y = train_Y[val_idx]
+    train_Y = train_Y[train_idx]
+
+    if normalize_fn is not None:
+        mean = train_Y.mean()
+        std = train_Y.std()
+        train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
+        val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+
     N = train_X.shape[0]
     print("training:")
+    print("%d num_train" % (N))
+    print("%d num_val" % (val_X.shape[0]))
     print(str(batch_size) + " batch_size")
     print(str(num_epochs) + " num_epochs")
     print(str(gamma) + " gamma")
@@ -121,6 +144,8 @@ def train_ensemble(
     val_mses = []
     train_nlls = []
     train_mses = []
+    train_std = []
+    val_std = []
 
     if jupyter:
         progress = tnrange(num_epochs)
@@ -174,8 +199,9 @@ def train_ensemble(
         model_ensemble.eval()
         with torch.no_grad():
             means, variances = model_ensemble(train_X)
+            train_std += [means.std(0).mean().item()]
             if choose_type == "train":
-                nll = NNEnsemble.compute_negative_log_likelihood(
+                _, nll = NNEnsemble.report_metric(
                         train_Y, 
                         means, 
                         variances, 
@@ -184,14 +210,15 @@ def train_ensemble(
 
                 if nll < best_nll:
                     best_nll = nll
-                    best_model = model_ensemble.state_dict()
+                    best_model = copy.deepcopy(model_ensemble.state_dict())
             means = means.mean(0)
             assert means.shape == train_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
             corr = kendalltau(means, train_Y)[0]
             corrs += [corr]
 
             means, variances = model_ensemble(val_X)
-            nll = NNEnsemble.compute_negative_log_likelihood(
+            val_std += [means.std(0).mean().item()]
+            _, nll = NNEnsemble.report_metric(
                     val_Y,
                     means,
                     variances,
@@ -202,7 +229,7 @@ def train_ensemble(
             val_mses += [mse]
             if choose_type == "val" and nll < best_nll:
                 best_nll = nll
-                best_model = model_ensemble.state_dict()
+                best_model = copy.deepcopy(model_ensemble.state_dict())
 
             means = means.mean(0)
             assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
@@ -215,12 +242,43 @@ def train_ensemble(
             model_ensemble.load_state_dict(best_model)
         else:
             assert num_epochs == 0
-            corrs = [0]
-            val_corrs = [0]
-            train_nlls = [0]
-            train_mses = [0]
+    if num_epochs == 0:
+        corrs = [-1]
+        train_nlls = [-1]
+        train_mses = [-1]
+        train_std = [-1]
+        val_corrs = [-1]
+        val_nlls = [-1]
+        val_mses = [-1]
+        val_std = [-1]
 
-    return [corrs, train_nlls, train_mses, val_corrs, val_nlls, val_mses], optim
+    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std], optim
+
+
+def one_hot_to_number(one_hot, arr):
+    num = 0
+    for j in range(one_hot.shape[0]):
+        digit = np.dot(arr, inputs[i, j])
+        num *= (j+1)
+        num += digit
+
+
+def one_hot_list_to_number(inputs):
+    data = {}
+    arr = np.array(inputs.shape[2], dtype=np.int32)
+    for i in range(inputs.shape[0]):
+        num = 0
+        for j in range(inputs.shape[1]):
+            digit = np.dot(arr, inputs[i, j])
+            num *= (j+1)
+            num += digit
+        data[num] = i
+    return data
+
+
+def prob_to_number(inputs):
+    pass
+
 
 def train(
         params,

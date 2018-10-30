@@ -31,3 +31,6 @@
 
 --single_gaussian_test_nll True
 --choose_type last
+
+--input_opt_lr 0.001
+--input_opt_num_iter 100

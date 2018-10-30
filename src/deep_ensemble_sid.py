@@ -188,7 +188,31 @@ class NNEnsemble(BOModel, torch.nn.Module):
         )
         self.adversarial_epsilon = adversarial_epsilon
 
-    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True):
+    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True, all_pairs: bool = True):
+        if not all_pairs:
+            assert y is None, "Not implemented"
+            N = x.shape[0]
+            m = len(self.models)
+            per_model = N//m
+            batches = [i*per_model for i in range(m)] + [N]
+            assert len(batches) == m+1
+
+            means = []
+            variances = []
+            for batch_iter in range(batches-1):
+                bs = batches[batch_iter]
+                be = batches[batch_iter+1]
+                assert be-bs > 0
+
+                bmeans, bvariances = self.models[batch_iter](x[bs:be])
+                means += [bmeans]
+                variances += [bvariances]
+
+            means = torch.cat(means, dim=0)
+            variances = torch.cat(variances, dim=0)
+
+            return means, variances
+
         if y is not None and self.adversarial_epsilon is not None:
             x.requires_grad_()
             means, variances = self(x)

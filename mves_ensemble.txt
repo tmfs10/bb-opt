@@ -5,3 +5,5 @@
 --pred_weighting 0
 --divide_by_std False
 --measure mves
+--num_models 100
+--mves_kernel_fn mixrq_kernels

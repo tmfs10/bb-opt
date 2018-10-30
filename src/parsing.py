@@ -89,6 +89,14 @@ def add_parse_args_mves(parser):
             help="divide normalized hsic by hsic stddev")
     parser.add_argument('--measure', type=strlower, 
             help="mves/ei_mves_mix/ei_condense/ei_pdts_mix/cma_es")
+    parser.add_argument('--mves_compute_batch_size', type=int)
+    parser.add_argument('--mves_kernel_fn', type=str)
+    parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
+
+
+def add_parse_args_grad(parser):
+    parser.add_argument('--input_opt_lr', type=float)
+    parser.add_argument('--input_opt_num_iter', type=int)
 
 
 def add_parse_args_ensemble(parser):

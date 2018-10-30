@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from scipy.stats import kendalltau
+from scipy.stats import kendalltau, pearsonr
 from rdkit.Chem import MolFromSmiles
 from rdkit.Chem.AllChem import GetMorganFingerprintAsBitVect as get_fingerprint
 import torch
@@ -883,10 +883,10 @@ def hsic_mves_loss(
     new_batch_matrix = kernel_fn(X, X, do_mean=do_mean)  # return is of shape (n=num_samples, n, 1)
     kernels = torch.cat([new_batch_matrix, opt_values_kernel_matrix], dim=-1)
 
-    return -hsic.total_hsic(kernels)
+    return hsic.total_hsic(kernels)
 
 
-def acquire_batch_via_grad_mves(
+def acquire_batch_via_grad_hsic(
     params,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     input_shape: List[int],
@@ -894,6 +894,8 @@ def acquire_batch_via_grad_mves(
     ack_batch_size,
     do_mean=False,
     seed: torch.tensor = None,
+    normalize_hsic=True,
+    one_hot=True,
     jupyter: bool = False,
 ) -> torch.tensor:
 
@@ -904,20 +906,26 @@ def acquire_batch_via_grad_mves(
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
 
+    if one_hot:
+        assert input_shape.ndimension() == 2
+        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
+
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
+    opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
+    opt_normalizer_exp = torch.exp(0.5 * opt_normalizer)
     if jupyter:
         progress = tnrange(params.batch_opt_num_iter)
     else:
         progress = trange(params.batch_opt_num_iter)
 
     for step_iter in progress:
-        preds = model_ensemble(input_tensor) # (ack_batch_size, num_samples)
+        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
         assert preds.ndimension() == 2
-        preds = preds.transpose(0, 1)
         assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
-        loss = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
+        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
+        total_hsic = torch.log(total_hsic)
         postfix = {'loss' : loss.item()}
         progress.set_postfix(postfix)
 
@@ -1062,15 +1070,6 @@ def ei_diversity_selection_detk(
 
     return chosen_idx
 
-
-def argsort_preds(preds):
-    sorted_preds_idx = []
-    for i in range(preds.shape[0]):
-        sorted_preds_idx += [np.argsort(preds[i].numpy())]
-    sorted_preds_idx = np.array(sorted_preds_idx)
-    return sorted_preds_idx
-
-
 def acquire_batch_self_hsic(
     params,
     candidate_points_preds : torch.tensor, # (num_samples, num_candidate_points)
@@ -1195,6 +1194,7 @@ def acquire_batch_mves_sid(
     divide_by_std=False,
     double=False,
     opt_weighting=None,
+    min_hsic_increase=0.05,
 )-> torch.tensor:
 
     opt_values = opt_values.to(device)
@@ -1331,7 +1331,7 @@ def acquire_batch_mves_sid(
         assert best_idx_dist_matrix is not None
         assert best_idx is not None
         best_hsic_vec += [best_hsic]
-        if len(best_hsic_vec) > 1 and best_hsic_vec[-1] < best_hsic_vec[-2]+0.05:
+        if len(best_hsic_vec) > 1 and best_hsic_vec[-1] < best_hsic_vec[-2]+min_hsic_increase:
             break
 
         batch_dist_matrix = best_idx_dist_matrix
@@ -1354,6 +1354,7 @@ def acquire_batch_via_grad_er(
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     input_shape: List[int],
     seed: torch.tensor = None,
+    one_hot=True,
 ) -> torch.tensor:
 
     ack_batch_size = params.ack_batch_size
@@ -1364,6 +1365,10 @@ def acquire_batch_via_grad_er(
     else:
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
+
+    if one_hot:
+        assert input_shape.ndimension() == 2
+        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
 
     optim = torch.optim.Adam([input_tensor], lr=params.batch_opt_lr)
     kernel_fn = getattr(hsic, 'two_vec_' + params.mves_kernel_fn)
@@ -1386,7 +1391,9 @@ def optimize_model_input(
     input_shape,
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     seed=None,
-    hsic_diversity_lambda=0.
+    hsic_diversity_lambda=0.,
+    normalize_hsic=False,
+    one_hot=True,
 ):
     if seed is None:
         input_tensor = torch.randn([num_points_to_optimize] + input_shape, device=params.device, requires_grad=True)
@@ -1394,6 +1401,10 @@ def optimize_model_input(
         assert seed.ndimension() == 2
         assert seed.shape[0] == num_points_to_optimize
         input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
+
+    if one_hot:
+        assert input_shape.ndimension() == 2
+        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
 
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     progress = tnrange(params.input_opt_num_iter)
@@ -1430,6 +1441,8 @@ def optimize_model_input_pdts(
     model_ensemble: Callable[[torch.tensor], torch.tensor],
     num_points_to_optimize,
     seed=None,
+    one_hot=True,
+    jupyter=False,
 ):
     assert num_points_to_optimize > 1
     if seed is None:
@@ -1438,6 +1451,10 @@ def optimize_model_input_pdts(
         assert seed.ndimension() == 2
         assert seed.shape[0] == num_points_to_optimize
         input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
+
+    if one_hot:
+        assert input_shape.ndimension() == 2
+        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
 
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     progress = tnrange(params.input_opt_num_iter)
@@ -1452,7 +1469,8 @@ def optimize_model_input_pdts(
         optim.zero_grad()
         loss.backward()
         optim.step()
-        progress.set_postfix(postfix)
+        if jupyter:
+            progress.set_postfix(postfix)
 
     return input_tensor.detach(), preds.detach()
 
@@ -1561,6 +1579,8 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
     log_prob_list = []
     mse_list = []
     kt_corr_list = []
+    std_list = []
+    mse_std_corr = []
 
     for frac in [1., 0.1]:
         labels_sort_idx = torch.sort(unscaled_Y, descending=True)[1].cpu().numpy()
@@ -1581,15 +1601,21 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
             log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
 
         pred_means = preds[:, labels_sort_idx].mean(0)
-        mse_list += [torch.sqrt(torch.mean((pred_means-labels2)**2)).item()]
+        mse = (pred_means-labels2)**2
+        mse_list += [torch.sqrt(torch.mean(mse)).item()]
         kt_corr_list += [kendalltau(pred_means, unscaled_Y[labels_sort_idx])[0]]
+        pred_std = preds[:, labels_sort_idx].std(0)
+        std_list += [pred_std.mean().item()]
+        mse_std_corr += [float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_std.cpu().numpy())[0])]
 
     max_idx = labels_sort_idx[0]
     log_prob_list += [torch.mean(-output_dist_fn(preds[:, max_idx], std[:, max_idx]).log_prob(Y[max_idx])).item()]
     mse_list += [torch.abs(preds[:, max_idx].mean(0)-Y[max_idx]).item()]
     kt_corr_list += [0]
+    mse_std_corr += [0]
+    std_list += [preds[:, max_idx].std(0).item()]
 
-    return log_prob_list, mse_list, kt_corr_list
+    return log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr
 
 def compute_ir_regret_ensemble(
         model_ensemble,

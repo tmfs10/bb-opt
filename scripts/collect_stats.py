@@ -5,58 +5,54 @@ import numpy as np
 import torch
 
 
-def get_data_mves(exp_folder, suffix, map_loc="cpu", num_samples=10):
-    stats_mves = {}
-    batches = [2, 5, 10, 20]
+def get_data(exp_folder, suffix, batches, num_acks, map_loc="cpu", num_samples=10):
+    stats_to_extract = [
+            'logging',
+            'ack_labels',
+            'best_hsic',
+            'ir_batch',
+            'ir_batch_idx',
+            'idx_frac',
+            'test_log_prob',
+            'test_mse',
+            'test_kt_corr',
+            'test_std_list',
+            'test_mse_std_corr',
+            ]
+
+    stats = []
     for i_sample in range(1, num_samples+1):
-        dirpath = exp_folder + "/output_" + suffix + str(i_sample)
+        dirpath = exp_folder + "/" + suffix + str(i_sample)
         if not os.path.exists(dirpath):
             continue
         print("reading sample", i_sample)
 
+        stats += [{}]
         for filename in os.listdir(dirpath):
             filepath = dirpath + "/" + filename
             if not os.path.isdir(filepath):
                 continue
 
-            if filename not in stats_mves:
-                stats_mves[filename] = [ [] for i in range(len(batches))]
+            stats[-1][filename] = {}
             for i_batch in range(len(batches)):
                 batch_size = batches[i_batch]
                 batch_dir = filepath + "/" + str(batch_size)
-                if not os.path.exists(batch_dir) or not os.path.exists(batch_dir + "/19.pth"):
+                if not os.path.exists(batch_dir) or not os.path.exists(batch_dir + "/" + str(num_acks-1) + ".pth"):
                     continue
 
-                stats_mves[filename][i_batch] += [ [] ]
-                with open(batch_dir + "/stats.txt") as f:
-                    #print("reading", batch_dir)
-                    i = -1
-                    for line in f:
-                        line = [k.strip() for k in line.strip().split("\t")]
+                stats[-1][filename][batch_size] = []
+                for i in range(num_acks):
+                    torch_filepath = batch_dir + "/" + str(i) + ".pth"
+                    assert os.path.exists(torch_filepath)
+                    stats[-1][filename][batch_size] += [{}]
+                    checkpoint = torch.load(torch_filepath, map_location=map_loc)
 
-                        if len(line) != 5:
+                    for stat in stats_to_extract:
+                        if stat not in checkpoint:
                             continue
+                        stats[-1][filename][batch_size][-1][stat] = checkpoint[stat]
 
-                        i += 1
-                        assert i < 20
-                        best_value = torch.load(batch_dir + "/" + str(i) + ".pth", map_location=map_loc)['ack_labels'].max().item()
-
-                        assert line[4][0] == "["
-                        assert line[4][-1] == "]"
-                        top_idx_frac = [float(k) for k in line[4][1:-1].split(",")]
-                        assert len(top_idx_frac) == 4
-                        arr =  [float(k) for k in line[:4]] + [best_value] + top_idx_frac 
-                        for k in arr:
-                            assert type(k) == float
-                        assert len(arr) == 9, len(arr)
-
-                        stats_mves[filename][i_batch][-1] = [arr]
-                stats_mves[filename][i_batch][-1] = np.array(stats_mves[filename][i_batch][-1], dtype=np.float32) # (num_acks, 9)
-
-    for filename in stats_mves:
-        for i_batch in range(len(stats_mves[filename])):
-            stats_mves[filename][i_batch] = np.array(stats_mves[filename][i_batch], dtype=np.float32)
-    return stats_mves
+    return stats
 
 
 def compute_logprob(prior_mean, prior_std, exp_folder, data_dir, suffix):
@@ -243,5 +239,3 @@ def get_data_mves_ucb(exp_folder, suffix, ucb, num_samples=10, map_loc="cpu"):
         for i_batch in range(len(stats_mves[filename])):
             stats_mves[filename][i_batch] = np.array(stats_mves[filename][i_batch], dtype=np.float32)
     return stats_mves
-
-
