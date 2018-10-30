@@ -192,7 +192,7 @@ def iaf_variationals(
 def optimize(
     model: BOModel,
     acquisition_func: AcquisitionFunction,
-    inputs: Union[torch.Tensor, np.ndarray],
+    inputs: np.ndarray,
     labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
     batch_size: int = 256,
@@ -208,24 +208,16 @@ def optimize(
 ) -> np.ndarray:
 
     n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
+    if save_key and exp:
+        save_key += "_" + exp.get_key()[:5]
 
     if isinstance(labels, pd.Series):
         labels = labels.values
-
-    if not isinstance(inputs, torch.Tensor):
-        inputs = torch.tensor(inputs).float()
-
-    if device and inputs.device != device:
-        inputs = inputs.to(device)
 
     n_top_k_percent = int(top_k_percent / 100 * len(labels))
     best_idx = set(labels.argsort()[-n_top_k_percent:])
     sum_best = np.sort(labels)[-n_top_k_percent:].sum()
     best_value = np.sort(labels)[-1]
-
-    labels = torch.tensor(labels).float()
-    if device and labels.device != device:
-        labels = labels.to(device)
 
     try:
         sampled_idx = set()
@@ -239,7 +231,6 @@ def optimize(
                     labels[list(sampled_idx)],
                     sampled_idx,
                     batch_size,
-                    exp=exp,
                 )
             else:
                 acquire_samples = acquisition_func(
@@ -276,9 +267,9 @@ def optimize(
             if exp:
                 sampled_labels = labels[list(greedy_sampled_idx)]
                 sampled_sum_best = (
-                    sampled_labels.sort()[0][-n_top_k_percent:].sum().item()
+                    np.sort(sampled_labels)[-n_top_k_percent:].sum()
                 )
-                sampled_best_value = sampled_labels.max().item()
+                sampled_best_value = sampled_labels.max()
 
                 exp.log_metric("fraction_best", fraction_best, step * batch_size)
                 exp.log_metric("best_value", sampled_best_value, step * batch_size)
