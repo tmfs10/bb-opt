@@ -5,6 +5,10 @@ from typing import Tuple, Optional
 
 
 class CDF:
+    """
+    WARNING - there still seem to be some bugs with this class!
+    """
+
     def __init__(
         self,
         preds: Optional[np.ndarray] = None,
@@ -181,22 +185,28 @@ class CDF:
     def _sample_gaussian(
         self, n_samples: int = 1, calibrated: bool = False
     ) -> np.ndarray:
+        assert (
+            not calibrated
+        ), "Sampling from a calibrated Gaussian is not yet supported."
         uniform_samples = np.random.uniform(size=(self.n_inputs, n_samples))
 
-        # TODO: implement this; could try like below with test points or do a vectorized binary search
-        # where you halve the bounds on all points at each step
-        raise NotImplementedError
+        n_std = 10
+        min_x = (
+            np.tile(self.pred_means, (n_samples, 1)).T - n_std * self.pred_stds[:, None]
+        )
+        max_x = (
+            np.tile(self.pred_means, (n_samples, 1)).T + n_std * self.pred_stds[:, None]
+        )
 
-        # test_x = np.array([np.linspace(min_i, max_i, n_test_points) for min_i, max_i in zip(self.preds.min(0) - 1, self.preds.max(0) + 1)])
-        # cdf_probs = self.get_cdf_probs(test_x)
+        while not np.allclose(min_x, max_x):
+            mid_x = (max_x - min_x) / 2 + min_x
+            cdf_probs = self.get_cdf_probs(mid_x)
 
-        # if calibrated:
-        #     cdf_probs = self.calibrate_cdf_probs(cdf_probs)
+            max_x[cdf_probs > uniform_samples] = mid_x[cdf_probs > uniform_samples]
+            min_x[cdf_probs < uniform_samples] = mid_x[cdf_probs < uniform_samples]
 
-        # uniform_samples = np.random.uniform(size=(self.n_inputs, n_samples))
-        # # find the index of the largest x value which has CDF prob <= the uniform sample
-        # max_idx_le_uniform_sample = ((cdf_probs[:, :, None] <= uniform_samples[:, None, :]).argmin(1) - 1)
-        # return test_x[range(len(test_x)), max_idx_le_uniform_sample.T].T
+        assert np.isclose(((cdf_probs - uniform_samples) ** 2).mean(), 0)
+        return min_x
 
     def _sample_ecdf(self, n_samples: int = 1, calibrated: bool = False) -> np.ndarray:
         uniform_samples = np.random.uniform(size=(self.n_inputs, n_samples))
