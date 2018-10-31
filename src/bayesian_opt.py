@@ -862,80 +862,6 @@ def acquire_batch_es(
     return batch
 
 
-def hsic_mves_loss(
-        X : torch.tensor, # (num_samples, ack_batch_size)
-        opt_values_kernel_matrix : torch.tensor,
-        kernel_fn,
-        do_mean=False
-):
-    assert X.ndimension() == 2
-    num_samples = X.shape[0]
-    ack_batch_size = X.shape[1]
-
-    assert opt_values_kernel_matrix.shape[0] == num_samples
-    assert opt_values_kernel_matrix.shape[1] == num_samples
-
-    if opt_values_kernel_matrix.ndimension() == 2:
-        opt_values_kernel_matrix = opt_values_kernel_matrix.unsqueeze(-1)
-    assert opt_values_kernel_matrix.ndimension() == 3
-    assert opt_values_kernel_matrix.shape[2] == 1
-
-    new_batch_matrix = kernel_fn(X, X, do_mean=do_mean)  # return is of shape (n=num_samples, n, 1)
-    kernels = torch.cat([new_batch_matrix, opt_values_kernel_matrix], dim=-1)
-
-    return hsic.total_hsic(kernels)
-
-
-def acquire_batch_via_grad_hsic(
-    params,
-    model_ensemble: Callable[[torch.tensor], torch.tensor],
-    input_shape: List[int],
-    opt_values: torch.tensor, # (num_samples, preds)
-    ack_batch_size,
-    do_mean=False,
-    seed: torch.tensor = None,
-    normalize_hsic=True,
-    one_hot=True,
-    jupyter: bool = False,
-) -> torch.tensor:
-
-    print('mves: ack_batch_size', ack_batch_size)
-    if seed is None:
-        input_tensor = torch.randn([ack_batch_size] + input_shape, device=params.device, requires_grad=True)
-    else:
-        assert seed.shape[0] == ack_batch_size
-        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
-
-    if one_hot:
-        assert input_shape.ndimension() == 2
-        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
-
-    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
-    kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
-    opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
-    opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
-    opt_normalizer_exp = torch.exp(0.5 * opt_normalizer)
-    if jupyter:
-        progress = tnrange(params.batch_opt_num_iter)
-    else:
-        progress = trange(params.batch_opt_num_iter)
-
-    for step_iter in progress:
-        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
-        assert preds.ndimension() == 2
-        assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
-        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
-        total_hsic = torch.log(total_hsic)
-        postfix = {'loss' : loss.item()}
-        progress.set_postfix(postfix)
-
-        optim.zero_grad()
-        loss.backward()
-        optim.step()
-
-    return input_tensor.detach()
-
-
 def ei_diversity_selection_hsic(
     params,
     preds, #(num_samples, num_candidate_points)
@@ -1409,9 +1335,8 @@ def optimize_model_input(
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     progress = tnrange(params.input_opt_num_iter)
     for step_iter in progress:
-        preds = model_ensemble(input_tensor) # (ack_batch_size, num_samples)
+        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
         assert preds.ndimension() == 2
-        preds = preds.transpose(0, 1)
 
         loss = -torch.mean(preds)
 
@@ -1473,6 +1398,87 @@ def optimize_model_input_pdts(
             progress.set_postfix(postfix)
 
     return input_tensor.detach(), preds.detach()
+
+
+def hsic_mves_loss(
+        X : torch.tensor, # (num_samples, ack_batch_size)
+        opt_values_kernel_matrix : torch.tensor,
+        kernel_fn,
+        do_mean=False
+):
+    assert X.ndimension() == 2
+    num_samples = X.shape[0]
+    ack_batch_size = X.shape[1]
+
+    assert opt_values_kernel_matrix.shape[0] == num_samples
+    assert opt_values_kernel_matrix.shape[1] == num_samples
+
+    if opt_values_kernel_matrix.ndimension() == 2:
+        opt_values_kernel_matrix = opt_values_kernel_matrix.unsqueeze(-1)
+    assert opt_values_kernel_matrix.ndimension() == 3
+    assert opt_values_kernel_matrix.shape[2] == 1
+
+    new_batch_matrix = kernel_fn(X, X, do_mean=do_mean)  # return is of shape (n=num_samples, n, 1)
+    kernels = torch.cat([new_batch_matrix, opt_values_kernel_matrix], dim=-1)
+
+    return hsic.total_hsic(kernels)
+
+
+def acquire_batch_via_grad_hsic(
+    params,
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    input_shape: List[int],
+    opt_values: torch.tensor, # (num_samples, preds)
+    ack_batch_size,
+    do_mean=False,
+    seed: torch.tensor = None,
+    normalize_hsic=True,
+    one_hot=True,
+    input_transform=lambda x : x,
+    jupyter: bool = False,
+) -> torch.tensor:
+
+    print('mves: ack_batch_size', ack_batch_size)
+    if seed is None:
+        input_tensor = torch.randn([ack_batch_size] + input_shape, device=params.device, requires_grad=True)
+    else:
+        assert seed.shape[0] == ack_batch_size
+        input_tensor = torch.tensor(seed, device=device, requires_grad=True)
+
+    if one_hot:
+        assert input_shape.ndimension() == 2
+        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
+    input_tensor = input_transform(input_tensor)
+
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
+    opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
+    opt_normalizer_exp = torch.exp(0.5 * opt_normalizer).detach().item()
+
+    if jupyter:
+        progress = tnrange(params.batch_opt_num_iter)
+    else:
+        progress = trange(params.batch_opt_num_iter)
+
+    for step_iter in progress:
+        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
+        assert preds.ndimension() == 2
+        assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
+        total_hsic = torch.log(total_hsic)
+
+        total_hsic = torch.exp(0.5 * (total_hsic + opt_normalizer))
+
+        if jupyter:
+            postfix = {'loss' : loss.item()}
+            progress.set_postfix(postfix)
+
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return input_tensor.detach()
 
 
 def acquire_batch_pi(
