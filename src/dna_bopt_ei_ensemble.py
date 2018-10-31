@@ -120,6 +120,7 @@ for filename in filenames:
                 gamma=params.gamma,
                 choose_type=params.choose_type,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
+                early_stopping=params.early_stopping
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -314,6 +315,7 @@ for filename in filenames:
                         gamma=params.gamma,
                         choose_type=params.choose_type,
                         normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
+                        early_stopping=params.early_stopping
                         )
 
                     print(filename)

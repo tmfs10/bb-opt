@@ -43,6 +43,7 @@ def add_parse_args(parser):
     parser.add_argument('--retrain_lr', type=float)
     parser.add_argument('--retrain_batch_size', type=int)
     parser.add_argument('--choose_type', type=strlower, help="last/val")
+    parser.add_argument('--early_stopping', type=int)
 
     # model params
     parser.add_argument('--num_hidden', type=int)

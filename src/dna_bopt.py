@@ -107,6 +107,7 @@ def train_ensemble(
         choose_type="last",
         normalize_fn=None,
         val_frac=0.1,
+        early_stopping=10,
         jupyter=False,
 ):
     train_X, train_Y = data
@@ -156,7 +157,9 @@ def train_ensemble(
     best_model = None
     best_optim = None
 
+    time_since_last_best_epoch = 0
     for epoch_iter in progress:
+        time_since_last_best_epoch += 1
         model_ensemble.train()
         for bi in range(num_batches):
             bs = batches[bi]
@@ -210,6 +213,7 @@ def train_ensemble(
                 nll = nll.item()
 
                 if nll < best_nll:
+                    time_since_last_best_epoch = 0
                     best_nll = nll
                     best_model = copy.deepcopy(model_ensemble.state_dict())
                     best_optim = copy.deepcopy(optim.state_dict())
@@ -230,6 +234,7 @@ def train_ensemble(
             val_nlls += [nll]
             val_mses += [mse]
             if choose_type == "val" and nll < best_nll:
+                time_since_last_best_epoch = 0
                 best_nll = nll
                 best_model = copy.deepcopy(model_ensemble.state_dict())
                 best_optim = copy.deepcopy(optim.state_dict())
@@ -239,6 +244,9 @@ def train_ensemble(
             val_corr = kendalltau(means, val_Y)[0]
             val_corrs += [val_corr]
             progress.set_description(f"Corr: {val_corr:.3f}")
+
+        if early_stopping > 0 and choose_type in ("val", "train") and time_since_last_best_epoch > early_stopping:
+            break
 
     if choose_type in ("val", "train"):
         if best_model is not None:
