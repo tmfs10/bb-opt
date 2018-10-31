@@ -24,6 +24,11 @@ def float01(v):
 def str2dist(v):
     return getattr(tdist, v)
 
+def atleast0int(v):
+    v = int(v)
+    assert v >= 0
+    return v
+
 def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
@@ -43,7 +48,8 @@ def add_parse_args(parser):
     parser.add_argument('--retrain_lr', type=float)
     parser.add_argument('--retrain_batch_size', type=int)
     parser.add_argument('--choose_type', type=strlower, help="last/val")
-    parser.add_argument('--early_stopping', type=int)
+    parser.add_argument('--early_stopping', type=int, 
+            help="num early stopping iters. 0 means no early stoppping")
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -55,6 +61,7 @@ def add_parse_args(parser):
     parser.add_argument('--unseen_reg', type=str)
     parser.add_argument('--gamma', type=float, 
             help="maxvar/defmean penalty")
+    parser.add_argument('--take_log', type=str2bool)
 
     # data/output files/folders
     parser.add_argument('--data_dir', type=str)
@@ -98,9 +105,12 @@ def add_parse_args_mves(parser):
 def add_parse_args_grad(parser):
     parser.add_argument('--input_opt_lr', type=float)
     parser.add_argument('--input_opt_num_iter', type=int)
+    parser.add_argument('--hsic_opt_lr', type=float)
+    parser.add_argument('--hsic_opt_num_iter', type=int)
     parser.add_argument('--normalize_hsic', type=str2bool)
     parser.add_argument('--ack_num_model_samples', type=int)
     parser.add_argument('--measure', type=strlower)
+    parser.add_argument('--hsic_kernel_fn', type=str)
 
 
 def add_parse_args_ensemble(parser):

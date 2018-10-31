@@ -119,8 +119,8 @@ for filename in filenames:
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
                 choose_type=params.choose_type,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
-                early_stopping=params.early_stopping
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                early_stopping=params.early_stopping,
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -203,7 +203,7 @@ for filename in filenames:
                                     train_Y.std(),
                                     exp=torch.exp)
 
-                        log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
+                        log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
                                 preds,
                                 torch.sqrt(preds_vars),
                                 standardized_Y,
@@ -214,7 +214,7 @@ for filename in filenames:
                                 )
 
                         print('log_prob_list:', log_prob_list)
-                        print('mse_list:', mse_list)
+                        print('rmse_list:', rmse_list)
                         print('kt_corr_list:', kt_corr_list)
                         print('std_list:', std_list)
                         print('mse_std_corr:', mse_std_corr)
@@ -314,8 +314,8 @@ for filename in filenames:
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
                         choose_type=params.choose_type,
-                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
-                        early_stopping=params.early_stopping
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                        early_stopping=params.early_stopping,
                         )
 
                     print(filename)
@@ -336,7 +336,7 @@ for filename in filenames:
                             ack_all_ei,
                             params.ack_batch_size
                         )
-                    idx_frac = bopt.compute_idx_frac(ack_all_ei, top_idx_frac)
+                    idx_frac = bopt.compute_idx_frac(ack_all_ei, top_frac_idx)
                     s += [idx_frac]
                     s = "\t".join((str(k) for k in s))
 
@@ -353,7 +353,7 @@ for filename in filenames:
                         'ir_batch_ei_idx': torch.from_numpy(ir_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
                         'test_log_prob': torch.tensor(log_prob_list),
-                        'test_mse': torch.tensor(mse_list),
+                        'test_mse': torch.tensor(rmse_list),
                         'test_kt_corr': torch.tensor(kt_corr_list),
                         'test_std_list': torch.tensor(std_list),
                         'test_mse_std_corr': torch.tensor(mse_std_corr),

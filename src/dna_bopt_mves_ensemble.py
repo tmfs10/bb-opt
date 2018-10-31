@@ -359,7 +359,7 @@ for filename in filenames:
                             ack_all_mves,
                             params.ack_batch_size
                         )
-                    idx_frac = bopt.compute_idx_frac(ack_all_mves, top_idx_frac)
+                    idx_frac = bopt.compute_idx_frac(ack_all_mves, top_frac_idx)
                     s += [idx_frac]
                     s = "\t".join((str(k) for k in s))
 

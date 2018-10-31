@@ -17,6 +17,8 @@
 --output_dist_fn Normal
 --train_l2 0.01
 --retrain_l2 0.01
+--early_stopping 10
+--take_log True
 
 --unseen_reg normal
 --gamma 0.0

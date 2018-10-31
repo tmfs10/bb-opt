@@ -62,6 +62,9 @@ for filename in filenames:
     inputs = np.load(filedir+"inputs.npy")
     labels = np.load(filedir+"labels.npy")
 
+    if params.take_log:
+        labels = np.log(labels)
+
     assert len(inputs.shape) == 2
     assert inputs.shape[-1] == 32
 
@@ -127,8 +130,8 @@ for filename in filenames:
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
                 choose_type=params.choose_type,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
-                early_stopping=params.early_stopping
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                early_stopping=params.early_stopping,
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -206,7 +209,7 @@ for filename in filenames:
                                     train_Y_std,
                                     exp=torch.exp)
 
-                        log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
+                        log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
                                 preds,
                                 torch.sqrt(preds_vars),
                                 standardized_Y, 
@@ -217,7 +220,7 @@ for filename in filenames:
                                 )
 
                         print('log_prob_list:', log_prob_list)
-                        print('mse_list:', mse_list)
+                        print('rmse_list:', rmse_list)
                         print('kt_corr_list:', kt_corr_list)
                         print('std_list:', std_list)
                         print('mse_std_corr:', mse_std_corr)
@@ -232,15 +235,16 @@ for filename in filenames:
                     if "pdts" in params.measure:
                         point_probs, _ = bopt.optimize_model_input_pdts(
                                 params, 
-                                list(inputs.shape[-2:]),
-                                model_cur, 
-                                params.ack_num_model_samples,
-                                input_transform=lambda x : x.view(-1),
+                                [8, 4],
+                                model_cur,
+                                params.ack_num_model_samples if "condense" in params.measure else ack_batch_size,
+                                input_transform=lambda x : x.view(x.shape[0], -1),
                                 )
-                        assert point_probs.ndimension() == 2
-                        point_probs = point_probs.view(-1, inputs.shape[-1])
+                        assert point_probs.ndimension() == 3, str(point_probs.shape)
                         point_probs = torch.nn.functional.softmax(point_probs, dim=-1)
-                        points = dbopt.prob_to_number(point_probs, set(input_nums[list(skip_idx_cur)]))
+                        point_probs /= point_probs.sum(dim=-1, keepdim=True)
+
+                        points = dbopt.prob_to_number(point_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)]))
                         points_idx = [input_num_to_index[num] for num in points]
                         opt_values = preds[:, points_idx] # (num_samples, opt_points)
                     elif "ucb" in params.measure:
@@ -248,37 +252,38 @@ for filename in filenames:
                     else:
                         assert False, str(params.measure) + " not implemented"
 
-                    if "condense" in pdts.measure:
+                    if "condense" in params.measure:
                         hsic_batch_probs = bopt.acquire_batch_via_grad_hsic(
                                 params, 
                                 model_cur,
-                                list(inputs.shape[-2:]), 
+                                [8, 4],
                                 opt_values, 
                                 ack_batch_size,
-                                input_transform=lambda x : x.view(-1),
+                                input_transform=lambda x : x.view(x.shape[0], -1),
                                 normalize_hsic=params.normalize_hsic,
                                 )
-                        hsic_batch_probs = hsic_batch_probs.view(-1, inputs.shape[-1])
+                        assert hsic_batch_probs.ndimension() == 3, str(hsic_batch_probs.shape)
                         hsic_batch_probs = torch.nn.functional.softmax(hsic_batch_probs, dim=-1)
-                        hsic_points = dbopt.prob_to_number(hsic_batch_probs, set(input_nums[list(skip_idx_cur)]))
+                        hsic_batch_probs /= hsic_batch_probs.sum(dim=-1, keepdim=True)
+
+                        hsic_points = dbopt.prob_to_number(hsic_batch_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)]))
                         hsic_idx = [input_num_to_index[num] for num in hsic_points]
                         cur_ack_idx = hsic_idx
                     else:
                         cur_ack_idx = points_idx
 
-                    print('points_idx', points_idx)
-                    print('cur_ack_idx', cur_ack_idx)
+                    #print('points_idx', points_idx)
+                    #print('cur_ack_idx', cur_ack_idx)
                     print('intersection size', len(set(cur_ack_idx).intersection(set(points_idx))))
 
                     assert len(cur_ack_idx) == ack_batch_size
 
-                    print('ei_labels', labels[points_idx])
-                    print('hsic_labels', labels[cur_ack_idx])
+                    #print('points_labels', labels[points_idx])
+                    #print('cur_ack_idx_labels', labels[cur_ack_idx])
 
                     skip_idx_cur.update(cur_ack_idx)
                     ack_all_cur.update(cur_ack_idx)
                     print('num_ack:', len(cur_ack_idx), 'num_skip:', len(skip_idx_cur), 'num_all_ack:', len(ack_all_cur))
-                    cur_ack_idx = torch.tensor(mves_idx).to(params.device)
 
                     new_idx = list(skip_idx_cur)
                     random.shuffle(new_idx)
@@ -301,8 +306,8 @@ for filename in filenames:
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
                         choose_type=params.choose_type,
-                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
-                        early_stopping=params.early_stopping
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                        early_stopping=params.early_stopping,
                         )
 
                     print(filename)
@@ -323,7 +328,7 @@ for filename in filenames:
                     #        ack_all_cur,
                     #        params.ack_batch_size
                     #    )
-                    idx_frac = bopt.compute_idx_frac(ack_all_cur, top_idx_frac)
+                    idx_frac = bopt.compute_idx_frac(ack_all_cur, top_frac_idx)
                     s = "\t".join((str(k) for k in idx_frac))
 
                     print(s)
@@ -336,12 +341,12 @@ for filename in filenames:
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
                         'diversity': len(set(sorted_preds_idx[:, -1:].flatten())),
-                        'ir_batch': torch.from_numpy(ir),
-                        'ir_batch_idx': torch.from_numpy(ir_sortidx),
+                        #'ir_batch': torch.from_numpy(ir),
+                        #'ir_batch_idx': torch.from_numpy(ir_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
                         'points_idx': torch.tensor(points_idx),
                         'test_log_prob': torch.tensor(log_prob_list),
-                        'test_mse': torch.tensor(mse_list),
+                        'test_mse': torch.tensor(rmse_list),
                         'test_kt_corr': torch.tensor(kt_corr_list),
                         'test_std_list': torch.tensor(std_list),
                         'test_mse_std_corr': torch.tensor(mse_std_corr),

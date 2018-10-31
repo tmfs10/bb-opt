@@ -246,6 +246,7 @@ def train_ensemble(
             progress.set_description(f"Corr: {val_corr:.3f}")
 
         if early_stopping > 0 and choose_type in ("val", "train") and time_since_last_best_epoch > early_stopping:
+            assert epoch_iter >= early_stopping
             break
 
     if choose_type in ("val", "train"):
@@ -293,7 +294,7 @@ def prob_to_number(inputs, ack_inputs):
     assert len(inputs.shape) == 3
     data = set()
 
-    arr = np.array(inputs.shape[-1], dtype=np.int32)+1
+    arr = np.arange(inputs.shape[-1], dtype=np.int32)+1
     rev_compl_mapping = [4, 3, 2, 1]
     for i in range(inputs.shape[0]):
         while True:

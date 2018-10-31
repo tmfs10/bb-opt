@@ -1338,30 +1338,31 @@ def optimize_model_input_pdts(
         input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
 
-    if one_hot:
-        assert len(input_shape) == 2
-        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
-    input_tensor = input_transform(input_tensor)
+    if jupyter:
+        progress = tnrange(params.input_opt_num_iter)
+    else:
+        progress = trange(params.input_opt_num_iter)
 
-    progress = tnrange(params.input_opt_num_iter)
     for step_iter in progress:
-        preds = model_ensemble(input_tensor, all_pairs=False) # (num_samples,)
+        if one_hot:
+            assert len(input_shape) == 2
+            input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+        input_tensor2 = input_transform(input_tensor)
+        preds, _ = model_ensemble(input_tensor2, all_pairs=False) # (num_samples,)
         assert preds.ndimension() == 1
         assert preds.shape[0] == num_points_to_optimize
 
         loss = -torch.mean(preds)
 
-        postfix = {'normal_loss' : loss.item()}
         optim.zero_grad()
         loss.backward()
         optim.step()
-        if jupyter:
-            progress.set_postfix(postfix)
+        progress.set_description("normal_loss: %2.6f" % (loss.item()))
 
     return input_tensor.detach(), preds.detach()
 
 
-def hsic_mves_loss(
+def two_dist_hsic(
         X : torch.tensor, # (num_samples, ack_batch_size)
         opt_values_kernel_matrix : torch.tensor,
         kernel_fn,
@@ -1405,29 +1406,29 @@ def acquire_batch_via_grad_hsic(
     else:
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
-    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
+    optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
 
-    if one_hot:
-        assert input_shape.ndimension() == 2
-        input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
-    input_tensor = input_transform(input_tensor)
-
-    kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
+    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
     opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
     opt_normalizer_exp = torch.exp(0.5 * opt_normalizer).detach().item()
 
     if jupyter:
-        progress = tnrange(params.batch_opt_num_iter)
+        progress = tnrange(params.hsic_opt_num_iter)
     else:
-        progress = trange(params.batch_opt_num_iter)
+        progress = trange(params.hsic_opt_num_iter)
 
     for step_iter in progress:
-        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
-        assert preds.ndimension() == 2
-        assert opt_kernel_matrix.shape[0] == preds.shape[1], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+        if one_hot:
+            assert len(input_shape) == 2
+            input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+        input_tensor2 = input_transform(input_tensor)
 
-        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
+        preds, _ = model_ensemble(input_tensor2) # (num_samples, ack_batch_size)
+        assert preds.ndimension() == 2
+        assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+
+        total_hsic = two_dist_hsic(preds, opt_kernel_matrix, kernel_fn, do_mean)
 
         if normalize_hsic:
             total_hsic = total_hsic.log()
@@ -1436,11 +1437,9 @@ def acquire_batch_via_grad_hsic(
             total_hsic = total_hsic - 0.5*(self_hsic_log+opt_normalizer)
             total_hsic = total_hsic.exp()
 
-        loss = total_hsic
+        loss = -total_hsic
 
-        if jupyter:
-            postfix = {'loss' : loss.item()}
-            progress.set_postfix(postfix)
+        progress.set_description("hsic_loss: %1.5f" % (loss.item()))
 
         optim.zero_grad()
         loss.backward()

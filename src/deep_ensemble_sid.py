@@ -201,7 +201,7 @@ class NNEnsemble(torch.nn.Module):
             for batch_iter in range(len(batches)-1):
                 bs = batches[batch_iter]
                 be = batches[batch_iter+1]
-                assert be-bs > 0
+                assert be-bs > 0, str(be) + "-" + str(bs) + "; " + str(batch_iter) + "; " + str(batches) + "; " + str(N) + "; " + str(m)
 
                 bmeans, bvariances = self.models[batch_iter](x[bs:be])
                 means += [bmeans]
