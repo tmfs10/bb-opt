@@ -154,6 +154,7 @@ def train_ensemble(
 
     best_nll = float('inf')
     best_model = None
+    best_optim = None
 
     for epoch_iter in progress:
         model_ensemble.train()
@@ -231,6 +232,7 @@ def train_ensemble(
             if choose_type == "val" and nll < best_nll:
                 best_nll = nll
                 best_model = copy.deepcopy(model_ensemble.state_dict())
+                best_optim = copy.deepcopy(optim.state_dict())
 
             means = means.mean(0)
             assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
@@ -257,29 +259,48 @@ def train_ensemble(
     return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std], optim
 
 
-def one_hot_to_number(one_hot, arr):
-    num = 0
-    for j in range(one_hot.shape[0]):
-        digit = np.dot(arr, inputs[i, j])
-        num *= (j+1)
-        num += digit
-
-
-def one_hot_list_to_number(inputs):
-    data = {}
-    arr = np.array(inputs.shape[2], dtype=np.int32)
+def one_hot_list_to_number(inputs, data=None):
+    assert len(inputs.shape) >= 3
+    if data is None:
+        data = []
+        data_dict = {}
+    arr = np.arange(inputs.shape[-1], dtype=np.int32)+1
     for i in range(inputs.shape[0]):
         num = 0
-        for j in range(inputs.shape[1]):
-            digit = np.dot(arr, inputs[i, j])
+        rev = 0
+        for j in range(inputs.shape[-2]):
+            digit = int(np.dot(arr, inputs[i, j]))
             num *= (j+1)
             num += digit
-        data[num] = i
+            rev *= (j+1)
+            rev += arr[4-digit]
+
+        data += [num]
+        data_dict[num] = i
+        data_dict[rev] = i
+    return data, data_dict
+
+
+def prob_to_number(inputs, ack_inputs):
+    assert len(inputs.shape) == 3
+    data = set()
+
+    arr = np.array(inputs.shape[-1], dtype=np.int32)+1
+    rev_compl_mapping = [4, 3, 2, 1]
+    for i in range(inputs.shape[0]):
+        while True:
+            num = 0
+            rev = 0
+            for j in range(inputs.shape[-2]):
+                digit = np.random.choice(arr, p=inputs[i, j])
+                num *= (j+1)
+                num += digit
+                rev *= (j+1)
+                rev += arr[4-digit]
+            if num not in ack_inputs and rev not in ack_inputs and num not in data and rev not in data:
+                data.add(num)
+                break
     return data
-
-
-def prob_to_number(inputs):
-    pass
 
 
 def train(

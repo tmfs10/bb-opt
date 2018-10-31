@@ -16,7 +16,6 @@ from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
-from bb_opt.src.bo_model import BOModel
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -146,7 +145,7 @@ def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
             module.bias.data.uniform_(min_val, max_val)
 
 
-class NNEnsemble(BOModel, torch.nn.Module):
+class NNEnsemble(torch.nn.Module):
     """
     Ensemble of `NN`s, trained individually but whose predictions can be combined.
     Adversarial training will be used if `adversarial_epsilon` is not `None`.
@@ -199,7 +198,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
 
             means = []
             variances = []
-            for batch_iter in range(batches-1):
+            for batch_iter in range(len(batches)-1):
                 bs = batches[batch_iter]
                 be = batches[batch_iter+1]
                 assert be-bs > 0

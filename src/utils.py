@@ -114,10 +114,7 @@ def random_points(bounds: np.ndarray, ndim: int, n_points: int) -> np.ndarray:
     return points
 
 
-def get_path(*path_segments):
-    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
-
-
+get_path = non_matplotlib_utils.get_path
 logp = non_matplotlib_utils.logp
 qed = non_matplotlib_utils.qed
 sas = non_matplotlib_utils.sas

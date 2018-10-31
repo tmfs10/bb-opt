@@ -15,8 +15,8 @@
 --num_hidden 100
 --sigmoid_coeff 1.0
 --output_dist_fn Normal
---train_l2 0.035
---retrain_l2 0.035
+--train_l2 0.01
+--retrain_l2 0.01
 
 --unseen_reg normal
 --gamma 0.0

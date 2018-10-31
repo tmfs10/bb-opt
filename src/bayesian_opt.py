@@ -46,7 +46,7 @@ from bb_opt.src.hsic import (
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src import ops
-from bb_opt.src.utils import get_path
+from bb_opt.src.non_matplotlib_utils import get_path
 from bb_opt.src.bo_model import BOModel
 from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
 
@@ -1187,6 +1187,7 @@ def acquire_batch_mves_sid(
                     normalizer = torch.exp(hsic_logvar + 0.5 * opt_normalizer)
                 else:
                     normalizer = torch.exp(0.5 * (hsic_logvar + opt_normalizer))
+                assert total_hsic.shape[0] == normalizer.shape[0]
                 total_hsic /= normalizer
 
             sorted_idx = total_hsic.cpu().numpy().argsort()
@@ -1296,6 +1297,12 @@ def optimize_model_input(
         if hsic_diversity_lambda > 1e-9:
             kernels = hsic.dimwise_mixrq_kernels(preds)
             total_hsic = hsic.total_hsic(kernels)
+
+            if normalize_hsic:
+                normalizer = hsic.total_hsic_parallel(kernels.permute(2, 0, 1).unsqueeze(-1).repeat([1, 1, 1, 2])).view(-1)
+                normalizer = torch.exp(normalizer.log().sum()*0.5)
+                total_hsic /= normalizer
+
             loss += hsic_diversity_lambda*total_hsic
             postfix['hsic_loss'] = total_hsic.item()
             postfix['hsic_loss_real'] = (hsic_diversity_lambda*total_hsic).item()
@@ -1319,6 +1326,7 @@ def optimize_model_input_pdts(
     num_points_to_optimize,
     seed=None,
     one_hot=True,
+    input_transform=lambda x : x,
     jupyter=False,
 ):
     assert num_points_to_optimize > 1
@@ -1328,12 +1336,13 @@ def optimize_model_input_pdts(
         assert seed.ndimension() == 2
         assert seed.shape[0] == num_points_to_optimize
         input_tensor = torch.tensor(seed, device=params.device, requires_grad=True)
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
 
     if one_hot:
-        assert input_shape.ndimension() == 2
+        assert len(input_shape) == 2
         input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
+    input_tensor = input_transform(input_tensor)
 
-    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     progress = tnrange(params.input_opt_num_iter)
     for step_iter in progress:
         preds = model_ensemble(input_tensor, all_pairs=False) # (num_samples,)
@@ -1396,13 +1405,13 @@ def acquire_batch_via_grad_hsic(
     else:
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
+    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
 
     if one_hot:
         assert input_shape.ndimension() == 2
         input_tensor = torch.nn.functional.softmax(input_tensor, dim=-1)
     input_tensor = input_transform(input_tensor)
 
-    optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     kernel_fn = getattr(hsic, "two_vec_" + params.mves_kernel_fn)
     opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
     opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
@@ -1416,11 +1425,18 @@ def acquire_batch_via_grad_hsic(
     for step_iter in progress:
         preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
         assert preds.ndimension() == 2
-        assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
-        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
-        total_hsic = torch.log(total_hsic)
+        assert opt_kernel_matrix.shape[0] == preds.shape[1], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
 
-        total_hsic = torch.exp(0.5 * (total_hsic + opt_normalizer))
+        total_hsic = hsic_mves_loss(preds, opt_kernel_matrix, kernel_fn, do_mean)
+
+        if normalize_hsic:
+            total_hsic = total_hsic.log()
+            self_kernel_matrix = hsic.two_vec_mixrq_kernels(preds)
+            self_hsic_log = hsic.total_hsic(self_kernel_matrix.repeat([1, 1, 2])).log()
+            total_hsic = total_hsic - 0.5*(self_hsic_log+opt_normalizer)
+            total_hsic = total_hsic.exp()
+
+        loss = total_hsic
 
         if jupyter:
             postfix = {'loss' : loss.item()}
@@ -1580,7 +1596,6 @@ def compute_ir_regret_ensemble(
         X,
         Y,
         ack_all,
-        top_frac_idx,
         ack_batch_size,
 ):
     preds, _ = model_ensemble(X) # (num_candidate_points, num_samples)
@@ -1591,14 +1606,10 @@ def compute_ir_regret_ensemble(
     best_10 = np.sort(Y[ack])[-10:]
     best_batch_size = np.sort(Y[ack])[-ack_batch_size:]
 
+    s = [best_10.mean(), best_10.max(), best_batch_size.mean(), best_batch_size.max()]
+
+    return s, ei, ei_sortidx
+
+def compute_idx_frac(ack_all, top_frac_idx):
     idx_frac = [len(ack_all.intersection(k))/len(k) for k in top_frac_idx]
-
-    s = "\t".join([str(k) for k in [
-        best_10.mean(),
-        best_10.max(),
-        best_batch_size.mean(),
-        best_batch_size.max(),
-        str(idx_frac)
-        ]])
-
-    return s, idx_frac, ei, ei_sortidx
+    return idx_frac

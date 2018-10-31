@@ -327,14 +327,16 @@ for filename in filenames:
                     print('best so far:', labels[ack_array].max())
                     
                     # inference regret computation using retrained ensemble
-                    s, idx_frac, ir_ei, ir_ei_sortidx = bopt.compute_ir_regret_ensemble(
+                    s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
                             model_ei,
                             X,
                             labels,
                             ack_all_ei,
-                            top_frac_idx,
                             params.ack_batch_size
                         )
+                    idx_frac = bopt.compute_idx_frac(ack_all_ei, top_idx_frac)
+                    s += [idx_frac]
+                    s = "\t".join((str(k) for k in s))
 
                     print(s)
                     f.write(s + "\n")
@@ -345,8 +347,8 @@ for filename in filenames:
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
-                        'ir_batch_ei': torch.from_numpy(ei),
-                        'ir_batch_ei_idx': torch.from_numpy(ei_sortidx),
+                        'ir_batch_ei': torch.from_numpy(ir),
+                        'ir_batch_ei_idx': torch.from_numpy(ir_sortidx),
                         'idx_frac': torch.tensor(idx_frac),
                         'test_log_prob': torch.tensor(log_prob_list),
                         'test_mse': torch.tensor(mse_list),

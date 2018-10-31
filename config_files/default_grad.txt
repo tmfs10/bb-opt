@@ -15,8 +15,8 @@
 --num_hidden 100
 --sigmoid_coeff 1.0
 --output_dist_fn Normal
---train_l2 0.035
---retrain_l2 0.035
+--train_l2 0.01
+--retrain_l2 0.01
 
 --unseen_reg normal
 --gamma 0.0
@@ -26,7 +26,7 @@
 --output_dir ../experiments/ensemble/o
 --num_test_tfs 10
 
---ack_batch_size 100
+--ack_batch_size 40
 --num_acks 10
 
 --single_gaussian_test_nll True
@@ -34,3 +34,6 @@
 
 --input_opt_lr 0.001
 --input_opt_num_iter 100
+--normalize_hsic True
+--ack_num_model_samples 200
+--measure pdts_condense

@@ -81,22 +81,9 @@ for filename in filenames:
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
 
-    val_inputs = inputs[val_idx]
-    val_labels = labels[val_idx]
-
     top_frac_idx = [set(labels_sort_idx[-int(labels.shape[0]*per):].tolist()) for per in [0.01, 0.05, 0.1, 0.2]]
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
-
-    train_Y_mean = float(train_labels.mean())
-    train_Y_std = float(train_labels.std())
-
-    if params.sigmoid_coeff > 0:
-        train_labels = utils.sigmoid_standardization(train_labels, train_Y_mean, train_Y_std)
-        val_labels = utils.sigmoid_standardization(val_labels, train_Y_mean, train_Y_std)
-    else:
-        train_labels = utils.normal_standardization(train_labels, train_Y_mean, train_Y_std)
-        val_labels = utils.normal_standardization(val_labels, train_Y_mean, train_Y_std)
 
     train_X = torch.FloatTensor(train_inputs).to(device)
     train_Y = torch.FloatTensor(train_labels).to(device)
@@ -127,6 +114,7 @@ for filename in filenames:
                 unseen_reg=params.unseen_reg,
                 gamma=params.gamma,
                 choose_type=params.choose_type,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
                 )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
@@ -195,14 +183,14 @@ for filename in filenames:
                     if params.sigmoid_coeff > 0:
                         standardized_Y = utils.sigmoid_standardization(
                                 Y,
-                                train_Y_mean,
-                                train_Y_std,
+                                Y.mean(),
+                                Y.std(),
                                 exp=torch.exp)
                     else:
                         standardized_Y = utils.normal_standardization(
                                 Y,
-                                train_Y_mean,
-                                train_Y_std,
+                                Y.mean(),
+                                Y.std(),
                                 exp=torch.exp)
 
                     log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
@@ -335,24 +323,6 @@ for filename in filenames:
                     train_X_mves = X.new_tensor(X[new_idx])
                     train_Y_mves = Y.new_tensor(Y[new_idx])
 
-                    train_Y_mean = train_Y_mves.mean()
-                    train_Y_std = train_Y_mves.std()
-
-                    if params.sigmoid_coeff > 0:
-                        train_Y_mves = utils.sigmoid_standardization(
-                                train_Y_mves, 
-                                train_Y_mean, 
-                                train_Y_std, 
-                                exp=torch.exp)
-                        val_Y = utils.sigmoid_standardization(Y[val_idx], train_Y_mean, train_Y_std, exp=torch.exp)
-                    else:
-                        train_Y_mves = utils.normal_standardization(
-                                train_Y_mves, 
-                                train_Y_mean, 
-                                train_Y_std, 
-                                exp=torch.exp)
-                        val_Y = utils.normal_standardization(Y[val_idx], train_Y_mean, train_Y_std, exp=torch.exp)
-
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_mves.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_mves.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_mves.shape[0] == train_X_mves.shape[0]
@@ -368,6 +338,7 @@ for filename in filenames:
                         unseen_reg=params.unseen_reg,
                         gamma=params.gamma,
                         choose_type=params.choose_type,
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
                         )
 
                     print(filename)
@@ -381,14 +352,16 @@ for filename in filenames:
                     print('best so far:', labels[ack_array].max())
 
                     # inference regret computation using retrained ensemble
-                    s, idx_frac, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
+                    s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
                             model_mves,
                             X,
                             labels,
                             ack_all_mves,
-                            top_frac_idx,
                             params.ack_batch_size
                         )
+                    idx_frac = bopt.compute_idx_frac(ack_all_mves, top_idx_frac)
+                    s += [idx_frac]
+                    s = "\t".join((str(k) for k in s))
 
                     print(s)
                     f.write(s + "\n")

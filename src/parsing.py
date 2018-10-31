@@ -97,6 +97,9 @@ def add_parse_args_mves(parser):
 def add_parse_args_grad(parser):
     parser.add_argument('--input_opt_lr', type=float)
     parser.add_argument('--input_opt_num_iter', type=int)
+    parser.add_argument('--normalize_hsic', type=str2bool)
+    parser.add_argument('--ack_num_model_samples', type=int)
+    parser.add_argument('--measure', type=strlower)
 
 
 def add_parse_args_ensemble(parser):
