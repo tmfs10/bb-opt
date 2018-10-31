@@ -13,7 +13,7 @@ import pyro
 import torch
 from sklearn.model_selection import train_test_split
 
-import non_matplotlib_utils # utils giving Sid segfault cuz of matplotlib import when used from command-line
+from bb_opt.src import non_matplotlib_utils # utils giving Sid segfault cuz of matplotlib import when used from command-line
 
 _Input_Labels = namedtuple("Input_Labels", ["inputs", "labels"])
 _Dataset = namedtuple("Dataset", ["train", "val", "test"])
@@ -233,7 +233,7 @@ def load_data_saber(
         val_inputs = val_labels = None
 
     if standardize_labels:
-	
+
         train_label_mean = train_labels.mean()
         train_label_std = train_labels.std()
 

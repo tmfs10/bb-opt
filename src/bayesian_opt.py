@@ -46,28 +46,9 @@ from bb_opt.src.hsic import (
 import bb_opt.src.hsic as hsic
 from bb_opt.src.knn_mi import estimate_mi
 from bb_opt.src import ops
-from bb_opt.src.bnn import make_bnn_model, make_guide
-
-def get_path(*path_segments):
-    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
-
-def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
-    os.makedirs(os.path.dirname(fname), exist_ok=True)
-
-    checkpoint = {"model_state": model.state_dict()}
-    if optimizer:
-        checkpoint["optimizer_state"] = optimizer.state_dict()
-
-    torch.save(checkpoint, fname)
-
-
-N_HIDDEN = 100
-NON_LINEARITY = "ReLU"
-SVI = None
-
-InputType = torch.Tensor
-LabelType = torch.Tensor
-ModelType = Callable[[InputType], LabelType]
+from bb_opt.src.utils import get_path
+from bb_opt.src.bo_model import BOModel
+from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
 
 def ExtendedGamma(shape, scale, ndimension=0):
     device = "cuda" if scale.is_cuda else "cpu"
@@ -209,14 +190,9 @@ def iaf_variationals(
 
 
 def optimize(
-    # TODO: how to do the typing for inputs to `get_model`? needs batch_size and device somewhere
-    get_model: Callable[..., ModelType],
-    # TODO: need a similar typing update for acquisition (some required args, can be any other optional ones too)
-    acquisition_func: Callable[
-        [ModelType, InputType, LabelType, Set[int], int], Iterable[int]
-    ],
-    train_model: Callable[[ModelType, InputType, LabelType], None],
-    inputs: Union[torch.Tensor, np.ndarray],
+    model: BOModel,
+    acquisition_func: AcquisitionFunction,
+    inputs: np.ndarray,
     labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
     batch_size: int = 256,
@@ -224,53 +200,37 @@ def optimize(
     device: Optional[torch.device] = None,
     verbose: bool = False,
     exp: Optional = None,
-    acquisition_args: Optional[dict] = None,
     n_batches: int = -1,
     retrain_every: int = 1,
-    partial_train_steps: int = 10,
-    partial_train_func: Optional[Callable] = None,
+    partial_train_epochs: int = 10,
     save_key: str = "",
-    acquisition_func_greedy: Optional[Callable] = None,
+    acquisition_func_greedy: Optional[AcquisitionFunction] = None,
 ) -> np.ndarray:
 
-    acquisition_args = acquisition_args or {}
-    acquisition_func_greedy = acquisition_func_greedy or acquisition_func
     n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
+    if save_key and exp:
+        save_key += "_" + exp.get_key()[:5]
 
     if isinstance(labels, pd.Series):
         labels = labels.values
-
-    if not isinstance(inputs, torch.Tensor):
-        inputs = torch.tensor(inputs).float()
-
-    if device and inputs.device != device:
-        inputs = inputs.to(device)
 
     n_top_k_percent = int(top_k_percent / 100 * len(labels))
     best_idx = set(labels.argsort()[-n_top_k_percent:])
     sum_best = np.sort(labels)[-n_top_k_percent:].sum()
     best_value = np.sort(labels)[-1]
 
-    labels = torch.tensor(labels).float()
-    if device and labels.device != device:
-        labels = labels.to(device)
-
     try:
-        model = get_model(
-            n_inputs=inputs.shape[1], batch_size=batch_size, device=device
-        )
         sampled_idx = set()
         fraction_best_sampled = []
 
         for step in range(n_batches):
             if step == 0:
-                acquire_samples = acquire_batch_uniform(
+                acquire_samples = Uniform.acquire(
                     model,
                     inputs,
                     labels[list(sampled_idx)],
                     sampled_idx,
                     batch_size,
-                    exp=exp,
                 )
             else:
                 acquire_samples = acquisition_func(
@@ -279,19 +239,18 @@ def optimize(
                     labels[list(sampled_idx)],
                     sampled_idx,
                     batch_size,
-                    exp=exp,
-                    **acquisition_args,
                 )
 
-            acquire_samples_greedy = acquisition_func_greedy(
-                model,
-                inputs,
-                labels[list(sampled_idx)],
-                sampled_idx,
-                batch_size,
-                exp=exp,
-                **acquisition_args,
-            )
+            if acquisition_func_greedy:
+                acquire_samples_greedy = acquisition_func_greedy(
+                    model,
+                    inputs,
+                    labels[list(sampled_idx)],
+                    sampled_idx,
+                    batch_size,
+                )
+            else:
+                acquire_samples_greedy = acquire_samples
 
             greedy_sampled_idx = sampled_idx.copy()
             sampled_idx.update(acquire_samples)
@@ -308,9 +267,9 @@ def optimize(
             if exp:
                 sampled_labels = labels[list(greedy_sampled_idx)]
                 sampled_sum_best = (
-                    sampled_labels.sort()[0][-n_top_k_percent:].sum().item()
+                    np.sort(sampled_labels)[-n_top_k_percent:].sum()
                 )
-                sampled_best_value = sampled_labels.max().item()
+                sampled_best_value = sampled_labels.max()
 
                 exp.log_metric("fraction_best", fraction_best, step * batch_size)
                 exp.log_metric("best_value", sampled_best_value, step * batch_size)
@@ -327,39 +286,32 @@ def optimize(
                 break
 
             if step % retrain_every == 0:
-                train_model(
-                    model,
+                model.reset()
+                model.train_model(
                     inputs[list(sampled_idx)],
                     labels[list(sampled_idx)],
                     n_epochs,
-                    batch_size,
                 )
             else:
-                if partial_train_func:
-                    partial_train_func(
-                        model,
-                        inputs[list(acquire_samples)],
-                        labels[list(acquire_samples)],
-                        partial_train_steps,
-                    )
+                model.train_model(
+                    inputs[acquire_samples],
+                    labels[acquire_samples],
+                    partial_train_epochs,
+                )
 
             if save_key:
                 save_fname = get_path(
                     __file__, "..", "..", "models_nathan", save_key, step
                 )
 
-                if "de" in save_key:
-                    save_checkpoint(f"{save_fname}.pth", model)
-                elif "bnn" in save_key:
-                    pyro.get_param_store().save(f"{save_fname}.params")
-
+                model.save_model(save_fname)
         assert (len(sampled_idx) == min(len(labels), batch_size * n_batches)) or (
             fraction_best == 1.0
         )
     except KeyboardInterrupt:
         pass
 
-    return model, SVI
+    return model
 
 
 def get_model_uniform(*args, **kwargs):
@@ -367,9 +319,9 @@ def get_model_uniform(*args, **kwargs):
 
 
 def acquire_batch_uniform(
-    model: ModelType,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    model,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -404,9 +356,9 @@ def get_model_nn(n_inputs: int = 512, batch_size: int = 200, device: Optional = 
 
 
 def acquire_batch_nn_greedy(
-    model: ModelType,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    model,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -493,8 +445,8 @@ def get_model_bnn_extended_gamma(
 
 def acquire_batch_ei(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -522,8 +474,8 @@ def acquire_batch_ei(
 
 def acquire_batch_pdts(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -553,8 +505,8 @@ def acquire_batch_pdts(
 
 def acquire_batch_hsic_mean_std(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -637,8 +589,8 @@ def acquire_batch_hsic_mean_std(
 
 def acquire_batch_hsic_pdts(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -711,8 +663,8 @@ def acquire_batch_hsic_pdts(
 
 def acquire_batch_mves(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -738,8 +690,8 @@ def acquire_batch_mves(
 
 def acquire_batch_es(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     n_points_parallel: int = 100,
@@ -1483,8 +1435,8 @@ def acquire_batch_via_grad_hsic(
 
 def acquire_batch_pi(
     model,
-    inputs: InputType,
-    sampled_labels: LabelType,
+    inputs,
+    sampled_labels,
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
@@ -1602,7 +1554,7 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
             log_prob_list += [torch.mean(-output_dist.log_prob(labels2)).item()]
         else:
             output_dist = output_dist_fn(
-                    preds[:, labels_sort_idx].view(-1), 
+                    preds[:, labels_sort_idx].view(-1),
                     std[:, labels_sort_idx].view(-1))
             log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
 
@@ -1642,9 +1594,9 @@ def compute_ir_regret_ensemble(
     idx_frac = [len(ack_all.intersection(k))/len(k) for k in top_frac_idx]
 
     s = "\t".join([str(k) for k in [
-        best_10.mean(), 
-        best_10.max(), 
-        best_batch_size.mean(), 
+        best_10.mean(),
+        best_10.max(),
+        best_batch_size.mean(),
         best_batch_size.max(),
         str(idx_frac)
         ]])
