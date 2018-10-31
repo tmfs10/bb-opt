@@ -71,25 +71,45 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
 
-def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
-    if X1.ndimension() == 1:
-        X1 = X1.unsqueeze(-1).unsqueeze(-1)
-    elif X1.ndimension() == 2:
-        X1 = X1.unsqueeze(1)
+def two_vec_mixrbf_kernels(X1, X2=None, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
+    # input is of shape (n,) or (n, k)
+    # output is of shape (n, n, 1)
+    if X2 is None:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
 
-    if X2.ndimension() == 1:
-        X2 = X2.unsqueeze(-1).unsqueeze(-1)
-    elif X2.ndimension() == 2:
-        X2 = X2.unsqueeze(1)
+        assert X1.ndimension() == 3
 
-    assert X1.ndimension() == 3
-    assert X2.ndimension() == 3
+        dist_matrix = sqdist(X1, do_mean=do_mean)
+        assert dist_matrix.shape[0] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[1] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[2] == 1, str(dist_matrix.shape)
 
-    dist_matrix = sqdist(X1, X2, do_mean)
-    return mixrbf_kernels(dist_matrix, bws, weights)
+        # (n, n, 1)
+        return mixrbf_kernels(dist_matrix, bws, weights)
+    else:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
+
+        if X2.ndimension() == 1:
+            X2 = X2.unsqueeze(-1).unsqueeze(-1)
+        elif X2.ndimension() == 2:
+            X2 = X2.unsqueeze(1)
+
+        assert X1.ndimension() == 3
+        assert X2.ndimension() == 3
+
+        dist_matrix = sqdist(X1, X2, do_mean)
+        return mixrbf_kernels(dist_matrix, bws, weights)
 
 
 def two_vec_mixrq_kernels(X1, X2=None, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
+    # input is of shape (n,) or (n, k)
+    # output is of shape (n, n, 1)
     if X2 is None:
         if X1.ndimension() == 1:
             X1 = X1.unsqueeze(-1).unsqueeze(-1)
@@ -248,6 +268,8 @@ def total_hsic_parallel(kernels):
     """
     kernels should be shape (m, n, n, d) to test for total
     independence among d variables with n paired samples for m sets.
+
+    output is of shape (m,)
     """
     assert kernels.ndimension() == 4
     shp = kernels.shape
