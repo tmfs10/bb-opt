@@ -37,6 +37,5 @@ configure.scan
 data
 experiments
 slurm*
-config_*
 .ipynb_checkpoints
 .vscode
