@@ -40,3 +40,5 @@ slurm*
 config_*
 .ipynb_checkpoints
 .vscode
+.pylintrc
+models_nathan

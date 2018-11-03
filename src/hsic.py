@@ -56,6 +56,9 @@ def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
 
 def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     # input is (n, n, d), output is also (n, n, d)
+    if dist_matrix.ndimension() == 4:
+        return mixrq_kernels2(dist_matrix, alphas, weights)
+
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
     #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
@@ -69,6 +72,23 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     #assert not ops.is_nan(logs)
     #assert (logs.contiguous().view(-1) < 0).sum() == 0
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
+
+
+def mixrq_kernels2(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
+    # input is (m, n, n, d), output is also (m, n, n, d)
+    assert dist_matrix.ndimension() == 4, str(dist_matrix.shape)
+    #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
+    dist_matrix = dist_matrix.unsqueeze(1)
+    weights = weights or 1.0 / len(alphas)
+    weights = weights * dist_matrix.new_ones(len(alphas))
+    alphas = dist_matrix.new_tensor(alphas).view(1, -1, 1, 1, 1)
+
+    logs = torch.log1p(dist_matrix / (2 * alphas))
+    #     assert torch.isfinite(logs).all()
+    #assert not ops.is_inf(logs)
+    #assert not ops.is_nan(logs)
+    #assert (logs.contiguous().view(-1) < 0).sum() == 0
+    return torch.einsum("w,mwijd->mijd", (weights, torch.exp(-alphas * logs)))
 
 
 def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
@@ -259,7 +279,7 @@ def total_hsic_parallel(kernels):
 
     log_n = torch.log(n)
     log_2 = torch.log(kernels.new_tensor(2))
-    log_kernels = kernels.log_()
+    log_kernels = kernels.log()
     log_sum_b = log_kernels.logsumexp(dim=2)
 
     l1 = log_kernels.sum(dim=3).logsumexp(dim=2).logsumexp(dim=1) - 2 * log_n
@@ -314,7 +334,7 @@ def precompute_batch_hsic_stats(
 
     batch_kernels = [kernel(pred) for pred in preds]
     batch_kernels = torch.cat(batch_kernels, dim=-1)
-    batch_kernels.log_()
+    batch_kernels.log()
     batch_kernels = batch_kernels.unsqueeze(-1)
 
     batch_sum_b = batch_kernels.logsumexp(dim=1)
@@ -336,13 +356,13 @@ def compute_point_hsics(
     if not isinstance(preds, Sequence):
         preds = [preds]
 
-    log_n = preds[0].new_tensor(len(batch_sum_b)).log_()
+    log_n = preds[0].new_tensor(len(batch_sum_b)).log()
     d = preds[0].new_tensor(batch_sum_b.shape[1] + 1)
-    log_2 = preds[0].new_tensor(2).log_()
+    log_2 = preds[0].new_tensor(2).log()
 
     point_kernels = [kernel(pred[:, next_points]) for pred in preds]
     point_kernels = torch.cat(point_kernels, dim=-1)
-    point_kernels.log_()
+    point_kernels.log()
     point_kernels = point_kernels.unsqueeze(2)
 
     point_sum_b = point_kernels.logsumexp(dim=1)
@@ -362,11 +382,12 @@ def compute_point_hsics(
 
 def total_hsic_with_batch(
     rv_samples: torch.Tensor,
-    batch_samples: Optional[torch.Tensor],
     new_points: torch.Tensor,
     kernel,
+    batch_samples: Optional[torch.Tensor] = None,
     acquirable_idx: Optional[Sequence[int]] = None,
     n_points_parallel: int = 50,
+    normalize: bool = False,
 ) -> torch.Tensor:
     """
     Compute HSIC between all RVs in `rv_samples` and the batch with each point in `new_points`.
@@ -380,16 +401,31 @@ def total_hsic_with_batch(
     :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
     :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
     """
+
     acquirable_idx = acquirable_idx or list(range(new_points.shape[1]))
+    acquirable_idx = np.array(acquirable_idx)
     all_hsics = rv_samples.new_empty(len(acquirable_idx))
 
     rv_kernel = kernel(sqdist(rv_samples))
 
+    if normalize:
+        hsic_rv1 = total_hsic(rv_kernel)
+
+    rv_kernel = rv_kernel.expand(n_points_parallel, -1, -1, -1)
+
     if batch_samples is not None:
         batch_sqdists = sqdist(batch_samples)
+        batch_sqdists = batch_sqdists.expand(n_points_parallel, -1, -1, -1)
 
-    for i, point_idx in enumerate(acquirable_idx):
-        point_sqdist = sqdist(new_points[:, point_idx : point_idx + 1])
+    hsic_idx = 0
+    for point_idx in np.array_split(acquirable_idx, len(acquirable_idx) / (n_points_parallel - 1)):
+        point_sqdist = sqdist(new_points[:, point_idx])
+        point_sqdist = point_sqdist.transpose(2, 0).unsqueeze(-1)
+
+        # this should only happen for the last group of points
+        if batch_samples is not None and len(batch_sqdists) != len(point_sqdist):
+            batch_sqdists = batch_sqdists[0].expand(len(point_sqdist), -1, -1, -1)
+
         sqdists = (
             torch.cat((batch_sqdists, point_sqdist), dim=-1)
             if batch_samples is not None
@@ -397,6 +433,25 @@ def total_hsic_with_batch(
         )
         point_kernel = kernel(sqdists)
         point_kernel = point_kernel.mean(dim=-1).unsqueeze(-1)
-        all_hsics[i] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
+
+        if normalize:
+            hsic_rv2 = total_hsic_parallel(point_kernel)
+
+        # this should only happen for the last group of points
+        if len(rv_kernel) != len(point_kernel):
+            rv_kernel = rv_kernel[0].expand(len(point_kernel), -1, -1, -1)
+
+        hsic_rv12 = total_hsic_parallel(torch.cat((rv_kernel, point_kernel), dim=-1))
+
+        if normalize:
+            hsic = hsic_rv12 / torch.sqrt(hsic_rv1 * hsic_rv2)
+        else:
+            hsic = hsic_rv12
+
+        n_points = len(point_idx)
+        all_hsics[hsic_idx:hsic_idx + n_points] = hsic
+        hsic_idx += n_points
+
+    assert (all_hsics >= 0).all()
 
     return all_hsics
