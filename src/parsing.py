@@ -59,7 +59,7 @@ def add_parse_args(parser):
     parser.add_argument('--retrain_l2', type=float)
 
     parser.add_argument('--unseen_reg', type=str)
-    parser.add_argument('--gamma', type=float, 
+    parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
     parser.add_argument('--take_log', type=str2bool)
 
@@ -111,6 +111,10 @@ def add_parse_args_grad(parser):
     parser.add_argument('--ack_num_model_samples', type=int)
     parser.add_argument('--measure', type=strlower)
     parser.add_argument('--hsic_kernel_fn', type=str)
+    parser.add_argument('--hsic_diversity_lambda', type=float)
+    parser.add_argument('--sparse_hsic_penalty', type=float)
+    parser.add_argument('--sparse_hsic_threshold', type=float)
+    parser.add_argument('--hsic_condense_penalty', type=float, nargs=2)
 
 
 def add_parse_args_ensemble(parser):

@@ -61,6 +61,10 @@ for filename in filenames:
     print('doing file:', filedir)
     inputs = np.load(filedir+"inputs.npy")
     labels = np.load(filedir+"labels.npy")
+    sorted_idx = np.argsort(labels)[::-1]
+    ranking = np.zeros(labels.shape[0])
+    for i in range(sorted_idx.shape[0]):
+        ranking[sorted_idx[i]] = i
 
     if params.take_log:
         labels = np.log(labels)
@@ -101,6 +105,9 @@ for filename in filenames:
     train_X = torch.FloatTensor(train_inputs).to(device)
     train_Y = torch.FloatTensor(train_labels).to(device)
 
+    if "condense_locations" in params.measure:
+        params.ack_num_model_samples = params.num_models
+
     model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
             params.train_batch_size, 
@@ -119,20 +126,50 @@ for filename in filenames:
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
-        optim = torch.optim.Adam(list(model.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
-        logging, optim = dbopt.train_ensemble(
-                params, 
-                params.train_batch_size,
-                params.init_train_epochs, 
-                [train_X, train_Y],
-                model,
-                optim,
-                unseen_reg=params.unseen_reg,
-                gamma=params.gamma,
-                choose_type=params.choose_type,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                early_stopping=params.early_stopping,
-                )
+        if params.unseen_reg != "normal":
+            best_nll = float('inf')
+            best_model = None
+            best_optim = None
+            best_logging = None
+            for gamma in params.gammas:
+                model_copy = copy.deepcopy(model)
+                optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+                logging, optim = dbopt.train_ensemble(
+                        params, 
+                        params.train_batch_size,
+                        params.init_train_epochs, 
+                        [train_X, train_Y],
+                        model_copy,
+                        optim,
+                        unseen_reg=params.unseen_reg,
+                        gamma=gamma,
+                        choose_type=params.choose_type,
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                        early_stopping=params.early_stopping,
+                        )
+                val_nll_cur = logging[-1][0]
+                if val_nll_cur < best_nll:
+                    best_nll = val_nll_cur
+                    best_model = model_copy
+                    best_optim = optim
+                    best_logging = logging
+            logging = best_logging
+            model = best_model
+            optim = best_optim
+        else:
+            optim = torch.optim.Adam(list(model.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+            logging, optim = dbopt.train_ensemble(
+                    params, 
+                    params.train_batch_size,
+                    params.init_train_epochs, 
+                    [train_X, train_Y],
+                    model,
+                    optim,
+                    unseen_reg=params.unseen_reg,
+                    choose_type=params.choose_type,
+                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                    early_stopping=params.early_stopping,
+                    )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
 
@@ -164,7 +201,7 @@ for filename in filenames:
 
             model_cur = copy.deepcopy(model)
 
-            skip_idx_cur = set(train_idx)
+            skip_idx_cur = set(train_idx.tolist())
             ack_all_cur = set()
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth") and not params.clean:
@@ -184,11 +221,11 @@ for filename in filenames:
                         optim = optim.load_state_dict(checkpoint['optim'])
 
                         ack_idx = list(checkpoint['ack_idx'].numpy())
-                        ack_all_cur.update(ack_idx)
-                        skip_idx_cur.update(ack_idx)
+                        ack_all_cur.update(ack_idx.tolist())
+                        skip_idx_cur.update(ack_idx.tolist())
                         continue
 
-                    print('doing ack_iter', ack_iter, 'with suffix', params.suffix)
+                    print('doing ack_iter', ack_iter, 'with suffix', params.suffix, "; output_dir", params.output_dir)
 
                     with torch.no_grad():
                         preds, preds_vars = model_cur(X) # (num_samples, num_candidate_points)
@@ -209,7 +246,7 @@ for filename in filenames:
                                     train_Y_std,
                                     exp=torch.exp)
 
-                        log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr = bopt.get_pred_stats(
+                        log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr, pred_corr = bopt.get_pred_stats(
                                 preds,
                                 torch.sqrt(preds_vars),
                                 standardized_Y, 
@@ -224,6 +261,7 @@ for filename in filenames:
                         print('kt_corr_list:', kt_corr_list)
                         print('std_list:', std_list)
                         print('mse_std_corr:', mse_std_corr)
+                        print('pred_corr:', pred_corr)
 
                         preds[:, list(skip_idx_cur)] = preds.min()
                         ei = preds.mean(dim=0).view(-1).cpu().numpy()
@@ -232,48 +270,113 @@ for filename in filenames:
                         sorted_preds_idx = torch.sort(preds)[1].cpu().numpy()
                         f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -1:].flatten()))) + "\n")
 
-                    if "pdts" in params.measure:
-                        point_probs, _ = bopt.optimize_model_input_pdts(
+                    if "pdts" in params.measure or "cmaes" in params.measure:
+                        point_probs, point_preds = bopt.optimize_model_input_pdts(
                                 params, 
                                 [8, 4],
                                 model_cur,
-                                params.ack_num_model_samples if "condense" in params.measure else ack_batch_size,
+                                params.ack_num_model_samples,
                                 input_transform=lambda x : x.view(x.shape[0], -1),
+                                hsic_diversity_lambda=params.hsic_diversity_lambda
                                 )
                         assert point_probs.ndimension() == 3, str(point_probs.shape)
                         point_probs = torch.nn.functional.softmax(point_probs, dim=-1)
                         point_probs /= point_probs.sum(dim=-1, keepdim=True)
 
-                        points = dbopt.prob_to_number(point_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)]))
+                        if "condense" in params.measure:
+                            points = dbopt.prob_to_number(point_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)]))
+                        else:
+                            points = dbopt.prob_to_number(point_probs.cpu().numpy()[:ack_batch_size], set(input_nums[list(skip_idx_cur)]))
                         points_idx = [input_num_to_index[num] for num in points]
-                        opt_values = preds[:, points_idx] # (num_samples, opt_points)
+                        print('point_preds:', 'mean:', point_preds.mean().item(), 'std:', point_preds.std(dim=0).mean().item())
+                        print('point_idx_preds:', 'mean:', preds[:, points_idx].mean().item(), 'std:', preds[:, points_idx].std(dim=0).mean().item())
+                        if params.measure == "cmaes_condense_locations":
+                            #assert "condense_locations" in params.measure
+                            cur_idx = torch.tensor([int(k) for k in skip_idx_cur]).long()
+                            cur_labels_argsort = torch.sort(Y[cur_idx], descending=True)[1]
+                            cur_idx = cur_idx[cur_labels_argsort]
+                            randperm_idx = torch.randperm(preds.shape[1])[:ack_batch_size]
+                            opt_values = preds[:, randperm_idx]
+                            #opt_values = preds[:, cur_idx[:params.num_models]]
+                            opt_values -= opt_values.mean(dim=0, keepdim=True)
+                            #opt_values /= opt_values.std(dim=0, keepdim=True)
+                            print('opt_values:', 'mean:', opt_values.mean().item(), 'std:', opt_values.std(dim=0).mean().item(), preds.std(dim=0).mean().item())
+                            #opt_locations = X[cur_idx[:params.num_models]] # (num_samples, opt_points)
+                        elif "condense" in params.measure:
+                            #opt_values = point_preds # (num_samples, opt_points)
+                            if "condense_values" in params.measure:
+                                opt_values = preds[:, points_idx] # (num_samples, opt_points)
+                                #opt_values /= opt_values.std(dim=0, keepdim=True)
+                                print('opt_values:', 'mean:', opt_values.mean().item(), 'std:', opt_values.std(dim=0).mean().item())
+                            elif "condense_locations" in params.measure:
+                                #opt_locations = point_probs.view(point_probs.shape[0], -1)
+                                opt_locations = X[points_idx] # (num_samples, opt_points)
                     elif "ucb" in params.measure:
                         assert False, "ucb not implemented"
                     else:
                         assert False, str(params.measure) + " not implemented"
 
                     if "condense" in params.measure:
-                        hsic_batch_probs = bopt.acquire_batch_via_grad_hsic(
+                        """
+                        hsic_batch_probs, best_hsic = bopt.acquire_batch_via_grad_hsic(
                                 params, 
                                 model_cur,
                                 [8, 4],
                                 opt_values, 
                                 ack_batch_size,
+                                device=params.device,
                                 input_transform=lambda x : x.view(x.shape[0], -1),
                                 normalize_hsic=params.normalize_hsic,
+                                sparse_hsic_penalty=params.sparse_hsic_penalty,
+                                sparse_hsic_threshold=params.sparse_hsic_threshold,
                                 )
+                        """
+                        if "condense_values" in params.measure:
+                            hsic_batch_probs, best_hsic = bopt.acquire_batch_via_grad_hsic(
+                                    params, 
+                                    model_cur,
+                                    [8, 4],
+                                    opt_values,
+                                    ack_batch_size,
+                                    device=params.device,
+                                    hsic_condense_penalty=params.hsic_condense_penalty,
+                                    input_transform=lambda x : x.view(x.shape[0], -1),
+                                    normalize_hsic=params.normalize_hsic,
+                                    )
+                        elif "condense_locations" in params.measure:
+                            hsic_batch_probs, best_hsic = bopt.acquire_batch_via_grad_opt_location(
+                                    params, 
+                                    model_cur,
+                                    [8, 4],
+                                    opt_locations, 
+                                    ack_batch_size,
+                                    device=params.device,
+                                    hsic_condense_penalty=params.hsic_condense_penalty,
+                                    input_transform=lambda x : x.view(x.shape[0], -1),
+                                    normalize_hsic=params.normalize_hsic,
+                                    )
+                        else:
+                            assert False, params.measure + " not implemented"
                         assert hsic_batch_probs.ndimension() == 3, str(hsic_batch_probs.shape)
                         hsic_batch_probs = torch.nn.functional.softmax(hsic_batch_probs, dim=-1)
                         hsic_batch_probs /= hsic_batch_probs.sum(dim=-1, keepdim=True)
 
                         hsic_points = dbopt.prob_to_number(hsic_batch_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)]))
                         hsic_idx = [input_num_to_index[num] for num in hsic_points]
+                        print('len(hsic_idx)', len(hsic_idx))
                         cur_ack_idx = hsic_idx
+                        for idx in points_idx[:ack_batch_size-len(cur_ack_idx)]:
+                            if idx not in cur_ack_idx:
+                                cur_ack_idx += [idx]
+                        if len(cur_ack_idx) < ack_batch_size:
+                            hsic_points2 = dbopt.prob_to_number(hsic_batch_probs.cpu().numpy(), set(input_nums[list(skip_idx_cur)+cur_ack_idx]))
+                            hsic_idx2 = [input_num_to_index[num] for num in hsic_points2[:ack_batch_size-len(cur_ack_idx)]]
+                            cur_ack_idx += hsic_idx2
                     else:
                         cur_ack_idx = points_idx
 
-                    #print('points_idx', points_idx)
-                    #print('cur_ack_idx', cur_ack_idx)
+                    print('len(points_idx)', len(points_idx))
+                    print('len(cur_ack_idx)', len(cur_ack_idx))
                     print('intersection size', len(set(cur_ack_idx).intersection(set(points_idx))))
 
                     assert len(cur_ack_idx) == ack_batch_size
@@ -295,20 +398,50 @@ for filename in filenames:
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
-                    optim = torch.optim.Adam(list(model_cur.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
-                    logging, optim = dbopt.train_ensemble(
-                        params, 
-                        params.retrain_batch_size, 
-                        params.retrain_num_epochs, 
-                        [train_X_cur, train_Y_cur], 
-                        model_cur,
-                        optim,
-                        unseen_reg=params.unseen_reg,
-                        gamma=params.gamma,
-                        choose_type=params.choose_type,
-                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                        early_stopping=params.early_stopping,
-                        )
+                    if params.unseen_reg != "normal":
+                        best_nll = float('inf')
+                        best_model = None
+                        best_optim = None
+                        best_logging = None
+                        for gamma in params.gammas:
+                            model_copy = copy.deepcopy(model_cur)
+                            optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                            logging, optim = dbopt.train_ensemble(
+                                params,
+                                params.retrain_batch_size,
+                                params.retrain_num_epochs,
+                                [train_X_cur, train_Y_cur], 
+                                model_copy,
+                                optim,
+                                unseen_reg=params.unseen_reg,
+                                gamma=gamma,
+                                choose_type=params.choose_type,
+                                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                                early_stopping=params.early_stopping,
+                                )
+                            val_nll_cur = logging[-1][0]
+                            if val_nll_cur < best_nll:
+                                best_nll = val_nll_cur
+                                best_model = model_copy
+                                best_optim = optim
+                                best_logging = logging
+                        logging = best_logging
+                        model_cur = best_model
+                        optim = best_optim
+                    else:
+                        optim = torch.optim.Adam(list(model_cur.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                        logging, optim = dbopt.train_ensemble(
+                            params,
+                            params.retrain_batch_size,
+                            params.retrain_num_epochs,
+                            [train_X_cur, train_Y_cur], 
+                            model_cur,
+                            optim,
+                            unseen_reg=params.unseen_reg,
+                            choose_type=params.choose_type,
+                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            early_stopping=params.early_stopping,
+                            )
 
                     print(filename)
                     print('logging:', [k[-1] for k in logging])
@@ -318,7 +451,7 @@ for filename in filenames:
 
                     ack_array = np.array(list(ack_all_cur), dtype=np.int32)
 
-                    print('best so far:', labels[ack_array].max())
+                    print('best rank so far:', ranking[ack_array].min())
 
                     # inference regret computation using retrained ensemble
                     #s, idx_frac, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
@@ -339,7 +472,7 @@ for filename in filenames:
                         'logging': logging,
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),
-                        'ack_labels': torch.from_numpy(labels[ack_array]),
+                        'ack_labels': torch.from_numpy(ranking[ack_array]),
                         'diversity': len(set(sorted_preds_idx[:, -1:].flatten())),
                         #'ir_batch': torch.from_numpy(ir),
                         #'ir_batch_idx': torch.from_numpy(ir_sortidx),
@@ -350,6 +483,7 @@ for filename in filenames:
                         'test_kt_corr': torch.tensor(kt_corr_list),
                         'test_std_list': torch.tensor(std_list),
                         'test_mse_std_corr': torch.tensor(mse_std_corr),
+                        'test_pred_corr': torch.tensor(pred_corr),
                         }, batch_ack_output_file)
                     sys.stdout.flush()
                     

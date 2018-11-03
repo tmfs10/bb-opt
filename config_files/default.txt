@@ -21,12 +21,12 @@
 --take_log True
 
 --unseen_reg normal
---gamma 0.0
+--gammas 1.0 5.0 10.0 20.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/tatsu_pbm/test_files
 --output_dir ../experiments/ensemble/o
---num_test_tfs 10
+--num_test_tfs 38
 
 --ack_batch_size 100
 --num_acks 10

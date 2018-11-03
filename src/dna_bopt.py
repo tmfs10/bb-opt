@@ -5,10 +5,12 @@ from scipy.stats import kendalltau
 import hsic
 import torch
 import torch.nn as nn
+import hsic
 import copy
 from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import non_matplotlib_utils as utils
+import ops
 
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
@@ -188,14 +190,51 @@ def train_ensemble(
             if unseen_reg != "normal":
                 assert gamma > 0
                 out_data = sample_uniform(bN)
-                means_o, variances_o = model_ensemble(out_data)
+                means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
                 if unseen_reg == "maxvar":
                     var = means_o.var(dim=0).mean()
                     loss -= gamma*var
+                elif unseen_reg == "maxinvar":
+                    invar = means.var(dim=0).mean()
+                    loss -= gamma*invar
+                elif unseen_reg == "maxout_minin":
+                    var = means_o.var(dim=0).mean()
+                    loss -= gamma*var
+                    invar = means.var(dim=0).mean()
+                    loss += gamma*invar
+                elif unseen_reg == "maxdpp":
+                    assert False, unseen_reg + " not implemented"
+                    M = means_o
+                    mean = M.mean(dim=0, keepdim=True)
+                    std = M.std(dim=0, keepdim=True)
+                    M -= mean
+                    M /= std
+                    n = means_o.shape[1]
+                    covar = torch.mm(M.transpose(0, 1), M)/(n-1)
+                    dpp = torch.logdet(covar)
+                    print('covar:', covar.mean().item(), dpp.item(), torch.diag(covar).mean().item())
+                    #loss -= gamma*dpp
+                elif unseen_reg == "mincorr":
+                    corr = ops.corrcoef(means_o.transpose(0, 1))
+                    corr_mean = torch.tril(corr, diagonal=-1).mean()
+                    loss -= gamma*corr_mean
+                elif unseen_reg == "maxhsic":
+                    M = means_o
+                    mean = M.mean(dim=0, keepdim=True)
+                    std = M.std(dim=0, keepdim=True)
+                    M = M-mean
+                    M = M/std
+                    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+                    kernels = kernel_fn(M, M)  # shape (n=num_samples, n, 1)
+                    total_hsic = hsic.total_hsic(kernels.repeat([1, 1, 2])).view(-1)
+                    #print('hsic:', total_hsic.item())
+                    loss -= gamma*total_hsic[0]
                 elif unseen_reg == "defmean":
                     nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
                     loss += gamma*nll
+                else:
+                    assert False, unseen_reg + " not implemented"
 
             loss.backward()
             optim.step()
@@ -265,7 +304,7 @@ def train_ensemble(
         val_mses = [-1]
         val_std = [-1]
 
-    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std], optim
+    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std, [best_nll]], optim
 
 
 def one_hot_list_to_number(inputs, data=None):
@@ -291,8 +330,10 @@ def one_hot_list_to_number(inputs, data=None):
 
 
 def prob_to_number(inputs, ack_inputs):
+    assert not np.any(np.isnan(inputs)), str(inputs)
+    assert np.all(np.isfinite(inputs)), str(inputs)
     assert len(inputs.shape) == 3
-    data = set()
+    data = []
 
     arr = np.arange(inputs.shape[-1], dtype=np.int32)+1
     rev_compl_mapping = [4, 3, 2, 1]
@@ -301,13 +342,16 @@ def prob_to_number(inputs, ack_inputs):
             num = 0
             rev = 0
             for j in range(inputs.shape[-2]):
-                digit = np.random.choice(arr, p=inputs[i, j])
+                try:
+                    digit = np.random.choice(arr, p=inputs[i, j])
+                except Exception as e:
+                    print(inputs[i, j])
                 num *= (j+1)
                 num += digit
                 rev *= (j+1)
                 rev += arr[4-digit]
             if num not in ack_inputs and rev not in ack_inputs and num not in data and rev not in data:
-                data.add(num)
+                data += [num]
                 break
     return data
 

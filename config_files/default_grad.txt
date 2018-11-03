@@ -21,7 +21,7 @@
 --take_log True
 
 --unseen_reg normal
---gamma 0.0
+--gammas 5.0 10.0 20.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/tatsu_pbm/test_files
@@ -34,11 +34,15 @@
 --single_gaussian_test_nll True
 --choose_type last
 
---input_opt_lr 0.001
---input_opt_num_iter 1000
---hsic_opt_lr 0.001
---hsic_opt_num_iter 1000
+--input_opt_lr 0.1
+--input_opt_num_iter 100
+--hsic_opt_lr 0.05
+--hsic_opt_num_iter 300
 --normalize_hsic True
 --ack_num_model_samples 200
 --measure pdts_condense
 --hsic_kernel_fn mixrq_kernels
+--hsic_diversity_lambda 0.0
+--sparse_hsic_penalty 0.0
+--sparse_hsic_threshold 0.01
+--hsic_condense_penalty 1.0 1.0

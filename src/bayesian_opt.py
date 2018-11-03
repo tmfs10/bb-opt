@@ -1294,8 +1294,9 @@ def optimize_model_input(
         loss = -torch.mean(preds)
 
         postfix = {'normal_loss' : loss.item()}
+        kernel_fn = getattr(hsic, 'dimwise_' + params.hsic_kernel_fn)
         if hsic_diversity_lambda > 1e-9:
-            kernels = hsic.dimwise_mixrq_kernels(preds)
+            kernels = kernel_fn(preds)
             total_hsic = hsic.total_hsic(kernels)
 
             if normalize_hsic:
@@ -1307,7 +1308,7 @@ def optimize_model_input(
             postfix['hsic_loss'] = total_hsic.item()
             postfix['hsic_loss_real'] = (hsic_diversity_lambda*total_hsic).item()
         else:
-            kernels = hsic.dimwise_mixrq_kernels(preds)
+            kernels = kernel_fn(preds)
             total_hsic = hsic.total_hsic(kernels)
             postfix['hsic_loss'] = total_hsic.item()
 
@@ -1327,8 +1328,11 @@ def optimize_model_input_pdts(
     seed=None,
     one_hot=True,
     input_transform=lambda x : x,
+    hsic_diversity_lambda=0,
+    normalize_hsic=True,
     jupyter=False,
 ):
+    print("optimize_model_input_pdts, num_points_to_optimize:", num_points_to_optimize)
     assert num_points_to_optimize > 1
     if seed is None:
         input_tensor = torch.randn([num_points_to_optimize] + input_shape, device=params.device, requires_grad=True)
@@ -1348,17 +1352,58 @@ def optimize_model_input_pdts(
             assert len(input_shape) == 2
             input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
         input_tensor2 = input_transform(input_tensor)
-        preds, _ = model_ensemble(input_tensor2, all_pairs=False) # (num_samples,)
-        assert preds.ndimension() == 1
-        assert preds.shape[0] == num_points_to_optimize
+        if hsic_diversity_lambda > 1e-9:
+            preds, _ = model_ensemble(input_tensor2) # (num_samples,)
+            assert preds.ndimension() == 2
+        else:
+            preds, _ = model_ensemble(input_tensor2, all_pairs=False) # (num_samples,)
+            assert preds.ndimension() == 1
+        #assert preds.shape[0] == num_points_to_optimize, str(preds.shape) + " == " + str(num_points_to_optimize)
 
         loss = -torch.mean(preds)
+        mean_loss = loss.item()
+
+        hsic_loss = 0
+        if hsic_diversity_lambda > 1e-9:
+            """
+            kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+            kernels = kernel_fn(preds, preds)  # shape (n=num_samples, n, 1)
+            total_hsic = torch.sqrt(hsic.total_hsic(kernels.repeat([1, 1, 2]))).view(-1)
+            """
+
+            kernel_fn = getattr(hsic, 'dimwise_' + params.hsic_kernel_fn)
+            kernels = kernel_fn(preds)
+            #kernels = kernel_fn(input_tensor.transpose(0, 1))
+            total_hsic = hsic.total_hsic(kernels)
+
+            if normalize_hsic:
+                normalizer = hsic.total_hsic_parallel(kernels.permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2])).view(-1)
+                assert normalizer.shape[0] == num_points_to_optimize
+                normalizer = normalizer.log().sum()/normalizer.shape[0]
+                total_hsic = torch.exp(total_hsic.log()-normalizer)
+                #print('total_hsic2:', total_hsic.item())
+
+            hsic_loss = total_hsic.item()
+            loss -= hsic_diversity_lambda*total_hsic[0]
+            #postfix['hsic_loss'] = total_hsic.item()
+            #postfix['hsic_loss_real'] = (hsic_diversity_lambda*total_hsic).item()
 
         optim.zero_grad()
         loss.backward()
         optim.step()
-        progress.set_description("normal_loss: %2.6f" % (loss.item()))
+        if normalize_hsic and hsic_diversity_lambda > 1e-9:
+            #progress.set_description("%2.6f, %1.2f, %1.2f" % (mean_loss, hsic_loss, normalizer.item()))
+            progress.set_description("%2.6f, %1.2f" % (mean_loss, hsic_loss))
+        else:
+            progress.set_description("%2.6f, %1.2f" % (mean_loss, hsic_loss))
 
+    with torch.no_grad():
+        if one_hot:
+            assert len(input_shape) == 2
+            input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+        input_tensor2 = input_transform(input_tensor)
+        preds, _ = model_ensemble(input_tensor2) # (num_samples,)
+        
     return input_tensor.detach(), preds.detach()
 
 
@@ -1378,7 +1423,7 @@ def two_dist_hsic(
     if opt_values_kernel_matrix.ndimension() == 2:
         opt_values_kernel_matrix = opt_values_kernel_matrix.unsqueeze(-1)
     assert opt_values_kernel_matrix.ndimension() == 3
-    assert opt_values_kernel_matrix.shape[2] == 1
+    assert opt_values_kernel_matrix.shape[2] == 1, opt_values_kernel_matrix.shape
 
     new_batch_matrix = kernel_fn(X, X, do_mean=do_mean)  # return is of shape (n=num_samples, n, 1)
     kernels = torch.cat([new_batch_matrix, opt_values_kernel_matrix], dim=-1)
@@ -1392,26 +1437,39 @@ def acquire_batch_via_grad_hsic(
     input_shape: List[int],
     opt_values: torch.tensor, # (num_samples, preds)
     ack_batch_size,
+    device,
+    hsic_condense_penalty,
+    biased_hsic=False,
     do_mean=False,
     seed: torch.tensor = None,
     normalize_hsic=True,
     one_hot=True,
     input_transform=lambda x : x,
+    sparse_hsic_penalty=0,
+    sparse_hsic_threshold=0.,
     jupyter: bool = False,
 ) -> torch.tensor:
 
-    print('mves: ack_batch_size', ack_batch_size)
+    assert sparse_hsic_threshold >= 0
+    assert sparse_hsic_threshold < 1
+    do_sparse_hsic = sparse_hsic_penalty > 1e-9
+
+    print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
     if seed is None:
-        input_tensor = torch.randn([ack_batch_size] + input_shape, device=params.device, requires_grad=True)
+        input_tensor = torch.randn([ack_batch_size] + input_shape, device=device, requires_grad=True)
     else:
         assert seed.shape[0] == ack_batch_size
         input_tensor = torch.tensor(seed, device=device, requires_grad=True)
-    optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
+
+    if do_sparse_hsic:
+        l1_tensor = torch.ones(ack_batch_size, device=device, requires_grad=True)
+        l1_tensor_zero = torch.zeros(ack_batch_size, device=device)
+        optim = torch.optim.Adam([input_tensor, l1_tensor], lr=params.hsic_opt_lr)
+    else:
+        optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
 
     kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
-    opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)  # shape (n=num_samples, n, 1)
-    opt_normalizer = torch.log(hsic.total_hsic(opt_kernel_matrix.repeat([1, 1, 2]))).view(-1)
-    opt_normalizer_exp = torch.exp(0.5 * opt_normalizer).detach().item()
+    opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)[:, :, 0]  # shape (n=num_samples, n, 1)
 
     if jupyter:
         progress = tnrange(params.hsic_opt_num_iter)
@@ -1425,27 +1483,178 @@ def acquire_batch_via_grad_hsic(
         input_tensor2 = input_transform(input_tensor)
 
         preds, _ = model_ensemble(input_tensor2) # (num_samples, ack_batch_size)
+        if do_sparse_hsic:
+            preds *= l1_tensor.unsqueeze(0)
         assert preds.ndimension() == 2
         assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
 
+        mean_pred = torch.mean(preds)
+        loss = -hsic_condense_penalty[0]*mean_pred
+        preds_kernel_matrix = kernel_fn(preds, preds, do_mean=do_mean)[:, :, 0]
+        
         total_hsic = two_dist_hsic(preds, opt_kernel_matrix, kernel_fn, do_mean)
+        hsic_xy = hsic.hsic_xy(opt_kernel_matrix, preds_kernel_matrix, biased=biased_hsic, normalized=normalize_hsic)
 
-        if normalize_hsic:
-            total_hsic = total_hsic.log()
-            self_kernel_matrix = hsic.two_vec_mixrq_kernels(preds)
-            self_hsic_log = hsic.total_hsic(self_kernel_matrix.repeat([1, 1, 2])).log()
-            total_hsic = total_hsic - 0.5*(self_hsic_log+opt_normalizer)
-            total_hsic = total_hsic.exp()
-
-        loss = -total_hsic
-
-        progress.set_description("hsic_loss: %1.5f" % (loss.item()))
+        hsic_loss = hsic_xy.item()
+        loss += -hsic_condense_penalty[1]*hsic_xy
+        if do_sparse_hsic:
+            l1_loss = torch.nn.functional.l1_loss(l1_tensor, l1_tensor_zero)
+            loss += sparse_hsic_penalty*l1_loss
+            progress.set_description("%1.5f, %1.5f, %d" % (hsic_loss, l1_loss.item(), (l1_tensor > sparse_hsic_threshold).sum()))
+        else:
+            progress.set_description("%1.5f, %1.4f" % (mean_pred, hsic_loss))
 
         optim.zero_grad()
         loss.backward()
         optim.step()
 
-    return input_tensor.detach()
+    if do_sparse_hsic:
+        return input_tensor.detach()[l1_tensor > sparse_hsic_threshold], hsic_loss
+    else:
+        return input_tensor.detach(), hsic_loss
+
+
+def acquire_batch_via_grad_hsic2(
+    params,
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    input_shape: List[int],
+    opt_values: torch.tensor, # (num_samples, preds)
+    ack_batch_size,
+    device,
+    hsic_condense_penalty,
+    biased_hsic=False,
+    do_mean=False,
+    seed: torch.tensor = None,
+    normalize_hsic=True,
+    one_hot=True,
+    input_transform=lambda x : x,
+    jupyter: bool = False,
+) -> torch.tensor:
+
+    print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
+    input_tensor_list = []
+    complete_input_tensor = torch.randn([ack_batch_size] + input_shape, device=device, requires_grad=False)
+
+    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_values, opt_values, do_mean=do_mean)[:, :, 0]  # shape (n=num_samples, n, 1)
+
+    hsic_loss_so_far = 0
+    hsic_loss = 0
+    if jupyter:
+        batch_progress = tnrange(ack_batch_size)
+    else:
+        batch_progress = trange(ack_batch_size)
+    for ack_iter in batch_progress:
+        input_tensor = torch.zeros([ack_iter+1] + input_shape, device=device, requires_grad=True)
+        with torch.no_grad():
+            input_tensor[:ack_iter] = complete_input_tensor[:ack_iter]
+        optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
+        for step_iter in range(params.hsic_opt_num_iter):
+            if one_hot:
+                assert len(input_shape) == 2
+                input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+            input_tensor2 = input_transform(input_tensor)
+            #print(input_tensor2)
+            assert not ops.is_nan(input_tensor2), str(ack_iter) + ", " + str(step_iter)
+
+            preds, _ = model_ensemble(input_tensor2) # (num_samples, ack_batch_size)
+            assert preds.ndimension() == 2
+            assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+
+            mean_pred = torch.mean(preds)
+            loss = -hsic_condense_penalty[0]*mean_pred
+            preds_kernel_matrix = kernel_fn(preds, preds, do_mean=do_mean)[:, :, 0]
+
+            hsic_xy = hsic.hsic_xy(opt_kernel_matrix, preds_kernel_matrix, biased=biased_hsic, normalized=normalize_hsic)
+
+            # if preds end up having 0 stddev hsic estimator becoming infinity
+            if not ops.is_finite(hsic_xy):
+                break
+
+            hsic_loss = hsic_xy.item()
+            loss += -hsic_condense_penalty[1]*hsic_xy
+            #print('loss', loss.item(), hsic_loss, mean_pred.item())
+
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+
+        batch_progress.set_description("%1.5f, %1.5f" % (hsic_loss, mean_pred.item()))
+        if hsic_loss <= hsic_loss_so_far + 0.05:
+            break
+        hsic_loss_so_far = hsic_loss
+        complete_input_tensor[:ack_iter+1, :, :] = input_tensor.detach()
+
+    return complete_input_tensor[:ack_iter].detach(), hsic_loss_so_far
+
+
+def acquire_batch_via_grad_opt_location(
+    params,
+    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    input_shape: List[int],
+    opt_locations: torch.tensor, # (num_samples, num_features)
+    ack_batch_size,
+    device,
+    hsic_condense_penalty,
+    biased_hsic=False,
+    do_mean=False,
+    seed: torch.tensor = None,
+    normalize_hsic=True,
+    one_hot=True,
+    input_transform=lambda x : x,
+    jupyter: bool = False,
+) -> torch.tensor:
+
+    print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
+    input_tensor_list = []
+    complete_input_tensor = torch.randn([ack_batch_size] + input_shape, device=device, requires_grad=False)
+
+    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_locations, opt_locations, do_mean=do_mean)[:, :, 0]  # shape (n=num_samples, n, 1)
+
+    hsic_loss_so_far = 0
+    if jupyter:
+        batch_progress = tnrange(ack_batch_size)
+    else:
+        batch_progress = trange(ack_batch_size)
+    for ack_iter in batch_progress:
+        input_tensor = torch.zeros([ack_iter+1] + input_shape, device=device, requires_grad=True)
+        with torch.no_grad():
+            input_tensor[:ack_iter] = complete_input_tensor[:ack_iter]
+        optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
+        for step_iter in range(params.hsic_opt_num_iter):
+            if one_hot:
+                assert len(input_shape) == 2
+                input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+            input_tensor2 = input_transform(input_tensor)
+
+            preds, _ = model_ensemble(input_tensor2) # (num_samples, ack_batch_size)
+            assert preds.ndimension() == 2
+            assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+
+            mean_pred = torch.mean(preds)
+            loss = -hsic_condense_penalty[0]*mean_pred
+
+            preds_kernel_matrix = kernel_fn(preds, preds, do_mean=do_mean)[:, :, 0]
+            hsic_xy = hsic.hsic_xy(opt_kernel_matrix, preds_kernel_matrix, biased=biased_hsic, normalized=normalize_hsic)
+
+            # if preds end up having 0 stddev hsic estimator becoming infinity
+            if not ops.is_finite(hsic_xy):
+                break
+
+            hsic_loss = hsic_xy.item()
+            loss += -hsic_condense_penalty[1]*hsic_xy
+
+            optim.zero_grad()
+            loss.backward()
+            optim.step()
+        batch_progress.set_description("%1.5f, %1.5f" % (mean_pred.item(), hsic_loss))
+        if hsic_loss <= hsic_loss_so_far + 0.05:
+            break
+        hsic_loss_so_far = hsic_loss
+        complete_input_tensor[:ack_iter+1, :, :] = input_tensor.detach()
+
+    return complete_input_tensor[:ack_iter].detach(), hsic_loss_so_far
 
 
 def acquire_batch_pi(
@@ -1554,13 +1763,19 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
     kt_corr_list = []
     std_list = []
     mse_std_corr = []
+    pred_corr = []
 
-    for frac in [1., 0.1]:
+    for frac in [1., 0.1, 0.01]:
         labels_sort_idx = torch.sort(unscaled_Y, descending=True)[1].cpu().numpy()
         n = int(labels_sort_idx.shape[0] * frac)
         m = preds.shape[0]
         labels_sort_idx = labels_sort_idx[:n]
         labels2 = Y[labels_sort_idx]
+
+        rand_idx = torch.randperm(n)[:200]
+        rand_idx = labels_sort_idx[rand_idx]
+        corr = np.corrcoef(preds[:, rand_idx].transpose(0, 1))
+        pred_corr += [np.tril(corr, k=-1).mean()]
 
         if single_gaussian:
             output_dist = output_dist_fn(
@@ -1586,9 +1801,10 @@ def get_pred_stats(preds, std, Y, unscaled_Y, output_dist_fn, test_idx, single_g
     mse_list += [torch.abs(preds[:, max_idx].mean(0)-Y[max_idx]).item()]
     kt_corr_list += [0]
     mse_std_corr += [0]
+    pred_corr += [0]
     std_list += [preds[:, max_idx].std(0).item()]
 
-    return log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr
+    return log_prob_list, mse_list, kt_corr_list, std_list, mse_std_corr, pred_corr
 
 def compute_ir_regret_ensemble(
         model_ensemble,

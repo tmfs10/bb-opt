@@ -62,6 +62,9 @@ for filename in filenames:
     inputs = np.load(filedir+"inputs.npy")
     labels = np.load(filedir+"labels.npy")
 
+    if params.take_log:
+        labels = np.log(labels)
+
     # file output dir
     file_output_dir = params.output_dir + "/" + filename
     try:
@@ -108,20 +111,50 @@ for filename in filenames:
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
-        optim = torch.optim.Adam(list(model.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
-        logging, optim = dbopt.train_ensemble(
-                params, 
-                params.train_batch_size,
-                params.init_train_epochs, 
-                [train_X, train_Y],
-                model,
-                optim,
-                unseen_reg=params.unseen_reg,
-                gamma=params.gamma,
-                choose_type=params.choose_type,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                early_stopping=params.early_stopping,
-                )
+        if params.unseen_reg != "normal":
+            best_nll = float('inf')
+            best_model = None
+            best_optim = None
+            best_logging = None
+            for gamma in params.gammas:
+                model_copy = copy.deepcopy(model)
+                optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+                logging, optim = dbopt.train_ensemble(
+                        params, 
+                        params.train_batch_size,
+                        params.init_train_epochs, 
+                        [train_X, train_Y],
+                        model_copy,
+                        optim,
+                        unseen_reg=params.unseen_reg,
+                        gamma=gamma,
+                        choose_type=params.choose_type,
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                        early_stopping=params.early_stopping,
+                        )
+                val_nll_cur = logging[-1][0]
+                if val_nll_cur < best_nll:
+                    best_nll = val_nll_cur
+                    best_model = model_copy
+                    best_optim = optim
+                    best_logging = logging
+            logging = best_logging
+            model = best_model
+            optim = best_optim
+        else:
+            optim = torch.optim.Adam(list(model.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+            logging, optim = dbopt.train_ensemble(
+                    params, 
+                    params.train_batch_size,
+                    params.init_train_epochs, 
+                    [train_X, train_Y],
+                    model,
+                    optim,
+                    unseen_reg=params.unseen_reg,
+                    choose_type=params.choose_type,
+                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                    early_stopping=params.early_stopping,
+                    )
         print('logging:', [k[-1] for k in logging])
         logging = [torch.tensor(k) for k in logging]
 
@@ -153,7 +186,7 @@ for filename in filenames:
 
             model_ei = copy.deepcopy(model)
 
-            skip_idx_ei = set(train_idx)
+            skip_idx_ei = set(train_idx.tolist())
             ack_all_ei = set()
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth") and not params.clean:
@@ -173,8 +206,8 @@ for filename in filenames:
                         optim = optim.load_state_dict(checkpoint['optim'])
 
                         ack_idx = list(checkpoint['ack_idx'].numpy())
-                        ack_all_ei.update(ack_idx)
-                        skip_idx_ei.update(ack_idx)
+                        ack_all_ei.update(ack_idx.tolist())
+                        skip_idx_ei.update(ack_idx.tolist())
                         continue
 
                     # test stats computation
@@ -303,20 +336,50 @@ for filename in filenames:
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_ei.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_ei.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_ei.shape[0] == train_X_ei.shape[0]
-                    optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
-                    logging, optim = dbopt.train_ensemble(
-                        params, 
-                        params.retrain_batch_size, 
-                        params.retrain_num_epochs, 
-                        [train_X_ei, train_Y_ei], 
-                        model_ei,
-                        optim,
-                        unseen_reg=params.unseen_reg,
-                        gamma=params.gamma,
-                        choose_type=params.choose_type,
-                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                        early_stopping=params.early_stopping,
-                        )
+                    if params.unseen_reg != "normal":
+                        best_nll = float('inf')
+                        best_model = None
+                        best_optim = None
+                        best_logging = None
+                        for gamma in params.gammas:
+                            model_copy = copy.deepcopy(model_ei)
+                            optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                            logging, optim = dbopt.train_ensemble(
+                                params,
+                                params.retrain_batch_size,
+                                params.retrain_num_epochs,
+                                [train_X_ei, train_Y_ei], 
+                                model_copy,
+                                optim,
+                                unseen_reg=params.unseen_reg,
+                                gamma=gamma,
+                                choose_type=params.choose_type,
+                                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                                early_stopping=params.early_stopping,
+                                )
+                            val_nll_cur = logging[-1][0]
+                            if val_nll_cur < best_nll:
+                                best_nll = val_nll_cur
+                                best_model = model_copy
+                                best_optim = optim
+                                best_logging = logging
+                        logging = best_logging
+                        model_ei = best_model
+                        optim = best_optim
+                    else:
+                        optim = torch.optim.Adam(list(model_ei.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                        logging, optim = dbopt.train_ensemble(
+                            params,
+                            params.retrain_batch_size,
+                            params.retrain_num_epochs,
+                            [train_X_ei, train_Y_ei], 
+                            model_ei,
+                            optim,
+                            unseen_reg=params.unseen_reg,
+                            choose_type=params.choose_type,
+                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            early_stopping=params.early_stopping,
+                            )
 
                     print(filename)
                     print('logging:', [k[-1] for k in logging])

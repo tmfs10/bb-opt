@@ -367,7 +367,7 @@ for filename in filenames:
                     f.write(s + "\n")
 
                     torch.save({
-                        'model_state_dict': model_mves.state_dict(), 
+                        'model_state_dict': model_mves.state_dict(),
                         'logging': logging,
                         'optim': optim.state_dict(),
                         'ack_idx': torch.from_numpy(ack_array),

@@ -422,3 +422,83 @@ def total_hsic_with_batch(
         all_hsics[i] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
 
     return all_hsics
+
+def center_kernel(K):
+    """Center a kernel matrix of shape (n, n, ...).
+    If there are trailing dimensions, assumed to be a list of kernels and
+    centers each one separately.
+    """
+    # (I - 1/n 1 1^T) K (I - 1/n 1 1^T)
+    #  = K - 1/n 1 1^T K - 1/n K 1 1^T + 1/n^2 1 1^T K 1 1^T
+    row_means = K.mean(dim=0, keepdim=True)
+    col_means = row_means.transpose(0, 1)
+    grand_mean = row_means.mean(dim=1, keepdim=True)
+    return K - row_means - col_means + grand_mean
+
+# Not n-way unlike total_hsic !!!!
+def hsic_xy(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
+         eps=ops._eps):
+    """Independence estimator.
+    By default, uses the unbiased estimator.
+    If normalized, returns HSIC(X, Y) / sqrt(HSIC(X, X) HSIC(Y, Y)). Uses
+    eps if the denominator is too close to zero.
+    If biased=True, center_x determines which kernel will be centered; might
+    result in slightly simpler gradients for the kernel which is not centered.
+    Ignored if biased=False.
+    """
+    shp = kernel_x.shape
+    assert len(shp) == 2
+    assert shp == kernel_y.shape
+
+    n = kernel_x.shape[0]
+
+    if biased:
+        if normalized:
+            kernel_x = center_kernel(kernel_x)
+            kernel_y = center_kernel(kernel_y)
+        elif center_x:
+            kernel_x = center_kernel(kernel_x)
+        else:
+            kernel_y = center_kernel(kernel_y)
+
+        tr_xy = torch.einsum('ij,ij->', (kernel_x, kernel_y))
+
+        if normalized:
+            tr_xx = torch.max(torch.einsum('ij,ij->', (kernel_x, kernel_x)), kernel_x.new_tensor(eps))
+            tr_yy = torch.max(torch.einsum('ij,ij->', (kernel_y, kernel_y)), kernel_x.new_tensor(eps))
+            return tr_xy / torch.sqrt(tr_xx * tr_yy)
+        else:
+            return tr_xy / (n - 1)**2
+
+    # HSIC_1 from http://www.jmlr.org/papers/volume13/song12a/song12a.pdf
+    z = torch.zeros(n).type(kernel_x.type())
+    Kt = ops.set_diagonal(kernel_x, z)
+    Lt = ops.set_diagonal(kernel_y, z)
+
+    Kt_sums = torch.sum(Kt, dim=0)
+    Lt_sums = torch.sum(Lt, dim=0)
+
+    Kt_grand_sum = torch.sum(Kt_sums)
+    Lt_grand_sum = torch.sum(Lt_sums)
+
+    n1_n2 = (n - 1) * (n - 2)
+
+    main_xy = (
+        torch.einsum('ij,ij->', (Kt, Lt))
+        + Kt_grand_sum * Lt_grand_sum / n1_n2
+        - 2 / (n - 2) * torch.dot(Kt_sums, Lt_sums))
+
+    if normalized:
+        main_xx = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('ij,ij->', (Kt, Kt))
+            + Kt_grand_sum * Kt_grand_sum / n1_n2
+            - 2 / (n - 2) * torch.dot(Kt_sums, Kt_sums))
+        main_yy = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('ij,ij->', (Lt, Lt))
+            + Lt_grand_sum * Lt_grand_sum / n1_n2
+            - 2 / (n - 2) * torch.dot(Lt_sums, Lt_sums))
+        return main_xy / torch.sqrt(main_xx * main_yy)
+    else:
+        return main_xy / (n * (n - 3))
