@@ -1,8 +1,9 @@
 #! /usr/bin/env python
 
 from argparse import ArgumentParser
-import torch
 from comet_ml import Experiment
+import torch
+import pyro.optim
 import numpy as np
 import pandas as pd
 import os
@@ -11,30 +12,9 @@ from gpu_utils.utils import gpu_init
 from bb_opt.src.bayesian_opt import optimize
 from bb_opt.src.deep_ensemble import NNEnsemble
 from bb_opt.src.bnn import BNN
-from bb_opt.src.acquisition_functions import ExpectedReward, UCB
+from bb_opt.src.acquisition_functions import ExpectedReward, UCB, HAF
 from bb_opt.src.hsic import mixrq_kernels, mixrbf_kernels
 from bb_opt.src.utils import get_path
-
-models = {
-    # "uniform": get_model_uniform,
-    # "nn": get_model_nn,
-    "bnn": BNN,
-    "de": NNEnsemble,
-}
-
-acquisition_functions = {
-    # "uniform": acquire_batch_uniform,
-    # "nn": acquire_batch_nn_greedy,
-    # "ei": acquire_batch_ei,
-    # "pdts": acquire_batch_pdts,
-    # "hsic_ms": acquire_batch_hsic_mean_std,
-    # "hsic_pdts": acquire_batch_hsic_pdts,
-    # "mves": acquire_batch_mves,
-    # "es": acquire_batch_es,
-    # "pi": acquire_batch_pi,
-    "er": ExpectedReward,
-    "ucb": UCB,
-}
 
 
 def main():
@@ -155,39 +135,12 @@ def main():
         }
     )
 
-    af_greedy = None
-    if af_key in ("er", "ucb"):
-        if args.calibrated:
-            af_kwargs = {"calibrated": True, "gaussian_approx": True}
-        else:
-            af_kwargs = {}
+    af = select_af(af_key, args, exp)
+    af_greedy = (
+        select_af(greedy_af_key, args, exp, greedy=True) if args.greedy_af_key else None
+    )
 
-        if af_key == "er":
-            af = ExpectedReward(exp=exp, **af_kwargs)
-        else:
-            af_kwargs["beta"] = args.beta
-            af = UCB(exp=exp, **af_kwargs)
-        exp.log_multiple_params(af_kwargs)
-
-    if model_key == "de":
-        model_kwargs = {
-            "n_inputs": inputs.shape[1],
-            "n_models": args.n_ensemble_models,
-            "n_hidden": 100,
-            "adversarial_epsilon": None,
-            "device": device,
-            "nonlinearity_names": None,
-            "extra_random": False,
-        }
-        model = NNEnsemble.get_model(**model_kwargs)
-
-        lr = 0.01
-        model.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-        exp.log_parameter("lr", lr)
-
-        del model_kwargs["device"]
-
-    exp.log_multiple_params(model_kwargs)
+    model = select_model(model_key, device, inputs.shape[1], args, exp)
 
     optimize(
         model,
@@ -206,6 +159,65 @@ def main():
         save_key=save_key,
         acquisition_func_greedy=af_greedy,
     )
+
+
+def select_af(af_key: str, args, exp, greedy: bool = False):
+    if af_key in ("er", "ucb"):
+        if args.calibrated:
+            af_kwargs = {"calibrated": True, "gaussian_approx": True}
+        else:
+            af_kwargs = {}
+
+        if af_key == "er":
+            af = ExpectedReward(exp=exp, **af_kwargs)
+        else:
+            af_kwargs["beta"] = args.beta
+            af = UCB(exp=exp, **af_kwargs)
+    elif af_key == "haf":
+        af_kwargs = {"target_distr": "MES", "calibrated": False}
+        af = HAF(exp=exp, **af_kwargs)
+    else:
+        assert False, f"AF {af_key} not recognized."
+
+    if greedy:
+        af_kwargs = {f"greedy_{key}": value for key, value in af_kwargs.items()}
+
+    exp.log_multiple_params(af_kwargs)
+    return af
+
+
+def select_model(model_key: str, device, n_inputs, args, exp):
+    model_kwargs = {"n_inputs": n_inputs, "n_hidden": 100, "device": device}
+
+    if model_key == "de":
+        model_kwargs.update(
+            {
+                "n_models": args.n_ensemble_models,
+                "adversarial_epsilon": None,
+                "nonlinearity_names": None,
+                "extra_random": False,
+            }
+        )
+        model = NNEnsemble.get_model(**model_kwargs)
+
+        lr = 0.01
+        model.optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+        exp.log_parameter("lr", lr)
+    elif model_key == "bnn":
+        model_kwargs.update(
+            {"non_linearity": "ReLU", "prior_mean": 0.0, "prior_std": 1.0}
+        )
+        model = BNN.get_model(**model_kwargs)
+
+        lr = 0.01
+        model.optimizer = pyro.optim.Adam({"lr": lr})
+        exp.log_parameter("lr", lr)
+    else:
+        assert False, f"Unrecognized model key: {model_key}"
+
+    del model_kwargs["device"]
+    exp.log_multiple_params(model_kwargs)
+    return model
 
 
 if __name__ == "__main__":
