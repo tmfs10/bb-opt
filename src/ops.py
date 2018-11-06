@@ -145,3 +145,25 @@ def corrcoef(x):
     c = torch.clamp(c, -1.0, 1.0)
 
     return c
+
+def cross_corrcoef(x, y):
+    # x is (n, p), y is (n, q)
+    # calculate covariance matrix of rows
+    mean_x = x.mean(0, keepdim=True)
+    mean_y = y.mean(0, keepdim=True)
+    xm = x.sub(mean_x.expand_as(x))
+    ym = y.sub(mean_y.expand_as(y))
+    c = xm.t().mm(ym)
+    c = c / (x.size(0) - 1)
+
+    x_std = x.std(0, keepdim=True).transpose(0, 1)
+    y_std = y.std(0, keepdim=True)
+    norm = x_std*y_std
+
+    c  = c/norm
+
+    # clamp between -1 and 1
+    # probably not necessary but numpy does it
+    c = torch.clamp(c, -1.0, 1.0)
+
+    return c

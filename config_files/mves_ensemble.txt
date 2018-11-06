@@ -1,9 +1,0 @@
-
---num_diversity 1
---mves_greedy False
---compare_w_old False
---pred_weighting 0
---divide_by_std False
---measure mves
---num_models 100
---mves_kernel_fn mixrq_kernels

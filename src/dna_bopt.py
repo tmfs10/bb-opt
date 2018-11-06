@@ -11,6 +11,7 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import non_matplotlib_utils as utils
 import ops
+import bayesian_opt as bopt
 
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
@@ -97,20 +98,97 @@ def get_model_nn_ensemble(
     model = model.to(device)
     return model
 
-def train_ensemble(
+
+def dynamic_penalty_train_ensemble(
+    params,
+    batch_size,
+    num_epochs,
+    train_data,
+    all_X,
+    idx_to_exclude,
+    model_ensemble,
+    optim,
+    unseen_reg="normal",
+    gamma=0.0,
+    choose_type="last",
+    normalize_fn=None,
+    val_frac=0.1,
+    early_stopping=10,
+    num_trajectories=10,
+    num_epochs_per_traj=10,
+    jupyter=False,
+):
+    N = X.shape[0]
+    indices = torch.LongTensor(list(set(range(N)).difference(idx_to_exclude)))
+    rand_order = torch.randperm(N)
+    indices = indices[rand_order]
+    
+    corr_penalty_matrix = None
+    for traj in num_trajectories:
+        model_copy = copy.deepcopy(model_ensemble)
+        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+        test_idx = indices[traj*300:(traj+1)*300]
+        corr_penalty_X = X[test_idx, :]
+
+        preds, _ = model_ensemble(corr_penalty_X) # (num_candidate_points, num_samples)
+        preds = preds.detach()
+        corr_rand = np.corrcoef(preds.transpose(0, 1).detach().cpu().numpy())
+        old_std = preds.std(dim=0)
+
+        logging, optim = dbopt.train_ensemble(
+            params,
+            batch_size,
+            num_epochs_per_traj,
+            train_data,
+            model_copy,
+            optim,
+            unseen_reg=params.unseen_reg,
+            gamma=gamma,
+            choose_type=params.choose_type,
+            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+            early_stopping=params.early_stopping,
+            val_frac=val_frac,
+            corr_penalty_X=corr_penalty_X,
+            corr_penalty_matrix=corr_penalty_matrix,
+            )
+
+        preds, _ = model_ensemble(X[test_idx, :]) # (num_candidate_points, num_samples)
+        preds = preds.detach()
+        corr_rand = corr_rand[np.tril_indices(corr_rand.shape[0], k=-1)]
+        std_ratio_matrix = bopt.compute_std_ratio_matrix(old_std, preds)
+
+    logging, optim = dbopt.train_ensemble(
         params,
         batch_size,
         num_epochs,
-        data,
+        [train_X_cur, train_Y_cur], 
         model_ensemble,
         optim,
-        unseen_reg="normal",
-        gamma=0.0,
-        choose_type="last",
-        normalize_fn=None,
-        val_frac=0.1,
-        early_stopping=10,
-        jupyter=False,
+        unseen_reg=params.unseen_reg,
+        gamma=gamma,
+        choose_type=params.choose_type,
+        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+        early_stopping=params.early_stopping,
+        val_frac=val_frac,
+        )
+
+    return logging, optim
+
+
+def train_ensemble(
+    params,
+    batch_size,
+    num_epochs,
+    data,
+    model_ensemble,
+    optim,
+    unseen_reg="normal",
+    gamma=0.0,
+    choose_type="last",
+    normalize_fn=None,
+    val_frac=0.1,
+    early_stopping=10,
+    jupyter=False,
 ):
     train_X, train_Y = data
     N = train_X.shape[0]
@@ -218,7 +296,7 @@ def train_ensemble(
                 elif unseen_reg == "mincorr":
                     corr = ops.corrcoef(means_o.transpose(0, 1))
                     corr_mean = torch.tril(corr, diagonal=-1).mean()
-                    loss -= gamma*corr_mean
+                    loss += gamma*corr_mean
                 elif unseen_reg == "maxhsic":
                     M = means_o
                     mean = M.mean(dim=0, keepdim=True)
@@ -272,15 +350,15 @@ def train_ensemble(
             mse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
             val_nlls += [nll]
             val_mses += [mse]
+            means = means.mean(0)
+            assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
+            val_corr = kendalltau(means, val_Y)[0]
             if choose_type == "val" and nll < best_nll:
                 time_since_last_best_epoch = 0
                 best_nll = nll
                 best_model = copy.deepcopy(model_ensemble.state_dict())
                 best_optim = copy.deepcopy(optim.state_dict())
 
-            means = means.mean(0)
-            assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
-            val_corr = kendalltau(means, val_Y)[0]
             val_corrs += [val_corr]
             progress.set_description(f"Corr: {val_corr:.3f}")
 

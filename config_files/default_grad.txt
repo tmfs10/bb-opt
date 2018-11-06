@@ -35,13 +35,13 @@
 --choose_type last
 
 --input_opt_lr 0.1
---input_opt_num_iter 100
+--input_opt_num_iter 200
 --hsic_opt_lr 0.05
---hsic_opt_num_iter 300
+--hsic_opt_num_iter 100
 --normalize_hsic True
 --ack_num_model_samples 200
 --measure pdts_condense
---hsic_kernel_fn mixrq_kernels
+--hsic_kernel_fn mixrbf_kernels
 --hsic_diversity_lambda 0.0
 --sparse_hsic_penalty 0.0
 --sparse_hsic_threshold 0.01

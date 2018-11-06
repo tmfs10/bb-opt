@@ -78,13 +78,11 @@ def add_parse_args(parser):
     parser.add_argument('--single_gaussian_test_nll', type=str2bool)
 
 
-def add_parse_args_ei(parser):
+def add_parse_args_nongrad(parser):
     parser.add_argument('--ei_diversity_measure', type=strlower, 
             help="none/hsic/detk/pdts_ucb/var")
     parser.add_argument('--ucb', type=float, help="stddev coeff")
 
-
-def add_parse_args_mves(parser):
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')
 
@@ -98,8 +96,9 @@ def add_parse_args_mves(parser):
     parser.add_argument('--measure', type=strlower, 
             help="mves/ei_mves_mix/ei_condense/ei_pdts_mix/cma_es")
     parser.add_argument('--mves_compute_batch_size', type=int)
-    parser.add_argument('--mves_kernel_fn', type=str)
+    parser.add_argument('--hsic_kernel_fn', type=str)
     parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
+    parser.add_argument('--normalize_hsic', type=str2bool)
 
 
 def add_parse_args_grad(parser):
@@ -132,4 +131,6 @@ def parse_args(parser):
                         continue
                     args_dict[k] = v
 
+    if args.unseen_reg == "normal":
+        args.gammas = [0.0]
     return args

@@ -33,3 +33,10 @@
 
 --single_gaussian_test_nll True
 --choose_type last
+
+--ei_diversity_measure none_ucb
+--ucb 0.0
+--hsic_kernel_fn mixrbf_kernels
+--normalize_hsic True
+
+--num_models 4
