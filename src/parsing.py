@@ -24,6 +24,11 @@ def float01(v):
 def str2dist(v):
     return getattr(tdist, v)
 
+def atleast0int(v):
+    v = int(v)
+    assert v >= 0
+    return v
+
 def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
@@ -43,6 +48,8 @@ def add_parse_args(parser):
     parser.add_argument('--retrain_lr', type=float)
     parser.add_argument('--retrain_batch_size', type=int)
     parser.add_argument('--choose_type', type=strlower, help="last/val")
+    parser.add_argument('--early_stopping', type=int, 
+            help="num early stopping iters. 0 means no early stoppping")
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -52,8 +59,9 @@ def add_parse_args(parser):
     parser.add_argument('--retrain_l2', type=float)
 
     parser.add_argument('--unseen_reg', type=str)
-    parser.add_argument('--gamma', type=float, 
+    parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
+    parser.add_argument('--take_log', type=str2bool)
 
     # data/output files/folders
     parser.add_argument('--data_dir', type=str)
@@ -70,13 +78,11 @@ def add_parse_args(parser):
     parser.add_argument('--single_gaussian_test_nll', type=str2bool)
 
 
-def add_parse_args_ei(parser):
+def add_parse_args_nongrad(parser):
     parser.add_argument('--ei_diversity_measure', type=strlower, 
             help="none/hsic/detk/pdts_ucb/var")
     parser.add_argument('--ucb', type=float, help="stddev coeff")
 
-
-def add_parse_args_mves(parser):
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')
 
@@ -89,6 +95,25 @@ def add_parse_args_mves(parser):
             help="divide normalized hsic by hsic stddev")
     parser.add_argument('--measure', type=strlower, 
             help="mves/ei_mves_mix/ei_condense/ei_pdts_mix/cma_es")
+    parser.add_argument('--mves_compute_batch_size', type=int)
+    parser.add_argument('--hsic_kernel_fn', type=str)
+    parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
+    parser.add_argument('--normalize_hsic', type=str2bool)
+
+
+def add_parse_args_grad(parser):
+    parser.add_argument('--input_opt_lr', type=float)
+    parser.add_argument('--input_opt_num_iter', type=int)
+    parser.add_argument('--hsic_opt_lr', type=float)
+    parser.add_argument('--hsic_opt_num_iter', type=int)
+    parser.add_argument('--normalize_hsic', type=str2bool)
+    parser.add_argument('--ack_num_model_samples', type=int)
+    parser.add_argument('--measure', type=strlower)
+    parser.add_argument('--hsic_kernel_fn', type=str)
+    parser.add_argument('--hsic_diversity_lambda', type=float)
+    parser.add_argument('--sparse_hsic_penalty', type=float)
+    parser.add_argument('--sparse_hsic_threshold', type=float)
+    parser.add_argument('--hsic_condense_penalty', type=float, nargs=2)
 
 
 def add_parse_args_ensemble(parser):
@@ -106,4 +131,6 @@ def parse_args(parser):
                         continue
                     args_dict[k] = v
 
+    if args.unseen_reg == "normal":
+        args.gammas = [0.0]
     return args

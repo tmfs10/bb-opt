@@ -16,7 +16,6 @@ from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
-from bb_opt.src.bo_model import BOModel
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -146,7 +145,7 @@ def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
             module.bias.data.uniform_(min_val, max_val)
 
 
-class NNEnsemble(BOModel, torch.nn.Module):
+class NNEnsemble(torch.nn.Module):
     """
     Ensemble of `NN`s, trained individually but whose predictions can be combined.
     Adversarial training will be used if `adversarial_epsilon` is not `None`.
@@ -188,7 +187,31 @@ class NNEnsemble(BOModel, torch.nn.Module):
         )
         self.adversarial_epsilon = adversarial_epsilon
 
-    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True):
+    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True, all_pairs: bool = True):
+        if not all_pairs:
+            assert y is None, "Not implemented"
+            N = x.shape[0]
+            m = len(self.models)
+            per_model = N//m
+            batches = [i*per_model for i in range(m)] + [N]
+            assert len(batches) == m+1
+
+            means = []
+            variances = []
+            for batch_iter in range(len(batches)-1):
+                bs = batches[batch_iter]
+                be = batches[batch_iter+1]
+                assert be-bs > 0, str(be) + "-" + str(bs) + "; " + str(batch_iter) + "; " + str(batches) + "; " + str(N) + "; " + str(m)
+
+                bmeans, bvariances = self.models[batch_iter](x[bs:be])
+                means += [bmeans]
+                variances += [bvariances]
+
+            means = torch.cat(means, dim=0)
+            variances = torch.cat(variances, dim=0)
+
+            return means, variances
+
         if y is not None and self.adversarial_epsilon is not None:
             x.requires_grad_()
             means, variances = self(x)

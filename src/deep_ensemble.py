@@ -17,7 +17,7 @@ from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
-from bb_opt.src.utils import save_checkpoint, load_checkpoint
+from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.bo_model import BOModel
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")

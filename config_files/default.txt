@@ -10,24 +10,33 @@
 --train_batch_size 128
 --retrain_num_epochs 200
 --retrain_lr 0.01
---retrain_batch_size 10
+--retrain_batch_size 128
 
 --num_hidden 100
 --sigmoid_coeff 1.0
 --output_dist_fn Normal
---train_l2 0.035
---retrain_l2 0.035
+--train_l2 0.01
+--retrain_l2 0.01
+--early_stopping 10
+--take_log True
 
 --unseen_reg normal
---gamma 0.0
+--gammas 1.0 5.0 10.0 20.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/tatsu_pbm/test_files
 --output_dir ../experiments/ensemble/o
---num_test_tfs 10
+--num_test_tfs 38
 
 --ack_batch_size 100
---num_acks 20
+--num_acks 10
 
 --single_gaussian_test_nll True
 --choose_type last
+
+--ei_diversity_measure none_ucb
+--ucb 0.0
+--hsic_kernel_fn mixrbf_kernels
+--normalize_hsic True
+
+--num_models 4

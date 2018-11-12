@@ -1,0 +1,48 @@
+
+--seed 1111
+--device cuda
+--clean False
+
+--exclude_top 0.1
+--init_train_examples 200
+--init_train_epochs 200
+--train_lr 0.01
+--train_batch_size 128
+--retrain_num_epochs 200
+--retrain_lr 0.01
+--retrain_batch_size 128
+
+--num_hidden 100
+--sigmoid_coeff 1.0
+--output_dist_fn Normal
+--train_l2 0.01
+--retrain_l2 0.01
+--early_stopping 10
+--take_log True
+
+--unseen_reg normal
+--gammas 5.0 10.0 20.0
+
+--data_dir ../data/paper_data2
+--filename_file ../data/tatsu_pbm/test_files
+--output_dir ../experiments/ensemble/o
+--num_test_tfs 10
+
+--ack_batch_size 50
+--num_acks 10
+
+--single_gaussian_test_nll True
+--choose_type last
+
+--input_opt_lr 0.1
+--input_opt_num_iter 200
+--hsic_opt_lr 0.05
+--hsic_opt_num_iter 100
+--normalize_hsic True
+--ack_num_model_samples 200
+--measure pdts_condense
+--hsic_kernel_fn mixrbf_kernels
+--hsic_diversity_lambda 0.0
+--sparse_hsic_penalty 0.0
+--sparse_hsic_threshold 0.01
+--hsic_condense_penalty 1.0 1.0
