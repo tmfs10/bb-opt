@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 
-def get_data(exp_folder, suffix, batches, num_acks, map_loc="cpu", num_samples=10):
+def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10):
     stats_to_extract = [
             'logging',
             'ack_labels',
@@ -18,6 +18,8 @@ def get_data(exp_folder, suffix, batches, num_acks, map_loc="cpu", num_samples=1
             'test_kt_corr',
             'test_std_list',
             'test_mse_std_corr',
+            'test_pred_corr',
+            'corr_stats',
             ]
 
     stats = []
@@ -37,8 +39,15 @@ def get_data(exp_folder, suffix, batches, num_acks, map_loc="cpu", num_samples=1
             for i_batch in range(len(batches)):
                 batch_size = batches[i_batch]
                 batch_dir = filepath + "/" + str(batch_size)
-                if not os.path.exists(batch_dir) or not os.path.exists(batch_dir + "/" + str(num_acks-1) + ".pth"):
+                num_acks = 0
+                if not os.path.exists(batch_dir): 
                     continue
+
+                while True:
+                    if os.path.exists(batch_dir + "/" + str(num_acks) + ".pth"):
+                        num_acks += 1
+                    else:
+                        break
 
                 stats[-1][filename][batch_size] = []
                 for i in range(num_acks):

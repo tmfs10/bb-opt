@@ -103,6 +103,20 @@ for filename in filenames:
             sigmoid_coeff=params.sigmoid_coeff, 
             device=params.device
             )
+
+    predict_info_models = None
+    if params.predict_mi:
+        predict_kernel_dim = 10
+        predict_info_models = dbopt.PredictInfoModels(
+                inputs.shape[1],
+                params.ack_emb_kernel_dim,
+                params.num_models,
+                predict_kernel_dim,
+                params.predict_stddev,
+                params.predict_mmd,
+                params.predict_nll,
+                ).to(params.device)
+
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
 
@@ -138,11 +152,13 @@ for filename in filenames:
             else:
                 model_copy = model
             optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+            if params.predict_mi:
+                predict_info_models.init_opt(params, train_idx, X.shape[0])
             logging, optim = dbopt.train_ensemble(
                     params, 
                     params.train_batch_size,
                     params.init_train_epochs, 
-                    [train_X, train_Y],
+                    [train_X, train_Y, X, Y],
                     model_copy,
                     optim,
                     unseen_reg=params.unseen_reg,
@@ -150,6 +166,7 @@ for filename in filenames:
                     choose_type=params.choose_type,
                     normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                     early_stopping=params.early_stopping,
+                    predict_info_models=predict_info_models
                     )
             val_nll_cur = logging[-1][0]
             if val_nll_cur < best_nll:
@@ -201,6 +218,8 @@ for filename in filenames:
                     if os.path.exists(batch_ack_output_file) and not params.clean:
                         checkpoint = torch.load(batch_ack_output_file)
                         model_cur.load_state_dict(checkpoint['model_state_dict'])
+                        if params.predict_mi and "predict_info_models_state_dict" in checkpoint:
+                            predict_info_models.load_state_dict(checkpoint["predict_info_models_state_dict"])
                         logging = checkpoint['logging']
 
                         model_parameters = list(model_cur.parameters())
@@ -253,17 +272,23 @@ for filename in filenames:
                                 skip_idx_cur,
                                 )
 
-                    with torch.no_grad():
-                        unseen_idx_rand = list(set(range(Y.shape[0])).difference(skip_idx_cur.union(cur_ack_idx)))
-                        rand_idx = np.random.choice(unseen_idx_rand, 100, replace=False).tolist()
-                        corr_rand = np.corrcoef(preds[:, rand_idx].transpose(0, 1).detach().cpu().numpy())
-                        hsic_rand = bopt.pairwise_hsic(params, preds[:, rand_idx])
-                        old_std = preds.std(dim=0)
+                    rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic = bopt.pairwise_logging_pre_ack(
+                            params,
+                            preds,
+                            preds_vars,
+                            skip_idx_cur,
+                            cur_ack_idx,
+                            Y,
+                            do_hsic_rand=False,
+                            do_mi_rand=False,
+                            do_batch_hsic=params.hsic_kernel_fn is not None,
+                            )
 
                     ack_all_cur.update(cur_ack_idx)
                     skip_idx_cur.update(cur_ack_idx)
-                    print("cur_ack_idx:", cur_ack_idx)
-                    print('ei_labels', labels[cur_ack_idx])
+                    #print("cur_ack_idx:", cur_ack_idx)
+                    #print('ei_labels', labels[cur_ack_idx])
+                    print('ei_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
 
                     new_idx = list(skip_idx_cur)
                     random.shuffle(new_idx)
@@ -287,11 +312,13 @@ for filename in filenames:
                         else:
                             model_copy = model
                         optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
+                        if params.predict_mi:
+                            predict_info_models.init_opt(params, skip_idx_cur, X.shape[0])
                         logging, optim = dbopt.train_ensemble(
                             params,
                             params.retrain_batch_size,
                             params.retrain_num_epochs,
-                            [train_X_cur, train_Y_cur], 
+                            [train_X_cur, train_Y_cur, X, Y], 
                             model_copy,
                             optim,
                             unseen_reg=params.unseen_reg,
@@ -299,6 +326,7 @@ for filename in filenames:
                             choose_type=params.choose_type,
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                             early_stopping=params.early_stopping,
+                            predict_info_models=predict_info_models
                             )
                         val_nll_cur = logging[-1][0]
                         if val_nll_cur < best_nll:
@@ -317,18 +345,28 @@ for filename in filenames:
                     logging = [torch.tensor(k) for k in logging]
 
                     with torch.no_grad():
-                        preds, _ = model_cur(X) # (num_samples, num_points)
+                        preds, pred_vars = model_cur(X) # (num_samples, num_points)
                         preds = preds.detach()
-                        corr_rand = corr_rand[np.tril_indices(corr_rand.shape[0], k=-1)]
-                        hsic_rand = hsic_rand[np.tril_indices(hsic_rand.shape[0], k=-1)]
-                        std_ratio_matrix = bopt.compute_std_ratio_matrix(old_std[rand_idx], preds[:, rand_idx])
+                        preds_vars = preds_vars.detach()
 
-                        p1 = pearsonr(corr_rand, std_ratio_matrix)[0]
-                        kt = kendalltau(corr_rand, std_ratio_matrix)[0]
-                        print('corr pearson:', p1, ';', 'kt:', kt)
-                        p1 = pearsonr(hsic_rand, std_ratio_matrix)[0]
-                        kt = kendalltau(hsic_rand, std_ratio_matrix)[0]
-                        print('hsic pearson:', p1, ';', 'kt:', kt)
+                        stats_pred = None
+                        if params.predict_mi:
+                            stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
+
+                        corr_stats = bopt.pairwise_logging_post_ack(
+                                params,
+                                preds[:, rand_idx],
+                                preds_vars[:, rand_idx],
+                                old_std,
+                                old_nll,
+                                corr_rand,
+                                Y[rand_idx],
+                                hsic_rand=hsic_rand,
+                                mi_rand=mi_rand,
+                                ack_batch_hsic=ack_batch_hsic,
+                                rand_batch_hsic=rand_batch_hsic,
+                                stats_pred=stats_pred
+                                )
 
                     ack_array = np.array(list(ack_all_cur), dtype=np.int32)
 
@@ -364,6 +402,7 @@ for filename in filenames:
                         'test_std_list': torch.tensor(std_list),
                         'test_mse_std_corr': torch.tensor(mse_std_corr),
                         'test_pred_corr': torch.tensor(pred_corr),
+                        'corr_stats': torch.tensor(corr_stats),
                         }, batch_ack_output_file)
                     sys.stdout.flush()
                     

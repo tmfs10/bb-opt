@@ -2,6 +2,7 @@ import os
 import gc
 import sys
 import numpy as np
+import math
 import pandas as pd
 from sklearn.model_selection import train_test_split
 from scipy.stats import kendalltau, pearsonr
@@ -1754,6 +1755,30 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
     return pdts_idx
 
 
+def get_nll(
+    preds,
+    std,
+    Y,
+    output_dist_fn,
+    single_gaussian=True,
+):
+    assert len(preds.shape) == 2
+    assert preds.shape == std.shape
+    assert preds.shape[1] == Y.shape[0]
+    m = preds.shape[0]
+    if single_gaussian:
+        output_dist = output_dist_fn(
+                preds.mean(0),
+                std.mean(0))
+        log_prob = -output_dist.log_prob(Y)
+    else:
+        output_dist = output_dist_fn(
+                preds.view(-1),
+                std.view(-1))
+        log_prob = -output_dist.log_prob(Y.repeat([m]))
+    return log_prob
+
+
 def get_pred_stats(
         preds, 
         std, 
@@ -1807,16 +1832,15 @@ def get_pred_stats(
         corr = np.corrcoef(preds[:, rand_idx].transpose(0, 1))
         pred_corr += [corr[np.tril_indices(corr.shape[0], k=-1)].mean()]
 
-        if single_gaussian:
-            output_dist = output_dist_fn(
-                    preds[:, labels_sort_idx].mean(0),
-                    std[:, labels_sort_idx].mean(0))
-            log_prob_list += [torch.mean(-output_dist.log_prob(labels2)).item()]
-        else:
-            output_dist = output_dist_fn(
-                    preds[:, labels_sort_idx].view(-1),
-                    std[:, labels_sort_idx].view(-1))
-            log_prob_list += [torch.mean(-output_dist.log_prob(labels2.repeat([m]))).item()]
+        log_prob_list += [
+                torch.mean(
+                    get_nll(
+                        preds[:, labels_sort_idx], 
+                        std[:, labels_sort_idx], 
+                        labels2,
+                        output_dist_fn,
+                        )
+                    ).item()]
 
         pred_means = preds[:, labels_sort_idx].mean(0)
         mse = (pred_means-labels2)**2
@@ -1897,6 +1921,77 @@ def pairwise_hsic(
                         ).item()
                 hsic_matrix[j, i] = hsic_matrix[i, j]
     return hsic_matrix
+
+
+def hsic_with_batch(
+    params,
+    batch_preds, # (num_samples, num_points)
+    other_preds, # (num_samples, num_points)
+    hsic_custom_kernel=None,
+):
+    with torch.no_grad():
+
+        if hsic_custom_kernel is not None:
+            batch_preds = hsic_custom_kernel(batch_preds.transpose(0, 1)).transpose(0, 1)
+            other_preds = hsic_custom_kernel(other_preds.transpose(0, 1)).transpose(0, 1)
+
+        N = other_preds.shape[1]
+        kernel_fn = getattr(hsic, 'two_vec_' + params.hsic_kernel_fn)
+        batch_kernels = kernel_fn(batch_preds)[:, :, 0]
+        kernel_fn = getattr(hsic, 'dimwise_' + params.hsic_kernel_fn)
+        
+        batch_size = 1000
+        num_batches = int(math.ceil(float(N)/batch_size))
+        batches = [min(i*batch_size, N) for i in range(num_batches+1)]
+
+        hsic_vec = torch.zeros(N)
+
+        for bi in range(len(batches)-1):
+            bs = batches[bi]
+            be = batches[bi+1]
+            assert be > bs
+
+            pred_kernels = kernel_fn(other_preds[:, bs:be])
+            for i in range(be-bs):
+                hsic_vec[bs+i] = hsic.hsic_xy(batch_kernels, pred_kernels[:, :, i], normalized=params.normalize_hsic).item()
+                assert ops.isfinite(hsic_vec[bs+i]), str(hsic_vec[bs+i]) + "\t" + str(i)
+        return hsic_vec
+
+
+def max_batch_hsic(
+    params,
+    batch_preds, # (num_samples, num_points)
+    other_preds, # (num_samples, num_points)
+):
+    num_points = other_preds.shape[1]
+    kernel_fn = getattr(hsic, 'dimwise_' + params.hsic_kernel_fn)
+    batch_kernels = kernel_fn(batch_preds)
+    pred_kernels = kernel_fn(other_preds)
+
+    hsic_vec = torch.zeros(num_points)
+    for i in range(other_preds.shape[1]):
+        max_hsic = 0
+        for batch_i in range(batch_preds.shape[1]):
+            hsic_val = hsic.hsic_xy(batch_kernels[:, :, batch_i], pred_kernels[:, :, i], normalized=params.normalize_hsic).item()
+            if hsic_val > max_hsic:
+                max_hsic = hsic_val
+        hsic_vec[i] = max_hsic
+    return hsic_vec
+
+
+def pairwise_mi(
+    params, 
+    preds, # (num_samples, num_points)
+):
+    preds = preds.cpu().numpy()
+    with torch.no_grad():
+        n = preds.shape[1]
+        mi_matrix = torch.zeros((n, n), device=params.device)
+        for i in range(n):
+            for j in range(i+1, n):
+                mi_matrix[i, j] = float(estimate_mi(np.vstack([preds[:, i], preds[:, j]])))
+                mi_matrix[j, i] = mi_matrix[i, j]
+    return mi_matrix
 
 
 def get_noninfo_ack(
@@ -2081,3 +2176,215 @@ def get_info_ack(
         f.write('train_X.shape\t' + str(train_X_mves.shape) + "\n")
 
         return condense_idx
+
+def pairwise_logging_pre_ack(
+    params,
+    preds,
+    preds_vars,
+    train_idx,
+    ack_idx,
+    Y,
+    do_hsic_rand=True,
+    do_mi_rand=True,
+    do_batch_hsic=True,
+    hsic_custom_kernel=None,
+):
+    with torch.no_grad():
+        hsic_rand = None
+        mi_rand = None
+        ack_batch_hsic = None
+        rand_batch_hsic = None
+        rand_idx = None
+        unseen_idx_rand_set = set(range(Y.shape[0])).difference(train_idx.union(ack_idx))
+        unseen_idx_rand = list(unseen_idx_rand_set)
+
+        if do_batch_hsic:
+            rand_idx = np.random.choice(unseen_idx_rand, 300, replace=False).tolist()
+            #ack_batch_hsic = max_batch_hsic(params, preds[:, list(ack_idx)], preds[:, rand_idx])
+            ack_batch_hsic = hsic_with_batch(params, preds[:, list(ack_idx)], preds[:, rand_idx], hsic_custom_kernel=hsic_custom_kernel)
+
+            #ack_batch_hsic = hsic_with_batch(params, preds[:, list(ack_idx)], preds[:, unseen_idx_rand])
+            #rand_idx = torch.sort(ack_batch_hsic, descending=True)[1].cpu().numpy().tolist()[:300]
+            #ack_batch_hsic = ack_batch_hsic[rand_idx]
+            #rand_idx = np.array(unseen_idx_rand, dtype=np.int32)[rand_idx].tolist()
+
+            rand_batch_idx = np.random.choice(list(unseen_idx_rand_set.difference(ack_idx)), len(ack_idx), replace=False).tolist()
+            #rand_batch_hsic = max_batch_hsic(params, preds[:, rand_batch_idx], preds[:, rand_idx])
+            rand_batch_hsic = hsic_with_batch(params, preds[:, rand_batch_idx], preds[:, rand_idx], hsic_custom_kernel=hsic_custom_kernel)
+
+        else:
+            rand_idx = np.random.choice(unseen_idx_rand, 300, replace=False).tolist()
+
+        corr_rand = np.corrcoef(preds[:, rand_idx].transpose(0, 1).detach().cpu().numpy())
+        if do_hsic_rand:
+            hsic_rand = pairwise_hsic(params, preds[:, rand_idx])
+        if do_mi_rand:
+            mi_rand = pairwise_mi(params, preds[:, rand_idx])
+        old_std = preds.std(dim=0)[rand_idx]
+
+        old_nll = get_nll(
+                preds[:, rand_idx], 
+                preds_vars[:, rand_idx], 
+                Y[rand_idx],
+                params.output_dist_fn
+                )
+
+        return rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic
+
+
+def pairwise_logging_post_ack(
+    params,
+    preds,
+    preds_vars,
+    old_std,
+    old_nll,
+    corr_rand,
+    Y,
+    hsic_rand=None,
+    mi_rand=None,
+    ack_batch_hsic=None,
+    rand_batch_hsic=None,
+    stats_pred=None,
+):
+
+    with torch.no_grad():
+        new_std = preds.std(dim=0)
+        std_ratio_vector = old_std/new_std
+        corr_rand = corr_rand[np.tril_indices(corr_rand.shape[0], k=-1)]
+        std_ratio_matrix = compute_std_ratio_matrix(old_std, preds)
+
+        new_nll = get_nll(
+                preds, 
+                preds_vars, 
+                Y,
+                params.output_dist_fn
+                )
+
+        nll_diff = old_nll-new_nll
+
+        corr_stats = [[], []]
+
+        p1 = pearsonr(corr_rand, std_ratio_matrix)[0]
+        kt = kendalltau(corr_rand, std_ratio_matrix)[0]
+        print('corr pearson:', p1, ';', 'kt:', kt)
+        corr_stats[0] += [float(p1)]
+        corr_stats[1] += [float(kt)]
+
+        if hsic_rand is not None:
+            hsic_rand = hsic_rand[np.tril_indices(hsic_rand.shape[0], k=-1)]
+            p1 = pearsonr(hsic_rand, std_ratio_matrix)[0]
+            kt = kendalltau(hsic_rand, std_ratio_matrix)[0]
+            print('hsic pearson:', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if mi_rand is not None:
+            mi_rand = mi_rand[np.tril_indices(mi_rand.shape[0], k=-1)]
+            p1 = pearsonr(mi_rand, std_ratio_matrix)[0]
+            kt = kendalltau(mi_rand, std_ratio_matrix)[0]
+            print('mi pearson:', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if ack_batch_hsic is not None:
+            p1 = pearsonr(ack_batch_hsic, std_ratio_vector)[0]
+            kt = kendalltau(ack_batch_hsic, std_ratio_vector)[0]
+            print('ack_batch_hsic pearson:', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if rand_batch_hsic is not None:
+            p1 = pearsonr(rand_batch_hsic, std_ratio_vector)[0]
+            kt = kendalltau(rand_batch_hsic, std_ratio_vector)[0]
+            print('rand_batch_hsic pearson:', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if ack_batch_hsic is not None:
+            #pos_nll_index = (nll_diff >= 0).byte().cpu()
+            #pos_nll_diff = torch.masked_select(nll_diff.cpu(), pos_nll_index)
+            p1 = pearsonr(ack_batch_hsic, nll_diff)[0]
+            kt = kendalltau(ack_batch_hsic, nll_diff)[0]
+            #p1 = pearsonr(torch.masked_select(ack_batch_hsic.cpu(), pos_nll_index), pos_nll_diff)[0]
+            #kt = kendalltau(torch.masked_select(ack_batch_hsic.cpu(), pos_nll_index), pos_nll_diff)[0]
+            print('ack_batch_hsic pearson (nll):', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if rand_batch_hsic is not None:
+            p1 = pearsonr(rand_batch_hsic, nll_diff)[0]
+            kt = kendalltau(rand_batch_hsic, nll_diff)[0]
+            print('rand_batch_hsic pearson (nll):', p1, ';', 'kt:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if ack_batch_hsic is not None:
+            p1 = ack_batch_hsic.mean().item()
+            kt = ack_batch_hsic.std().item()
+            print('ack_batch_hsic mean:', p1, ';', 'stddev:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+
+            print('ack_batch_hsic max:', ack_batch_hsic.max().item(), ';', 'min:', ack_batch_hsic.min().item())
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if rand_batch_hsic is not None:
+            p1 = rand_batch_hsic.mean().item()
+            kt = rand_batch_hsic.std().item()
+            print('rand_batch_hsic mean:', p1, ';', 'stddev:', kt)
+            corr_stats[0] += [float(p1)]
+            corr_stats[1] += [float(kt)]
+        else:
+            corr_stats[0] += [0]
+            corr_stats[1] += [0]
+
+        if stats_pred is not None:
+            assert len(stats_pred) == 3
+            if stats_pred[0] is None:
+                corr_stats[0] += [0]
+                corr_stats[1] += [0]
+            else:
+                p1 = pearsonr(old_std-new_std, stats_pred[0])[0]
+                kt = kendalltau(old_std-new_std, stats_pred[0])[0]
+                print('predict_std pearson:', p1, ';', 'kt:', kt)
+                corr_stats[0] += [float(p1)]
+                corr_stats[1] += [float(kt)]
+
+            if stats_pred[1] is None:
+                corr_stats[0] += [0]
+                corr_stats[1] += [0]
+            else:
+                assert False, "Not implemented"
+
+            if stats_pred[2] is None:
+                corr_stats[0] += [0]
+                corr_stats[1] += [0]
+            else:
+                p1 = pearsonr(nll_diff, stats_pred[2])[0]
+                kt = kendalltau(nll_diff, stats_pred[2])[0]
+                print('predict_nll pearson:', p1, ';', 'kt:', kt)
+                corr_stats[0] += [float(p1)]
+                corr_stats[1] += [float(kt)]
+
+
+        return corr_stats

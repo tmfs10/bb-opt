@@ -24,27 +24,22 @@
 --gammas 1.0 5.0 10.0 20.0
 
 --data_dir ../data/paper_data2
---filename_file ../data/tatsu_pbm/test_files
---output_dir ../experiments/ensemble/o
---num_test_tfs 10
+--filename_file ../data/maxvar_saber_tfs.txt
+--output_dir ../experiments/ensemble/take_log
+--num_test_tfs 38
 
---ack_batch_size 100
---num_acks 10
+--ack_batch_size 10
+--num_acks 30
 
 --single_gaussian_test_nll True
---choose_type last
+--choose_type val
 
 --ei_diversity_measure none_ucb
 --ucb 0.0
---hsic_kernel_fn mixrbf_kernels
---normalize_hsic True
 
 --num_models 4
---adv_epsilon 0.1
 
---predict_mi True
---predict_stddev True
+--predict_mi False
+--predict_stddev False
 --predict_nll False
 --predict_mmd False
---num_predict_sample_points 400
---ack_emb_kernel_dim 100

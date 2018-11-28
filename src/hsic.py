@@ -27,18 +27,24 @@ def sqdist(X1, X2=None, do_mean=False, collect=True):
                 #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
                 return sq.sum(-1)
     else:
+        """
+        X1 is of shape (n, d, k) or (n, d)
+        X2 is of shape (m, d, k) or (m, d)
+        return is of shape (n, m, d)
+        """
         assert X1.ndimension() == X2.ndimension()
         if X1.ndimension() == 2:
-            return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
+            # (n, d)
+            return (X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2
         else:
             # (n, d, k)
             assert X1.ndimension() == 3
             if not collect:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2) # (n, n, d, k)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
             if do_mean:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).mean(-1)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
             else:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).sum(-1)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
 
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
@@ -437,8 +443,14 @@ def center_kernel(K):
     return K - row_means - col_means + grand_mean
 
 # Not n-way unlike total_hsic !!!!
-def hsic_xy(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
-         eps=ops._eps):
+def hsic_xy(
+    kernel_x, 
+    kernel_y, 
+    normalized,
+    biased=False, 
+    center_x=False, 
+     eps=ops._eps
+):
     """Independence estimator.
     By default, uses the unbiased estimator.
     If normalized, returns HSIC(X, Y) / sqrt(HSIC(X, X) HSIC(Y, Y)). Uses
@@ -447,10 +459,6 @@ def hsic_xy(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
     result in slightly simpler gradients for the kernel which is not centered.
     Ignored if biased=False.
     """
-    shp = kernel_x.shape
-    assert len(shp) == 2
-    assert shp == kernel_y.shape
-
     n = kernel_x.shape[0]
 
     if biased:
@@ -500,6 +508,67 @@ def hsic_xy(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
             torch.einsum('ij,ij->', (Lt, Lt))
             + Lt_grand_sum * Lt_grand_sum / n1_n2
             - 2 / (n - 2) * torch.dot(Lt_sums, Lt_sums))
+        return main_xy / torch.sqrt(main_xx * main_yy)
+    else:
+        return main_xy / (n * (n - 3))
+
+def hsic_xy_parallel(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
+         eps=ops._eps):
+    m = kernel_x.shape[0]
+    n = kernel_x.shape[1]
+
+    if biased:
+        if normalized:
+            kernel_x = center_kernel(kernel_x)
+            kernel_y = center_kernel(kernel_y)
+        elif center_x:
+            kernel_x = center_kernel(kernel_x)
+        else:
+            kernel_y = center_kernel(kernel_y)
+
+        tr_xy = torch.einsum('kij,kij->', (kernel_x, kernel_y))
+
+        if normalized:
+            tr_xx = torch.max(torch.einsum('kij,kij->', (kernel_x, kernel_x)), kernel_x.new_tensor(eps))
+            tr_yy = torch.max(torch.einsum('kij,kij->', (kernel_y, kernel_y)), kernel_x.new_tensor(eps))
+            return tr_xy / torch.sqrt(tr_xx * tr_yy)
+        else:
+            return tr_xy / (n - 1)**2
+
+    # HSIC_1 from http://www.jmlr.org/papers/volume13/song12a/song12a.pdf
+    z = torch.zeros(n).type(kernel_x.type())
+    Kt = ops.set_diagonal(kernel_x, z)
+    Lt = ops.set_diagonal(kernel_y, z)
+
+    Kt_sums = torch.sum(Kt, dim=1)
+    Lt_sums = torch.sum(Lt, dim=1)
+
+    Kt_grand_sum = torch.sum(Kt_sums.view(m, -1), dim=-1)
+    Lt_grand_sum = torch.sum(Lt_sums.view(m, -1), dim=-1)
+
+    n1_n2 = (n - 1) * (n - 2)
+
+    def dot(X, Y):
+        Y = Y.transpose(0, 1)
+        prod = ((X-Y)**2).sum(dim=-1)
+        return prod
+
+    main_xy = (
+        torch.einsum('kij,kij->', (Kt, Lt))
+        + Kt_grand_sum * Lt_grand_sum / n1_n2
+        - 2 / (n - 2) * dot(Kt_sums, Lt_sums))
+
+    if normalized:
+        main_xx = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('kij,kij->', (Kt, Kt))
+            + Kt_grand_sum * Kt_grand_sum / n1_n2
+            - 2 / (n - 2) * dot(Kt_sums, Kt_sums))
+        main_yy = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('kij,kij->', (Lt, Lt))
+            + Lt_grand_sum * Lt_grand_sum / n1_n2
+            - 2 / (n - 2) * dot(Lt_sums, Lt_sums))
         return main_xy / torch.sqrt(main_xx * main_yy)
     else:
         return main_xy / (n * (n - 3))

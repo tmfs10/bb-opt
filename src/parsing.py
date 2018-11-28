@@ -77,6 +77,14 @@ def add_parse_args(parser):
     # log params
     parser.add_argument('--single_gaussian_test_nll', type=str2bool)
 
+    # predictor params
+    parser.add_argument('--predict_mi', type=str2bool)
+    parser.add_argument('--predict_stddev', type=str2bool)
+    parser.add_argument('--predict_nll', type=str2bool)
+    parser.add_argument('--predict_mmd', type=str2bool)
+    parser.add_argument('--num_predict_sample_points', type=int)
+    parser.add_argument('--ack_emb_kernel_dim', type=int)
+
 
 def add_parse_args_nongrad(parser):
     parser.add_argument('--ei_diversity_measure', type=strlower, 
@@ -118,6 +126,7 @@ def add_parse_args_grad(parser):
 
 def add_parse_args_ensemble(parser):
     parser.add_argument('--num_models', type=int, help='number of models in ensemble')
+    parser.add_argument('--adv_epsilon', type=float, help='adversarial epsilon')
 
 def parse_args(parser):
     args = parser.parse_args()

@@ -58,12 +58,38 @@ def isnan(x):
 def is_finite(x):
     return tensor_all((x != float('inf')) * (x == x))
 
+def isfinite(x):
+    return is_finite(x)
+
+def diag_part(X):
+    if len(X.shape) == 2:
+        return torch.diag(X)
+    else:
+        assert len(X.shape) > 2, X.shape
+        assert X.shape[-2] == X.shape[-1], X.shape
+        shp = X.shape
+        diag_indices = torch.arange(shp[-2]) * shp[-1] + torch.arange(shp[-1])
+        X = torch.index_select(X.view(shp[:-2], -1), diag_indices).view(shp)
+        return X
+
+def range_complement(n, idx):
+    idx_select = torch.zeros(n)
+    if isinstance(idx, set):
+        idx_select[list(idx)] = 1
+    else:
+        idx_select[idx] = 1
+    idx_select = (1-idx_select).byte()
+    idx = torch.arange(n)[idx_select]
+    return idx
+
 def set_diagonal(x, v):
-    assert len(x.shape) == 2
+    assert len(x.shape) >= 2
     assert len(v.shape) == 1
-    assert x.shape[0] == v.shape[0]
-    assert x.shape[1] == v.shape[0]
+    assert x.shape[-2] == v.shape[0], "%s[-2] == %s[0]" % (str(x.shape), str(v.shape))
+    assert x.shape[-1] == v.shape[0], "%s[-1] == %s[0]" % (str(x.shape), str(v.shape))
     mask = torch.diag(torch.ones_like(v))
+    for i in range(len(x.shape)-2):
+        mask = mask.unsqueeze(1)
     x = mask*torch.diag(v) + (1-mask)*x
     return x
 

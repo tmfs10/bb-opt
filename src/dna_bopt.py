@@ -5,6 +5,7 @@ from scipy.stats import kendalltau
 import hsic
 import torch
 import torch.nn as nn
+import sys
 import hsic
 import copy
 from torch.nn.parameter import Parameter
@@ -12,6 +13,7 @@ import torch.distributions as tdist
 import non_matplotlib_utils as utils
 import ops
 import bayesian_opt as bopt
+from scipy.stats import kendalltau, pearsonr
 
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
@@ -36,6 +38,7 @@ class Qz(nn.Module):
     def forward(self, e):
         return self.mu_z.unsqueeze(0) + e*self.std_z.unsqueeze(0)
     
+
 class DnaNN(nn.Module):
     def __init__(self, n_inputs, num_latent, num_hidden, activation):
         super(DnaNN, self).__init__()
@@ -50,7 +53,138 @@ class DnaNN(nn.Module):
         x = torch.cat([x, z], dim=1)
         x = self.net(x)
         return x.view(-1)
+
+
+class AckEmbeddingKernel(nn.Module):
+    def __init__(self, in_dim, out_dim, activation=nn.Tanh):
+        super(AckEmbeddingKernel, self).__init__()
+        self.net = nn.Sequential(
+                nn.Linear(in_dim, out_dim),
+                activation(),
+                nn.Linear(out_dim, out_dim),
+                activation(),
+                )
+
+    def forward(self, x):
+        ret = self.net(x) # (num_points, out_dim)
+        ret = ret.mean(dim=0)
+        #print('Ack embedding:', ret)
+        return ret
         
+
+class PredictInfoKernel(nn.Module):
+    def __init__(self, in_dim, out_dim, activation=nn.Tanh):
+        super(PredictInfoKernel, self).__init__()
+        self.net = nn.Sequential(
+                nn.Linear(in_dim, out_dim), 
+                activation(),
+                nn.Linear(out_dim, out_dim), 
+                activation(),
+                )
+
+    def forward(self, x):
+        return self.net(x)
+
+
+
+class StddevNetwork(nn.Module):
+    def __init__(self, in_dim):
+        super(StddevNetwork, self).__init__()
+        self.net = nn.Sequential(
+                nn.Linear(in_dim, 100),
+                nn.Tanh(),
+                nn.Linear(100, 1),
+                nn.Tanh(),
+                )
+
+    def forward(self, x):
+        return (self.net(x))
+
+
+
+class NllNetwork(nn.Module):
+    def __init__(self, in_dim):
+        super(NllNetwork, self).__init__()
+        self.net = nn.Linear(in_dim, 1)
+
+    def forward(self, x):
+        return self.net(x)
+
+
+class PredictInfoModels(nn.Module):
+    def __init__(
+        self, 
+        in_dim,
+        ack_emb_kernel_dim,
+        num_models,
+        predict_kernel_dim,
+        predict_stddev,
+        predict_mmd,
+        predict_nll,
+    ):
+        super(PredictInfoModels, self).__init__()
+
+        self.ack_emb_kernel = AckEmbeddingKernel(in_dim, ack_emb_kernel_dim)
+        #self.predict_info_kernel = PredictInfoKernel(in_dim+num_models+ack_emb_kernel_dim, predict_kernel_dim)
+        self.predict_info_kernel = PredictInfoKernel(in_dim+ack_emb_kernel_dim, predict_kernel_dim)
+        #self.predict_info_kernel = PredictInfoKernel(in_dim, predict_kernel_dim)
+        self.predict_stddev = predict_stddev
+        self.predict_mmd = predict_mmd
+        self.predict_nll = predict_nll
+
+        self.module_list = [self.ack_emb_kernel, self.predict_info_kernel]
+
+        self.predict_models = {
+                'std' : None,
+                'mmd' : None,
+                'nll' : None,
+                }
+        if predict_stddev:
+            self.predict_models['std'] = StddevNetwork(predict_kernel_dim)
+        if predict_mmd:
+            assert False, "Not implemented"
+        if predict_nll:
+            self.predict_models['nll'] = NllNetwork(predict_kernel_dim)
+
+        self.module_list += [p for _, p in self.predict_models.iteritems() if p is not None]
+        self.module_list = nn.ModuleList(self.module_list)
+
+        self.optim = None
+        self.idx = None
+
+    def forward(self, x, y, ack_x):
+        ack_emb = self.ack_emb_kernel(ack_x) # (out_dim)
+        ack_emb = ack_emb.unsqueeze(0).repeat([x.shape[0], 1])
+        predictor_x = torch.cat(
+                #[x, y.transpose(0, 1), ack_emb], # (num_points, num_samples)
+                [x, ack_emb], # (num_points, num_samples)
+                #[x], # (num_points, num_samples)
+                dim=1)
+        Xemb = self.predict_info_kernel(predictor_x) # (num_points, out_dim)
+        stats_pred = {}
+        for stat_name in self.predict_models:
+            if self.predict_models[stat_name] is not None:
+                stats_pred[stat_name] = self.predict_models[i](Xemb).view(-1)
+        return stats_pred
+
+    def init_opt(
+        self,
+        params,
+        train_idx,
+        num_total_points,
+    ):
+        self.optim = torch.optim.Adam(
+                list(self.parameters()),
+                lr=3e-3)
+        self.idx = ops.range_complement(num_total_points, train_idx)
+
+    def sample_points(self, n):
+        idx = torch.randint(self.idx.shape[0], (n,)).long()
+        idx = self.idx[idx]
+        #idx = self.idx[:n]
+        return idx
+
+
         
 def get_model_nn(
     prior_mean,
@@ -99,80 +233,187 @@ def get_model_nn_ensemble(
     return model
 
 
-def dynamic_penalty_train_ensemble(
-    params,
-    batch_size,
-    num_epochs,
-    train_data,
-    all_X,
-    idx_to_exclude,
+def unseen_data_loss(
     model_ensemble,
-    optim,
-    unseen_reg="normal",
-    gamma=0.0,
-    choose_type="last",
-    normalize_fn=None,
-    val_frac=0.1,
-    early_stopping=10,
-    num_trajectories=10,
-    num_epochs_per_traj=10,
-    jupyter=False,
+    means,
+    sample_input,
+    bN,
+    unseen_reg,
+    gamma,
 ):
-    N = X.shape[0]
-    indices = torch.LongTensor(list(set(range(N)).difference(idx_to_exclude)))
-    rand_order = torch.randperm(N)
-    indices = indices[rand_order]
-    
-    corr_penalty_matrix = None
-    for traj in num_trajectories:
-        model_copy = copy.deepcopy(model_ensemble)
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
-        test_idx = indices[traj*300:(traj+1)*300]
-        corr_penalty_X = X[test_idx, :]
+    loss = 0
+    if unseen_reg != "normal":
+        out_data = sample_input(bN)
+        means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
-        preds, _ = model_ensemble(corr_penalty_X) # (num_candidate_points, num_samples)
-        preds = preds.detach()
-        corr_rand = np.corrcoef(preds.transpose(0, 1).detach().cpu().numpy())
-        old_std = preds.std(dim=0)
+        if unseen_reg == "maxvar":
+            var = means_o.var(dim=0).mean()
+            loss -= gamma*var
+        elif unseen_reg == "maxinvar":
+            invar = means.var(dim=0).mean()
+            loss -= gamma*invar
+        elif unseen_reg == "maxout_minin":
+            var = means_o.var(dim=0).mean()
+            loss -= gamma*var
+            invar = means.var(dim=0).mean()
+            loss += gamma*invar
+        elif unseen_reg == "maxdpp":
+            assert False, unseen_reg + " not implemented"
+            M = means_o
+            mean = M.mean(dim=0, keepdim=True)
+            std = M.std(dim=0, keepdim=True)
+            M -= mean
+            M /= std
+            n = means_o.shape[1]
+            covar = torch.mm(M.transpose(0, 1), M)/(n-1)
+            dpp = torch.logdet(covar)
+            print('covar:', covar.mean().item(), dpp.item(), torch.diag(covar).mean().item())
+            #loss -= gamma*dpp
+        elif unseen_reg == "mincorr":
+            corr = ops.corrcoef(means_o.transpose(0, 1))
+            corr_mean = torch.tril(corr, diagonal=-1).mean()
+            loss += gamma*corr_mean
+        elif unseen_reg == "maxhsic":
+            M = means_o
+            mean = M.mean(dim=0, keepdim=True)
+            std = M.std(dim=0, keepdim=True)
+            M = M-mean
+            M = M/std
+            kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+            kernels = kernel_fn(M, M)  # shape (n=num_samples, n, 1)
+            total_hsic = hsic.total_hsic(kernels.repeat([1, 1, 2])).view(-1)
+            #print('hsic:', total_hsic.item())
+            loss -= gamma*total_hsic[0]
+        elif unseen_reg == "defmean":
+            nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
+            loss += gamma*nll
+        else:
+            assert False, unseen_reg + " not implemented"
 
-        logging, optim = dbopt.train_ensemble(
-            params,
-            batch_size,
-            num_epochs_per_traj,
-            train_data,
-            model_copy,
-            optim,
-            unseen_reg=params.unseen_reg,
-            gamma=gamma,
-            choose_type=params.choose_type,
-            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-            early_stopping=params.early_stopping,
-            val_frac=val_frac,
-            corr_penalty_X=corr_penalty_X,
-            corr_penalty_matrix=corr_penalty_matrix,
-            )
+    return loss
 
-        preds, _ = model_ensemble(X[test_idx, :]) # (num_candidate_points, num_samples)
-        preds = preds.detach()
-        corr_rand = corr_rand[np.tril_indices(corr_rand.shape[0], k=-1)]
-        std_ratio_matrix = bopt.compute_std_ratio_matrix(old_std, preds)
 
-    logging, optim = dbopt.train_ensemble(
-        params,
-        batch_size,
-        num_epochs,
-        [train_X_cur, train_Y_cur], 
-        model_ensemble,
-        optim,
-        unseen_reg=params.unseen_reg,
-        gamma=gamma,
-        choose_type=params.choose_type,
-        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-        early_stopping=params.early_stopping,
-        val_frac=val_frac,
-        )
+def collect_stats_to_predict(
+    params,
+    Y,
+    preds, # (num_samples, num_points)
+    std=True,
+    mmd=False,
+    nll=True,
+    hsic=False,
+    hsic_custom_kernel=None,
+    ack_pred=None, # (num_samples, num_points)
+):
+    with torch.no_grad():
+        stats = {
+                'std' : None,
+                'mmd' : None,
+                'nll' : None,
+                'hsic' : None
+                }
+        if std:
+            stats['std'] = preds.std(dim=0)
 
-    return logging, optim
+        if mmd:
+            assert False, "Not implemented"
+
+        if nll:
+            _, nll = NNEnsemble.report_metric(
+                    Y,
+                    preds.mean(dim=0),
+                    preds.var(dim=0),
+                    return_mse=False)
+            stats['nll'] = nll
+
+    if hsic:
+        assert hsic_custom_kernel is not None
+        assert ack_pred is not None
+        ack_emb = hsic_custom_kernel(ack_pred.transpose(0, 1)) # (num_points, emb_dem)
+        rand_emb = hsic_custom_kernel(preds.transpose(0, 1)) # (num_points, emb_dem)
+        ack_emb = ack_emb.transpose(0, 1)
+        rand_emb = rand_emb.transpose(0, 1)
+
+        kernel_fn = getattr(hsic, "dimwise_" + params.hsic_kernel_fn)
+
+        ack_kernels = kernel_fn(ack_emb) # (emb_dem, emb_dem, num_points)
+        rand_kernels = kernel_fn(rand_emb) # (emb_dem, emb_dem, num_points)
+
+        num_points = preds.shape[1]
+        hsic_loss = 0.
+        for point_idx in range(num_points):
+            hsic_loss += hsic.hsic_xy(ack_kernels[:, :, point_idx], rand_kernels[:, :, point_idx], normalized=True)
+        hsic_loss /= num_points
+
+        stats['hsic'] = hsic_loss
+
+    return stats
+
+
+def predict_info_loss(
+    params,
+    model_ensemble,
+    predict_info_models,
+    bX,
+    sX, # sample X
+    sY, # sample Y
+    old_stats, # stddev, mmd, nll
+    hsic=False,
+    hsic_custom_kernel=None,
+):
+    # learn kernel to maximize predictiveness of MMD change/HSIC but 
+    # both of those depend on the kernel so the kernel would just 
+    # output sth fixed
+    #
+    # Maybe train the vanilla kernel to be as discriminative as possible
+    # in ordering the examples (so maximize the entropy of prediction?) while
+    # training the predictor kernel to maximize the predictive capacity
+    # of the vanilla kernel
+
+    assert bX.shape[1] == sX.shape[1]
+    assert sX.shape[0] == sY.shape[0], "%s[0] == %s[0]" % (sX.shape, sY.shape)
+    assert old_stats['std'].shape[0] == sX.shape[0], "%s[0] == %s[0]" % (old_stats['std'].shape, sX.shape)
+    assert len(old_stats) == 4, len(old_stats)
+
+    with torch.no_grad():
+        X_dist = hsic.sqdist(bX.unsqueeze(1), sX.unsqueeze(1))
+        assert X_dist.shape[0] == bX.shape[0], "%s[0] == %s[0]" % (X_dist.shape, sX.shape)
+        assert X_dist.shape[1] == sX.shape[0], "%s[1] == %s[1]" % (X_dist.shape, sX.shape)
+        assert X_dist.shape[2] == 1, X_dist.shape
+        X_dist = X_dist[:, :, 0].mean(dim=0).cpu().numpy()
+
+    with torch.no_grad():
+        sY2, _ = model_ensemble(sX) # (num_samples, num_points)
+        if hsic:
+            ack_pred, _ = model_ensemble(bX) # (num_samples, num_points)
+        else:
+            ack_pred = None
+        new_stats = collect_stats_to_predict(params, sY, sY2, ack_pred=ack_pred)
+
+    stats_pred = predict_info_models(sX, sY2, bX)
+    stats_loss = 0.
+    for stat_name in old_stats:
+        if stat_name in stats_pred and stats_pred[stat_name] is not None:
+            diff = (old_stats[stat_name]-new_stats[stat_name])
+            assert X_dist.shape[0] == diff.shape[0]
+
+            #p = pearsonr(X_dist, (-diff/old_stats[stat_name]).detach().cpu().numpy())[0]
+            #print("dist_p", p)
+
+            vx = diff-torch.mean(diff)
+            vy = stats_pred[stat_name]-torch.mean(stats_pred[stat_name])
+
+            vp = torch.sum(vx*vy) / (torch.sqrt(torch.sum(vx ** 2)) * torch.sqrt(torch.sum(vy ** 2)))
+
+            stats_loss += torch.mean((stats_pred[stat_name]-diff)**2)
+            #stats_loss -= vp
+            if stat_name == 'std':
+                #print("diff:", diff)
+                #print("stats_pred[stat_name]:", stats_pred[stat_name])
+                #print("stats_loss:", stats_loss.item())
+                #p = pearsonr(stats_pred[stat_name].detach().cpu().numpy(), diff.detach().cpu().numpy())[0]
+                #print("stats_pearson:", p)
+                pass
+    return stats_loss
 
 
 def train_ensemble(
@@ -188,9 +429,14 @@ def train_ensemble(
     normalize_fn=None,
     val_frac=0.1,
     early_stopping=10,
+    adv_alpha=1.0,
+    adv_epsilon=0.0,
+    predict_info_models=None,
+    hsic_custom_kernel=None,
     jupyter=False,
 ):
-    train_X, train_Y = data
+    adv_train = adv_epsilon > 1e-9
+    train_X, train_Y, X, Y = data
     N = train_X.shape[0]
     assert val_frac >= 0.01
     assert val_frac <= 0.9
@@ -251,8 +497,9 @@ def train_ensemble(
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
 
+            means, variances = model_ensemble(bX, optimizer=optim)
+
             optim.zero_grad()
-            means, variances = model_ensemble(bX)
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
             nll = NNEnsemble.compute_negative_log_likelihood(
                     bY,
@@ -260,62 +507,67 @@ def train_ensemble(
                     variances, 
                     return_mse=False)
 
-            loss = nll
+            if adv_train:
+                assert False, 'Untested'
+                negative_log_likelihood = NNEnsemble.compute_negative_log_likelihood(
+                    y, 
+                    means, 
+                    variances, 
+                    return_mse=False,
+                )
+
+                grad = torch.autograd.grad(
+                    negative_log_likelihood, bX, retain_graph=False
+                )[0]
+                x = bX.detach() + self.adversarial_epsilon * torch.sign(grad)
+
+                loss = adv_alpha*nll + (1-adv_alpha) * negative_log_likelihood
+            else:
+                loss = nll
+
             train_nlls += [nll.item()]
             mse = torch.sqrt(torch.mean((means-bY)**2)).item()
             train_mses += [mse]
 
-            if unseen_reg != "normal":
-                assert gamma > 0
-                out_data = sample_uniform(bN)
-                means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+            loss += unseen_data_loss(
+                    model_ensemble,
+                    means,
+                    sample_uniform,
+                    bN,
+                    unseen_reg,
+                    gamma,
+                    )
 
-                if unseen_reg == "maxvar":
-                    var = means_o.var(dim=0).mean()
-                    loss -= gamma*var
-                elif unseen_reg == "maxinvar":
-                    invar = means.var(dim=0).mean()
-                    loss -= gamma*invar
-                elif unseen_reg == "maxout_minin":
-                    var = means_o.var(dim=0).mean()
-                    loss -= gamma*var
-                    invar = means.var(dim=0).mean()
-                    loss += gamma*invar
-                elif unseen_reg == "maxdpp":
-                    assert False, unseen_reg + " not implemented"
-                    M = means_o
-                    mean = M.mean(dim=0, keepdim=True)
-                    std = M.std(dim=0, keepdim=True)
-                    M -= mean
-                    M /= std
-                    n = means_o.shape[1]
-                    covar = torch.mm(M.transpose(0, 1), M)/(n-1)
-                    dpp = torch.logdet(covar)
-                    print('covar:', covar.mean().item(), dpp.item(), torch.diag(covar).mean().item())
-                    #loss -= gamma*dpp
-                elif unseen_reg == "mincorr":
-                    corr = ops.corrcoef(means_o.transpose(0, 1))
-                    corr_mean = torch.tril(corr, diagonal=-1).mean()
-                    loss += gamma*corr_mean
-                elif unseen_reg == "maxhsic":
-                    M = means_o
-                    mean = M.mean(dim=0, keepdim=True)
-                    std = M.std(dim=0, keepdim=True)
-                    M = M-mean
-                    M = M/std
-                    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
-                    kernels = kernel_fn(M, M)  # shape (n=num_samples, n, 1)
-                    total_hsic = hsic.total_hsic(kernels.repeat([1, 1, 2])).view(-1)
-                    #print('hsic:', total_hsic.item())
-                    loss -= gamma*total_hsic[0]
-                elif unseen_reg == "defmean":
-                    nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
-                    loss += gamma*nll
-                else:
-                    assert False, unseen_reg + " not implemented"
+            if predict_info_models is not None:
+                s_idx = predict_info_models.sample_points(params.num_predict_sample_points)
+                with torch.no_grad():
+                    predictor_preds, _ = model_ensemble(X[s_idx])
+                old_stats = collect_stats_to_predict(
+                        params,
+                        Y[s_idx], 
+                        predictor_preds, 
+                        )
+
+                loss += old_stats['hsic']
 
             loss.backward()
             optim.step()
+
+            if predict_info_models is not None:
+                for i in range(150):
+                    predict_info_models.optim.zero_grad()
+                    predictor_loss = predict_info_loss(
+                            params,
+                            model_ensemble,
+                            predict_info_models,
+                            bX,
+                            X[s_idx],
+                            Y[s_idx],
+                            old_stats,
+                            )
+                    predictor_loss.backward()
+                    predict_info_models.optim.step()
+                #sys.exit(1)
 
         model_ensemble.eval()
         with torch.no_grad():
