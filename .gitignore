@@ -39,3 +39,5 @@ experiments
 slurm*
 .ipynb_checkpoints
 .vscode
+.pylintrc
+models_nathan
