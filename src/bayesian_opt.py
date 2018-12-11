@@ -14,6 +14,7 @@ import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
 import pyro
 import pyro.optim
+import info_measures as info
 from pyro.distributions import (
     Normal,
     TransformedDistribution,
@@ -2075,15 +2076,11 @@ def get_info_ack(
     skip_idx,
 ):
     with torch.no_grad():
+        ei = preds.mean(dim=0).view(-1).cpu().numpy()
+        std = preds.std(dim=0).view(-1).cpu().numpy()
         if not params.compare_w_old:
-            preds[:, list(skip_idx)] = preds.min()
-            ei = preds.mean(dim=0).view(-1).cpu().numpy()
-            std = preds.std(dim=0).view(-1).cpu().numpy()
-        else:
-            preds2 = preds.clone()
-            preds2[:, list(skip_idx)] = preds2.min()
-            ei = preds2.mean(dim=0).view(-1).cpu().numpy()
-            std = preds2.std(dim=0).view(-1).cpu().numpy()
+            ei[:, list(skip_idx)] = ei.min()
+            std[:, list(skip_idx)] = ei.min()
         
         top_k = params.num_diversity
 
@@ -2388,3 +2385,90 @@ def pairwise_logging_post_ack(
 
 
         return corr_stats
+
+def compute_ack_stat_change(
+    X,
+    preds,
+    ack_idx,
+    model_ensemble,
+    target_idx,
+    stat_fn, # (num_samples, indices) -> stddev/mmd to uniform/etc
+    optim,
+    old_model_state_dict,
+    old_optim_state_dict,
+):
+    stat = stat_fn(preds[:, target_idx])
+
+    bX = X[ack_idx]
+    bY = preds[:, ack_idx].mean(dim=0)
+
+    means, variances = model_ensemble(bX)
+
+    nll = NNEnsemble.compute_negative_log_likelihood(
+        bY,
+        means,
+        variances,
+        return_mse=False,
+    )
+
+    optim.zero_grad()
+    nll.backward()
+    optim.step()
+
+    with torch.no_grad():
+        means2, variances2 = model_ensemble(X[target_idx])
+        stat2 = stat_fn(means2)
+
+    optim.zero_grad()
+    model_ensemble.load_state_dict(old_model_state_dict)
+    optim.load_state_dict(old_optim_state_dict)
+
+    return stats2-stat
+
+
+
+def get_empirical_condensation_ack(
+    X,
+    preds,
+    model_ensemble,
+    optim,
+    target_idx,
+    skip_idx,
+    ack_batch_size,
+    stat_fn = lambda preds : preds.std(dim=0),
+    predict_info_model=None,
+):
+    cur_ack_batch = []
+
+    model_state_dict = copy.deepcopy(model_ensemble.state_dict())
+    optim_state_dict = copy.deepcopy(optim.state_dict())
+
+    for ack_batch_iter in range(ack_batch_size):
+        stat_change_list = torch.zeros(X.shape[0])
+        for idx in range(X.shape[0]):
+            if idx in skip_idx or idx in cur_ack_batch:
+                continue
+
+            with torch.no_grad():
+                stat_change = compute_ack_stat_change(
+                        X,
+                        preds,
+                        cur_ack_batch + [idx],
+                        model_ensemble,
+                        target_idx,
+                        stat_fn,
+                        optim,
+                        model_state_dict,
+                        optim_state_dict,
+                        )
+
+            stat_change_list[idx] = stat_change.median().detach()
+        stat_change_sort, stat_change_sort_idx = torch.sort(stat_change_list)
+        cur_ack_batch += [stat_change_sort_idx[0].item()]
+
+    return cur_ack_batch
+
+
+def compute_maxdist_entropy(preds, k=5):
+    h = info.get_h(preds.max(dim=1).cpu().numpy(), k)
+    return h

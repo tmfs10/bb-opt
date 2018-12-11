@@ -8,6 +8,7 @@ import torch
 def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10):
     stats_to_extract = [
             'logging',
+            'ack_idx',
             'ack_labels',
             'best_hsic',
             'ir_batch',

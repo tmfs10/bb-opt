@@ -32,6 +32,8 @@ params = parsing.parse_args(parser)
 print('PARAMS:')
 for k, v in vars(params).items():
     print(k, v)
+do_model_hparam_search = len(params.gamma) > 1
+do_ood_val = params.ood_val > 1e-9
 
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
@@ -95,6 +97,9 @@ for filename in filenames:
     Y = torch.tensor(labels, device=device)
 
     # creates model
+    ensemble_init_rng = None
+    if params.reset_model_every_iter:
+        ensemble_init_rng = ops.get_rng_state()
     model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
             params.train_batch_size, 
@@ -146,6 +151,7 @@ for filename in filenames:
         best_model = None
         best_optim = None
         best_logging = None
+        best_gamma = None
         for gamma in params.gammas:
             if len(params.gammas) > 1:
                 model_copy = copy.deepcopy(model)
@@ -154,7 +160,7 @@ for filename in filenames:
             optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
             if params.predict_mi:
                 predict_info_models.init_opt(params, train_idx, X.shape[0])
-            logging, optim = dbopt.train_ensemble(
+            logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
                     params, 
                     params.train_batch_size,
                     params.init_train_epochs, 
@@ -165,8 +171,11 @@ for filename in filenames:
                     gamma=gamma,
                     choose_type=params.choose_type,
                     normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                    val_frac=params.val_frac,
                     early_stopping=params.early_stopping,
-                    predict_info_models=predict_info_models
+                    predict_info_models=predict_info_models,
+                    reset_rng_state=ensemble_init_rng,
+                    ood_val=params.ood_val if do_model_hparam_search else 0.0,
                     )
             val_nll_cur = logging[-1][0]
             if val_nll_cur < best_nll:
@@ -174,6 +183,29 @@ for filename in filenames:
                 best_model = model_copy
                 best_optim = optim
                 best_logging = logging
+                best_gamma = gamma
+
+        if do_model_hparam_search and do_ood_val:
+            assert best_gamma is not None
+            logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
+                    params, 
+                    params.train_batch_size,
+                    params.init_train_epochs, 
+                    [train_X, train_Y, X, Y],
+                    model_copy,
+                    optim,
+                    unseen_reg=params.unseen_reg,
+                    gamma=best_gamma,
+                    choose_type=params.choose_type,
+                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                    val_frac=params.val_frac,
+                    early_stopping=params.early_stopping,
+                    predict_info_models=predict_info_models,
+                    reset_rng_state=ensemble_init_rng,
+                    ood_val=0.0,
+                    )
+
+        ensemble_init_rng = ensemble_init_rng2
         logging = best_logging
         model = best_model
         optim = best_optim
@@ -256,7 +288,28 @@ for filename in filenames:
 
                     print('filename:', filename, '; measure:', params.ei_diversity_measure, '; output folder', params.output_dir)
 
-                    if params.ei_diversity_measure != "info":
+                    if "empirical_cond_" in params.ei_diversity_measure:
+                        if params.ei_diversity_measure == "empirical_cond_pdts":
+                            ack_to_condense = bopt.get_pdts_idx(
+                                    preds, 
+                                    params.num_diversity*ack_batch_size, 
+                                    density=False)
+                        elif params.ei_diversity_measure == "empirical_cond_er":
+                            er = preds.mean(dim=0).view(-1).cpu().numpy()
+                            er[:, list(skip_idx)] = er.min()
+                            er_sortidx = np.argsort(er)
+                            ack_to_condense = er_sortidx[-params.num_diversity*ack_batch_size:]
+
+                        cur_ack_idx = bopt.get_empirical_condensation_ack(
+                                X,
+                                preds,
+                                model_ensemble,
+                                optim,
+                                ack_to_condense,
+                                skip_idx_cur,
+                                ack_batch_size,
+                                )
+                    elif params.ei_diversity_measure != "info":
                         cur_ack_idx = bopt.get_noninfo_ack(
                                 params,
                                 params.ei_diversity_measure,
@@ -306,6 +359,7 @@ for filename in filenames:
                     best_model = None
                     best_optim = None
                     best_logging = None
+                    best_gamma = None
                     for gamma in params.gammas:
                         if len(params.gammas) > 1:
                             model_copy = copy.deepcopy(model)
@@ -314,7 +368,7 @@ for filename in filenames:
                         optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
                         if params.predict_mi:
                             predict_info_models.init_opt(params, skip_idx_cur, X.shape[0])
-                        logging, optim = dbopt.train_ensemble(
+                        logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
                             params,
                             params.retrain_batch_size,
                             params.retrain_num_epochs,
@@ -325,8 +379,11 @@ for filename in filenames:
                             gamma=gamma,
                             choose_type=params.choose_type,
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            val_frac=params.val_frac,
                             early_stopping=params.early_stopping,
-                            predict_info_models=predict_info_models
+                            predict_info_models=predict_info_models,
+                            reset_rng_state=ensemble_init_rng,
+                            ood_val=params.ood_val if do_model_hparam_search else 0.0,
                             )
                         val_nll_cur = logging[-1][0]
                         if val_nll_cur < best_nll:
@@ -334,6 +391,29 @@ for filename in filenames:
                             best_model = model_copy
                             best_optim = optim
                             best_logging = logging
+                            best_gamma = gamma
+
+                    if do_model_hparam_search and do_ood_val:
+                        assert best_gamma is not None
+                        logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
+                                params, 
+                                params.train_batch_size,
+                                params.init_train_epochs, 
+                                [train_X, train_Y, X, Y],
+                                model_copy,
+                                optim,
+                                unseen_reg=params.unseen_reg,
+                                gamma=best_gamma,
+                                choose_type=params.choose_type,
+                                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                                val_frac=params.val_frac,
+                                early_stopping=params.early_stopping,
+                                predict_info_models=predict_info_models,
+                                reset_rng_state=ensemble_init_rng,
+                                ood_val=0.0,
+                                )
+
+                    ensemble_init_rng = ensemble_init_rng2
                     logging = best_logging
                     model_cur = best_model
                     optim = best_optim

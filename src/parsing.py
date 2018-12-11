@@ -37,6 +37,7 @@ def add_parse_args(parser):
             help='use cuda (default: True)')
     parser.add_argument('--clean', type=str2bool, 
             help='remove existing saved dir')
+    parser.add_argument("--reset_model_every_iter", type=str2bool)
 
     # train params
     parser.add_argument('--exclude_top', type=float01)
@@ -50,6 +51,10 @@ def add_parse_args(parser):
     parser.add_argument('--choose_type', type=strlower, help="last/val")
     parser.add_argument('--early_stopping', type=int, 
             help="num early stopping iters. 0 means no early stoppping")
+    parser.add_argument('--val_frac', type=float,
+            help="val frac to hold out as in-distribution validation set")
+    parser.add_argument('--ood_val', type=float,
+            help="top frac to hold out as out-of-distribution validation set")
 
     # model params
     parser.add_argument('--num_hidden', type=int)

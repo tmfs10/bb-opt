@@ -3,6 +3,8 @@
 
 import torch
 import torch.nn.functional as F
+import numpy as np
+import copy
 
 _eps = 1.0e-5
 
@@ -193,3 +195,10 @@ def cross_corrcoef(x, y):
     c = torch.clamp(c, -1.0, 1.0)
 
     return c
+
+def get_rng_state():
+    return (copy.deepcopy(torch.get_rng_state()), copy.deepcopy(np.random.get_state()))
+
+def set_rng_state(state):
+    torch.set_rng_state(state[0])
+    np.random.set_state(state[1])

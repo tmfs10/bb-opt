@@ -247,16 +247,38 @@ def unseen_data_loss(
         means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
         if unseen_reg == "maxvar":
-            var = means_o.var(dim=0).mean()
-            loss -= gamma*var
+            var_mean = means_o.var(dim=0).mean()
+            loss -= gamma*var_mean
+        elif unseen_reg == "maxstd":
+            std_mean = means_o.std(dim=0).mean()
+            loss -= gamma*std_mean
+        elif unseen_reg == "maxstd_std":
+            std_std = means_o.std(dim=0).std()
+            loss -= gamma*(std_std)
+        elif unseen_reg == "maxstd_mean_std":
+            std_mean = means_o.std(dim=0).mean()
+            std_std = means_o.std(dim=0).std()
+            loss -= gamma*0.5*(std_mean + std_std)
         elif unseen_reg == "maxinvar":
             invar = means.var(dim=0).mean()
             loss -= gamma*invar
+        elif unseen_reg == "maxinstd":
+            instd = means.std(dim=0).mean()
+            loss -= gamma*instd
+        elif unseen_reg == "maxinoutstd":
+            std_mean = means_o.std(dim=0).mean()
+            instd = means.std(dim=0).mean()
+            loss -= gamma*0.5*(instd+std_mean)
         elif unseen_reg == "maxout_minin":
             var = means_o.var(dim=0).mean()
             loss -= gamma*var
             invar = means.var(dim=0).mean()
             loss += gamma*invar
+        elif unseen_reg == "maxout_minin_std":
+            std = means_o.std(dim=0).mean()
+            loss -= gamma*std
+            instd = means.std(dim=0).mean()
+            loss += gamma*instd
         elif unseen_reg == "maxdpp":
             assert False, unseen_reg + " not implemented"
             M = means_o
@@ -425,7 +447,7 @@ def train_ensemble(
     optim,
     unseen_reg="normal",
     gamma=0.0,
-    choose_type="last",
+    choose_type="val",
     normalize_fn=None,
     val_frac=0.1,
     early_stopping=10,
@@ -433,16 +455,34 @@ def train_ensemble(
     adv_epsilon=0.0,
     predict_info_models=None,
     hsic_custom_kernel=None,
+    reset_rng_state=None,
     jupyter=False,
+    ood_val=0.0,
 ):
+    if reset_rng_state is not None:
+        cur_rng_state = ops.get_rng_state()
+        ops.set_rng_state(reset_rng_state)
+        model_ensemble.reset_parameters()
+        reset_rng_state = ops.get_rng_state()
+        ops.set_rng_state(cur_rng_state)
+
     adv_train = adv_epsilon > 1e-9
     train_X, train_Y, X, Y = data
     N = train_X.shape[0]
     assert val_frac >= 0.01
     assert val_frac <= 0.9
 
-    train_idx, val_idx, _ = utils.train_val_test_split(N, [1-val_frac, val_frac])
+    if ood_val > 1e-9:
+        assert ood_val <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val)
+        sorted_idx = torch.sort(train_Y, descending=True)[1]
+        val_N = N * ood_val
+        idx = torch.arange(N)
+        train_idx = idx[sorted_idx[val_N:]]
+        val_idx = idx[sorted_idx[:val_N]]
+    else:
+        train_idx, val_idx, _ = utils.train_val_test_split(N, [1-val_frac, val_frac])
 
+    assert val_idx.shape[0] > 0
     val_X = train_X[val_idx]
     train_X = train_X[train_idx]
     val_Y = train_Y[val_idx]
@@ -497,7 +537,7 @@ def train_ensemble(
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
 
-            means, variances = model_ensemble(bX, optimizer=optim)
+            means, variances = model_ensemble(bX)
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
@@ -634,7 +674,7 @@ def train_ensemble(
         val_mses = [-1]
         val_std = [-1]
 
-    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std, [best_nll]], optim
+    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std, [best_nll]], optim, reset_rng_state
 
 
 def one_hot_list_to_number(inputs, data=None):

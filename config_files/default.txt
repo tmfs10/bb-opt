@@ -1,7 +1,8 @@
 
 --seed 1111
 --device cuda
---clean False
+--clean True
+--reset_model_every_iter True
 
 --exclude_top 0.1
 --init_train_examples 200
@@ -11,6 +12,8 @@
 --retrain_num_epochs 200
 --retrain_lr 0.01
 --retrain_batch_size 128
+--val_frac 0.1
+--ood_val 0.1
 
 --num_hidden 100
 --sigmoid_coeff 1.0
@@ -21,7 +24,7 @@
 --take_log True
 
 --unseen_reg normal
---gammas 1.0 5.0 10.0 20.0
+--gammas 0.0 1.0 5.0 10.0 20.0 50.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/tatsu_pbm/test_files

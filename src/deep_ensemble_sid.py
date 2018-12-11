@@ -57,6 +57,11 @@ class NN(torch.nn.Module):
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
 
+    def reset_parameters(self):
+        self.hidden1.reset_parameters()
+        self.hidden2.reset_parameters()
+        self.output.reset_parameters()
+
 class NN2(torch.nn.Module):
     """
     Single-layer MLP that predicts a Gaussian for each point.
@@ -90,6 +95,11 @@ class NN2(torch.nn.Module):
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
+
+    def reset_parameters(self):
+        self.hidden1.reset_parameters()
+        self.hidden2.reset_parameters()
+        self.output.reset_parameters()
 
 
 class RandomNN(torch.nn.Module):
@@ -135,6 +145,11 @@ class RandomNN(torch.nn.Module):
         mean =torch.sigmoid(output[:,0])*self.c[0]
         variance =torch.sigmoid(output[:,1])*self.c[1]+self.min_variance
         return mean, variance
+
+    def reset_parameters(self):
+        self.hidden1.reset_parameters()
+        self.hidden2.reset_parameters()
+        self.output.reset_parameters()
 
 
 def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
@@ -187,9 +202,12 @@ class NNEnsemble(torch.nn.Module):
         )
         self.adversarial_epsilon = adversarial_epsilon
 
-    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True, all_pairs: bool = True):
+    def reset_parameters(self):
+        for model in self.models:
+            model.reset_parameters()
+
+    def forward(self, x, individual_predictions: bool = True, all_pairs: bool = True):
         if not all_pairs:
-            assert y is None, "Not implemented"
             N = x.shape[0]
             m = len(self.models)
             per_model = N//m
@@ -211,25 +229,6 @@ class NNEnsemble(torch.nn.Module):
             variances = torch.cat(variances, dim=0)
 
             return means, variances
-
-        if y is not None and self.adversarial_epsilon is not None:
-            x.requires_grad_()
-            means, variances = self(x)
-            negative_log_likelihood = self.compute_negative_log_likelihood(
-                y, means, variances
-            )
-
-            grad = torch.autograd.grad(
-                negative_log_likelihood, x, retain_graph=optimizer is not None
-            )[0]
-            x = x.detach() + self.adversarial_epsilon * torch.sign(grad)
-
-            if optimizer:
-                # then do a backward pass on x as well as returning the prediction
-                # for x_adv to do a pass on that
-                negative_log_likelihood.backward()
-                optimizer.step()
-                optimizer.zero_grad()
 
         means, variances = list(zip(*[self.models[i](x) for i in range(self.n_models)]))
         means, variances = torch.stack(means), torch.stack(variances)
