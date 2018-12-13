@@ -13,6 +13,7 @@ import numpy as np
 import torch
 from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
+import torch.distributions as tdist
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
@@ -58,8 +59,7 @@ class NN(torch.nn.Module):
         return mean, variance
 
     def reset_parameters(self):
-        self.hidden1.reset_parameters()
-        self.hidden2.reset_parameters()
+        self.hidden.reset_parameters()
         self.output.reset_parameters()
 
 class NN2(torch.nn.Module):
@@ -282,19 +282,30 @@ class NNEnsemble(torch.nn.Module):
     def report_metric(
         labels, means, variances, return_mse: bool = False
     ):
+        num_samples = means.shape[0]
         m = means.mean(dim=0)
-        v = (variances + means ** 2).mean(dim=0)-m ** 2
+        v = (variances + means ** 2).mean(dim=0) - (m ** 2)
         mse_m= (labels - m) ** 2
         mse = (labels - means) ** 2
         # 1.83 = 2*pi
-        negative_log_likelihood1 = 0.5 * (torch.log(variances) + mse / variances + 1.83)
-        negative_log_likelihood1 = negative_log_likelihood1.mean(dim=-1).mean()
-        negative_log_likelihood2 = 0.5*(torch.log(v)+ mse_m/v + 1.83)
-        negative_log_likelihood2 = negative_log_likelihood2.mean()
+
+        d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
+        negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean()
+
+        d = tdist.Normal(m, v)
+        negative_log_likelihood2 = -d.log_prob(labels).mean()
+
+        #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.83)
+        #nll1 = negative_log_likelihood1.mean(dim=-1).mean()
+        #nll2 = 0.5*(torch.log(v)+ mse_m/v + 1.83)
+        #nll2 = negative_log_likelihood2.mean()
+
+        #print('c:', negative_log_likelihood1, nll1)
+        #print('c:', negative_log_likelihood2, nll2)
 
         if return_mse:
-            return negative_log_likelihood1,negative_log_likelihood2, mse_m.mean()
-        return negative_log_likelihood1,negative_log_likelihood2
+            return negative_log_likelihood1, negative_log_likelihood2, mse_m.mean()
+        return negative_log_likelihood1, negative_log_likelihood2
 
     @staticmethod
     def compute_weighted_nll(labels, means, variances, return_mse: bool = False):

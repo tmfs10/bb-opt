@@ -33,6 +33,10 @@ def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
             help='random seed')
+    parser.add_argument('--model_init_seed', type=int, 
+            help='random seed')
+    parser.add_argument('--data_split_seed', type=int, 
+            help='random seed')
     parser.add_argument('--device', type=str, 
             help='use cuda (default: True)')
     parser.add_argument('--clean', type=str2bool, 

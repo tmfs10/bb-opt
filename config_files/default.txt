@@ -1,5 +1,7 @@
 
---seed 1111
+--seed 1
+--model_init_seed 1
+--data_split_seed 1
 --device cuda
 --clean True
 --reset_model_every_iter True
@@ -35,7 +37,7 @@
 --num_acks 10
 
 --single_gaussian_test_nll True
---choose_type last
+--choose_type val_nll
 
 --ei_diversity_measure none_ucb
 --ucb 0.0

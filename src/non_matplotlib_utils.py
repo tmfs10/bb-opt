@@ -9,6 +9,7 @@ import bb_opt.src.sascorer as sascorer
 import pyro
 import torch
 import sys
+import ops
 
 def sigmoid(x, exp=np.exp):
   return 1.0 / (1.0 + exp(-x))
@@ -71,14 +72,22 @@ def load_pyro_model(base_path: str, optimizer):
     optimizer.load(f"{base_path}.opt")
 
 
-def train_val_test_split(n, split, shuffle=True):
+def train_val_test_split(n, split, shuffle=True, rng=None):
     if type(n) == int:
         idx = np.arange(n)
     else:
         idx = n
 
+    if rng is not None:
+        cur_rng = ops.get_rng_state()
+        ops.set_rng_state(rng)
+
     if shuffle:
+        rng = ops.get_rng_state()
         np.random.shuffle(idx)
+
+    if rng is not None:
+        ops.set_rng_state(cur_rng)
 
     if split[0] < 1:
         assert sum(split) <= 1.
@@ -88,7 +97,7 @@ def train_val_test_split(n, split, shuffle=True):
         train_end = split[0]
         val_end = train_end + split[1]
 
-    return idx[:train_end], idx[train_end:val_end], idx[val_end:]
+    return idx[:train_end], idx[train_end:val_end], idx[val_end:], rng
 
 
 def load_checkpoint(fname: str, model, optimizer: Optional = None) -> None:

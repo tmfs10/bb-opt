@@ -21,6 +21,7 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10):
             'test_mse_std_corr',
             'test_pred_corr',
             'corr_stats',
+            'best_gamma',
             ]
 
     stats = []

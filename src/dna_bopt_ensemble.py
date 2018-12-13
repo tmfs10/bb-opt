@@ -32,7 +32,7 @@ params = parsing.parse_args(parser)
 print('PARAMS:')
 for k, v in vars(params).items():
     print(k, v)
-do_model_hparam_search = len(params.gamma) > 1
+do_model_hparam_search = len(params.gammas) > 1
 do_ood_val = params.ood_val > 1e-9
 
 gpu_id = gpu_init(best_gpu_metric="mem")
@@ -57,6 +57,21 @@ filenames = [k.strip() for k in open(params.filename_file).readlines()][:params.
 print('output_dir:', params.output_dir)
 
 for filename in filenames:
+
+    # creates model init/data split rng
+    cur_rng = ops.get_rng_state()
+
+    np.random.seed(params.model_init_seed)
+    torch.manual_seed(params.model_init_seed)
+    ensemble_init_rng = ops.get_rng_state()
+
+    np.random.seed(params.data_split_seed)
+    torch.manual_seed(params.data_split_seed)
+    data_split_rng = ops.get_rng_state()
+
+    ops.set_rng_state(cur_rng)
+    ###
+
     filedir = params.data_dir + "/" + filename + "/"
     if not os.path.exists(filedir):
         continue
@@ -81,7 +96,11 @@ for filename in filenames:
     indices = indices[sort_idx]
 
     # reading data
-    train_idx, _, test_idx = utils.train_val_test_split(indices, split=[params.init_train_examples, 0])
+    train_idx, _, test_idx, data_split_rng = utils.train_val_test_split(
+            indices, 
+            split=[params.init_train_examples, 0],
+            rng=data_split_rng,
+            )
 
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
@@ -96,10 +115,9 @@ for filename in filenames:
     X = torch.tensor(inputs, device=device)
     Y = torch.tensor(labels, device=device)
 
-    # creates model
-    ensemble_init_rng = None
-    if params.reset_model_every_iter:
-        ensemble_init_rng = ops.get_rng_state()
+    cur_rng = ops.get_rng_state()
+    ops.set_rng_state(ensemble_init_rng)
+
     model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
             params.train_batch_size, 
@@ -108,6 +126,9 @@ for filename in filenames:
             sigmoid_coeff=params.sigmoid_coeff, 
             device=params.device
             )
+
+    ensemble_init_rng = ops.get_rng_state()
+    ops.set_rng_state(cur_rng)
 
     predict_info_models = None
     if params.predict_mi:
@@ -147,74 +168,20 @@ for filename in filenames:
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
-        best_nll = float('inf')
-        best_model = None
-        best_optim = None
-        best_logging = None
-        best_gamma = None
-        for gamma in params.gammas:
-            if len(params.gammas) > 1:
-                model_copy = copy.deepcopy(model)
-            else:
-                model_copy = model
-            optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
-            if params.predict_mi:
-                predict_info_models.init_opt(params, train_idx, X.shape[0])
-            logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
-                    params, 
-                    params.train_batch_size,
-                    params.init_train_epochs, 
-                    [train_X, train_Y, X, Y],
-                    model_copy,
-                    optim,
-                    unseen_reg=params.unseen_reg,
-                    gamma=gamma,
-                    choose_type=params.choose_type,
-                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                    val_frac=params.val_frac,
-                    early_stopping=params.early_stopping,
-                    predict_info_models=predict_info_models,
-                    reset_rng_state=ensemble_init_rng,
-                    ood_val=params.ood_val if do_model_hparam_search else 0.0,
-                    )
-            val_nll_cur = logging[-1][0]
-            if val_nll_cur < best_nll:
-                best_nll = val_nll_cur
-                best_model = model_copy
-                best_optim = optim
-                best_logging = logging
-                best_gamma = gamma
 
-        if do_model_hparam_search and do_ood_val:
-            assert best_gamma is not None
-            logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
-                    params, 
-                    params.train_batch_size,
-                    params.init_train_epochs, 
-                    [train_X, train_Y, X, Y],
-                    model_copy,
-                    optim,
-                    unseen_reg=params.unseen_reg,
-                    gamma=best_gamma,
-                    choose_type=params.choose_type,
-                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                    val_frac=params.val_frac,
-                    early_stopping=params.early_stopping,
-                    predict_info_models=predict_info_models,
-                    reset_rng_state=ensemble_init_rng,
-                    ood_val=0.0,
-                    )
-
-        ensemble_init_rng = ensemble_init_rng2
-        logging = best_logging
-        model = best_model
-        optim = best_optim
-        print('logging:', [k[-1] for k in logging])
-        logging = [torch.tensor(k) for k in logging]
+        model, optim, logging, best_gamma, ensemble_init_rng, data_split_rng = dbopt.hyper_param_train(
+            params,
+            model,
+            [train_X, train_Y, X, Y],
+            ensemble_init_rng,
+            data_split_rng,
+            predict_info_models=predict_info_models if params.predict_mi else None,
+            )
 
         torch.save({
             'model_state_dict': model.state_dict(), 
             'logging': logging,
+            'best_gamma': best_gamma,
             'optim': optim.state_dict(),
             'train_idx': torch.from_numpy(train_idx),
             'global_params': vars(params),
@@ -266,8 +233,7 @@ for filename in filenames:
                     # test stats computation
                     print('doing ack_iter', ack_iter)
                     with torch.no_grad():
-                        model_ensemble = model_cur
-                        preds, preds_vars = model_ensemble(X) # (num_candidate_points, num_samples)
+                        preds, preds_vars = model_cur(X) # (num_candidate_points, num_samples)
                         preds = preds.detach()
                         preds_vars = preds_vars.detach()
                         assert preds.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(preds.shape), str(Y.shape))
@@ -303,7 +269,7 @@ for filename in filenames:
                         cur_ack_idx = bopt.get_empirical_condensation_ack(
                                 X,
                                 preds,
-                                model_ensemble,
+                                model_cur,
                                 optim,
                                 ack_to_condense,
                                 skip_idx_cur,
@@ -355,74 +321,15 @@ for filename in filenames:
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
-                    best_nll = float('inf')
-                    best_model = None
-                    best_optim = None
-                    best_logging = None
-                    best_gamma = None
-                    for gamma in params.gammas:
-                        if len(params.gammas) > 1:
-                            model_copy = copy.deepcopy(model)
-                        else:
-                            model_copy = model
-                        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.retrain_lr, weight_decay=params.retrain_l2)
-                        if params.predict_mi:
-                            predict_info_models.init_opt(params, skip_idx_cur, X.shape[0])
-                        logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
-                            params,
-                            params.retrain_batch_size,
-                            params.retrain_num_epochs,
-                            [train_X_cur, train_Y_cur, X, Y], 
-                            model_copy,
-                            optim,
-                            unseen_reg=params.unseen_reg,
-                            gamma=gamma,
-                            choose_type=params.choose_type,
-                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                            val_frac=params.val_frac,
-                            early_stopping=params.early_stopping,
-                            predict_info_models=predict_info_models,
-                            reset_rng_state=ensemble_init_rng,
-                            ood_val=params.ood_val if do_model_hparam_search else 0.0,
-                            )
-                        val_nll_cur = logging[-1][0]
-                        if val_nll_cur < best_nll:
-                            best_nll = val_nll_cur
-                            best_model = model_copy
-                            best_optim = optim
-                            best_logging = logging
-                            best_gamma = gamma
 
-                    if do_model_hparam_search and do_ood_val:
-                        assert best_gamma is not None
-                        logging, optim, ensemble_init_rng2 = dbopt.train_ensemble(
-                                params, 
-                                params.train_batch_size,
-                                params.init_train_epochs, 
-                                [train_X, train_Y, X, Y],
-                                model_copy,
-                                optim,
-                                unseen_reg=params.unseen_reg,
-                                gamma=best_gamma,
-                                choose_type=params.choose_type,
-                                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                                val_frac=params.val_frac,
-                                early_stopping=params.early_stopping,
-                                predict_info_models=predict_info_models,
-                                reset_rng_state=ensemble_init_rng,
-                                ood_val=0.0,
-                                )
-
-                    ensemble_init_rng = ensemble_init_rng2
-                    logging = best_logging
-                    model_cur = best_model
-                    optim = best_optim
-
-                    print(filename)
-                    print('logging:', [k[-1] for k in logging])
-
-                    f.write(str([k[-1] for k in logging]) + "\n")
-                    logging = [torch.tensor(k) for k in logging]
+                    model_cur, optim, logging, best_gamma, ensemble_init_rng, data_split_rng = dbopt.hyper_param_train(
+                        params,
+                        model_cur,
+                        [train_X, train_Y, X, Y],
+                        ensemble_init_rng,
+                        data_split_rng,
+                        predict_info_models=predict_info_models if params.predict_mi else None,
+                        )
 
                     with torch.no_grad():
                         preds, pred_vars = model_cur(X) # (num_samples, num_points)
@@ -471,6 +378,7 @@ for filename in filenames:
                         'model_state_dict': model_cur.state_dict(), 
                         'logging': logging,
                         'optim': optim.state_dict(),
+                        'best_gamma': best_gamma,
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),
                         'ir_batch_cur': torch.from_numpy(ir),

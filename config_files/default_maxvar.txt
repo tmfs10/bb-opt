@@ -1,5 +1,7 @@
 
---seed 1111
+--seed 1
+--model_init_seed 1
+--data_split_seed 1
 --device cuda
 --clean True
 --reset_model_every_iter True
@@ -24,7 +26,7 @@
 --take_log True
 
 --unseen_reg normal
---gammas 5.0 10.0 20.0
+--gammas 1.0 5.0 10.0 20.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/maxvar_saber_tfs.txt
@@ -35,7 +37,7 @@
 --num_acks 30
 
 --single_gaussian_test_nll True
---choose_type val
+--choose_type val_nll
 
 --ei_diversity_measure none_ucb
 --ucb 1.0

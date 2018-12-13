@@ -1,4 +1,5 @@
 import os
+import copy
 import gc
 import sys
 import numpy as np
@@ -1995,44 +1996,80 @@ def pairwise_mi(
     return mi_matrix
 
 
+def get_kriging_believer_ack(
+    params,
+    diversity_measure, 
+    model_ensemble,
+    data,
+    ack_batch_size,
+    skip_idx,
+    train_fn,
+    ensemble_init_rng,
+    data_split_rng,
+):
+    train_X, train_Y, X, Y = data
+    ack_idx = []
+
+    model_copy = copy.deepcopy(model_ensemble)
+    for batch_iter in range(ack_batch_size):
+        pred_means, pred_vars = model_copy(X)
+        er = pred_means.mean(dim=0).view(-1)
+        std = preds.std(dim=0).view(-1).cpu().numpy()
+        ucb_measure = er + params.ucb*std
+        max_idx = torch.argmax(ucb_measure)
+        ack_idx += [max_idx]
+
+        train2_X = torch.cat([train_X, X[ack_idx]], dim=0)
+        train2_Y = torch.cat([train_Y, Y[ack_idx]], dim=0)
+
+        model_copy, optim, logging, ensemble_init_rng, data_split_rng = train_fn(
+                params,
+                model_copy,
+                ensemble_init_rng,
+                data_split_rng,
+                )
+
+    return ack_idx, ensemble_init_rng, data_split_rng
+
+
 def get_noninfo_ack(
-    params, 
+    params,
     diversity_measure, 
     preds, 
     ack_batch_size,
     skip_idx,
 ):
     with torch.no_grad():
-        ei = preds.mean(dim=0).view(-1).cpu().numpy()
+        er = preds.mean(dim=0).view(-1).cpu().numpy()
         std = preds.std(dim=0).view(-1).cpu().numpy()
 
         if "var" in diversity_measure:
-            ei_sortidx = np.argsort(ei/std)
+            er_sortidx = np.argsort(er/std)
         elif "ucb" in diversity_measure:
-            ei_sortidx = np.argsort(ei + params.ucb*std)
+            er_sortidx = np.argsort(er + params.ucb*std)
 
     if "none" in diversity_measure:
         cur_ack_idx = []
-        for idx in ei_sortidx[::-1]:
+        for idx in er_sortidx[::-1]:
             if idx not in skip_idx:
                 cur_ack_idx += [idx]
             if len(cur_ack_idx) >= ack_batch_size:
                 break
     elif "hsic" in diversity_measure:
-        cur_ack_idx = bopt.ei_diversity_selection_hsic(
+        cur_ack_idx = bopt.er_diversity_selection_hsic(
                 params, 
                 preds, 
                 skip_idx, 
                 device=params.device)
     elif "detk" in diversity_measure:
-        cur_ack_idx = bopt.ei_diversity_selection_detk(
+        cur_ack_idx = bopt.er_diversity_selection_detk(
                 params, 
                 preds, 
                 skip_idx, 
                 device=params.device)
     elif "pdts" in diversity_measure:
         cur_ack_idx = set()
-        ei_sortidx = np.argsort(ei)
+        er_sortidx = np.argsort(er)
         sorted_preds_idx = []
         for i in range(preds.shape[0]):
             sorted_preds_idx += [np.argsort(preds[i].numpy())]

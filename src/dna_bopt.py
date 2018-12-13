@@ -456,15 +456,19 @@ def train_ensemble(
     predict_info_models=None,
     hsic_custom_kernel=None,
     reset_rng_state=None,
+    data_split_rng=None,
     jupyter=False,
     ood_val=0.0,
 ):
-    if reset_rng_state is not None:
+    if reset_rng_state is not None and params.reset_model_every_iter:
         cur_rng_state = ops.get_rng_state()
         ops.set_rng_state(reset_rng_state)
+
         model_ensemble.reset_parameters()
+
         reset_rng_state = ops.get_rng_state()
         ops.set_rng_state(cur_rng_state)
+    do_early_stopping = "val" in choose_type or "train" in choose_type
 
     adv_train = adv_epsilon > 1e-9
     train_X, train_Y, X, Y = data
@@ -472,21 +476,30 @@ def train_ensemble(
     assert val_frac >= 0.01
     assert val_frac <= 0.9
 
-    if ood_val > 1e-9:
+    if ood_val > 1e-3:
         assert ood_val <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val)
         sorted_idx = torch.sort(train_Y, descending=True)[1]
-        val_N = N * ood_val
+        val_N = int(N * ood_val)
         idx = torch.arange(N)
         train_idx = idx[sorted_idx[val_N:]]
         val_idx = idx[sorted_idx[:val_N]]
     else:
-        train_idx, val_idx, _ = utils.train_val_test_split(N, [1-val_frac, val_frac])
+        train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
+                N, 
+                [1-val_frac, val_frac],
+                rng=data_split_rng,
+                )
 
     assert val_idx.shape[0] > 0
     val_X = train_X[val_idx]
     train_X = train_X[train_idx]
     val_Y = train_Y[val_idx]
     train_Y = train_Y[train_idx]
+
+    train_mean = train_Y.mean()
+    train_std = train_Y.std()
+    train_normal = tdist.normal.Normal(train_mean, train_std)
+    val_baseline_nll = -train_normal.log_prob(val_Y).mean()
 
     if normalize_fn is not None:
         mean = train_Y.mean()
@@ -507,7 +520,7 @@ def train_ensemble(
 
     corrs = []
     val_corrs = []
-    val_nlls = []
+    val_nlls = [[], []]
     val_mses = []
     train_nlls = []
     train_mses = []
@@ -520,6 +533,7 @@ def train_ensemble(
         progress = trange(num_epochs)
 
     best_nll = float('inf')
+    best_kt_corr = -2.
     best_model = None
     best_optim = None
 
@@ -613,52 +627,72 @@ def train_ensemble(
         with torch.no_grad():
             means, variances = model_ensemble(train_X)
             train_std += [means.std(0).mean().item()]
-            if choose_type == "train":
-                _, nll = NNEnsemble.report_metric(
+            mean_of_means = means.mean(0)
+            assert mean_of_means.shape == train_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
+            kt_corr = kendalltau(mean_of_means, train_Y)[0]
+            corrs += [kt_corr]
+
+            if "train" in choose_type:
+                train_nll1, train_nll2 = NNEnsemble.report_metric(
                         train_Y, 
                         means, 
                         variances, 
                         return_mse=False)
-                nll = nll.item()
+                train_nll1 = nll1.item() # mixture of gaussians
+                train_nll2 = nll2.item() # single gaussian
 
-                if nll < best_nll:
-                    time_since_last_best_epoch = 0
-                    best_nll = nll
-                    best_model = copy.deepcopy(model_ensemble.state_dict())
-                    best_optim = copy.deepcopy(optim.state_dict())
-            means = means.mean(0)
-            assert means.shape == train_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
-            corr = kendalltau(means, train_Y)[0]
-            corrs += [corr]
+                if train_nll2 < best_nll:
+                    best_nll = train_nll2
+                    if "nll" in choose_type:
+                        time_since_last_best_epoch = 0
+                        best_model = copy.deepcopy(model_ensemble.state_dict())
+                        best_optim = copy.deepcopy(optim.state_dict())
+                if kt_corr > best_kt_corr:
+                    best_kt_corr = kt_corr
+                    if "kt_corr" in choose_type:
+                        time_since_last_best_epoch = 0
+                        best_model = copy.deepcopy(model_ensemble.state_dict())
+                        best_optim = copy.deepcopy(optim.state_dict())
 
             means, variances = model_ensemble(val_X)
             val_std += [means.std(0).mean().item()]
-            _, nll = NNEnsemble.report_metric(
+            val_nll1, val_nll2 = NNEnsemble.report_metric(
                     val_Y,
                     means,
                     variances,
                     return_mse=False)
-            nll = nll.item()
+            val_nll1 = val_nll1.item()
+            val_nll2 = val_nll2.item()
             mse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
-            val_nlls += [nll]
+            val_nlls[0] += [val_nll1]
+            val_nlls[1] += [val_nll2]
             val_mses += [mse]
-            means = means.mean(0)
-            assert means.shape == val_Y.shape, "%s == %s" % (str(means.shape), str(val_Y.shape))
-            val_corr = kendalltau(means, val_Y)[0]
-            if choose_type == "val" and nll < best_nll:
-                time_since_last_best_epoch = 0
-                best_nll = nll
-                best_model = copy.deepcopy(model_ensemble.state_dict())
-                best_optim = copy.deepcopy(optim.state_dict())
+            mean_of_means = means.mean(0)
+            assert mean_of_means.shape == val_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
+            kt_corr = kendalltau(mean_of_means, val_Y)[0]
+            val_corrs += [kt_corr]
 
-            val_corrs += [val_corr]
-            progress.set_description(f"Corr: {val_corr:.3f}")
+            if "val" in choose_type:
+                if val_nll2 < best_nll:
+                    best_nll = val_nll2
+                    if "nll" in choose_type:
+                        time_since_last_best_epoch = 0
+                        best_model = copy.deepcopy(model_ensemble.state_dict())
+                        best_optim = copy.deepcopy(optim.state_dict())
+                if kt_corr > best_kt_corr:
+                    best_kt_corr = kt_corr
+                    if "kt_corr" in choose_type:
+                        time_since_last_best_epoch = 0
+                        best_model = copy.deepcopy(model_ensemble.state_dict())
+                        best_optim = copy.deepcopy(optim.state_dict())
 
-        if early_stopping > 0 and choose_type in ("val", "train") and time_since_last_best_epoch > early_stopping:
+            progress.set_description(f"Corr: {kt_corr:.3f}")
+
+        if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
             assert epoch_iter >= early_stopping
             break
 
-    if choose_type in ("val", "train"):
+    if do_early_stopping:
         if best_model is not None:
             model_ensemble.load_state_dict(best_model)
             optim.load_state_dict(best_optim)
@@ -670,12 +704,106 @@ def train_ensemble(
         train_mses = [-1]
         train_std = [-1]
         val_corrs = [-1]
-        val_nlls = [-1]
+        val_nlls = [[-1], [-1]]
         val_mses = [-1]
         val_std = [-1]
 
-    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls, val_mses, val_std, [best_nll]], optim, reset_rng_state
+    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls[0], val_nlls[1], val_mses, val_std, [val_baseline_nll], [best_nll, best_kt_corr]], optim, reset_rng_state, data_split_rng
 
+def hyper_param_train(
+    params,
+    model,
+    data,
+    ensemble_init_rng,
+    data_split_rng,
+    predict_info_models=None,
+):
+    best_nll = float('inf')
+    best_kt_corr = -2.
+    best_model = None
+    best_optim = None
+    best_logging = None
+    best_gamma = None
+
+    train_X, train_Y, X, Y = data
+    do_model_hparam_search = len(params.gammas) > 1
+    for gamma in params.gammas:
+        if len(params.gammas) > 1:
+            assert do_model_hparam_search
+            model_copy = copy.deepcopy(model)
+        else:
+            model_copy = model
+        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+        if predict_info_models is not None:
+            predict_info_models.init_opt(params, train_idx, X.shape[0])
+        logging, optim, ensemble_init_rng2, data_split_rng2 = train_ensemble(
+                params, 
+                params.train_batch_size,
+                params.init_train_epochs, 
+                [train_X, train_Y, X, Y],
+                model_copy,
+                optim,
+                unseen_reg=params.unseen_reg,
+                gamma=gamma,
+                choose_type=params.choose_type,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                val_frac=params.val_frac,
+                early_stopping=params.early_stopping,
+                predict_info_models=predict_info_models,
+                reset_rng_state=ensemble_init_rng,
+                data_split_rng=data_split_rng,
+                ood_val=params.ood_val if do_model_hparam_search else 0.0,
+                )
+        found_best = False
+        val_nll_cur = logging[-1][0]
+        val_kt_corr_cur = logging[-1][1]
+
+        if "nll" in params.choose_type and val_nll_cur < best_nll:
+            best_nll = val_nll_cur
+            found_best = True
+        elif "kt_corr" in params.choose_type and val_kt_corr_cur > best_kt_corr:
+            best_kt_corr = val_kt_corr_cur
+            found_best = True
+
+        if found_best:
+            best_model = model_copy
+            best_optim = optim
+            best_logging = logging
+            best_gamma = gamma
+
+    if do_model_hparam_search and do_ood_val:
+        assert best_gamma is not None
+        model_copy = copy.deepcopy(model)
+        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+        logging, optim, ensemble_init_rng2, data_split_rng2 = dbopt.train_ensemble(
+                params, 
+                params.train_batch_size,
+                params.init_train_epochs, 
+                [train_X, train_Y, X, Y],
+                model_copy,
+                optim,
+                unseen_reg=params.unseen_reg,
+                gamma=best_gamma,
+                choose_type=params.choose_type,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                val_frac=params.val_frac,
+                early_stopping=params.early_stopping,
+                predict_info_models=predict_info_models,
+                reset_rng_state=ensemble_init_rng,
+                data_split_rng=data_split_rng,
+                ood_val=0.0,
+                )
+        best_model = model_copy
+
+    ensemble_init_rng = ensemble_init_rng2
+    data_split_rng = data_split_rng2
+    logging = best_logging
+    model = best_model
+    optim = best_optim
+    print('logging:', [k[-1] for k in logging])
+    logging = [torch.tensor(k) for k in logging]
+
+    return model, optim, logging, best_gamma, ensemble_init_rng, data_split_rng
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3
