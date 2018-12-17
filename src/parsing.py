@@ -29,6 +29,15 @@ def atleast0int(v):
     assert v >= 0
     return v
 
+def verify_model_update_mode(mode):
+    mode = mode.lower().strip()
+    assert mode in [
+            "init_init",
+            "new_init",
+            "finetune",
+            ]
+    return mode
+
 def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
@@ -41,7 +50,8 @@ def add_parse_args(parser):
             help='use cuda (default: True)')
     parser.add_argument('--clean', type=str2bool, 
             help='remove existing saved dir')
-    parser.add_argument("--reset_model_every_iter", type=str2bool)
+    parser.add_argument("--ack_model_init_mode", type=verify_model_update_mode)
+    parser.add_argument("--ack_change_stat_logging", type=str2bool)
 
     # train params
     parser.add_argument('--exclude_top', type=float01)
@@ -67,7 +77,7 @@ def add_parse_args(parser):
     parser.add_argument('--train_l2', type=float)
     parser.add_argument('--retrain_l2', type=float)
 
-    parser.add_argument('--unseen_reg', type=str)
+    parser.add_argument('--unseen_reg', type=strlower)
     parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
     parser.add_argument('--take_log', type=str2bool)

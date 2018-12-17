@@ -285,21 +285,22 @@ class NNEnsemble(torch.nn.Module):
         num_samples = means.shape[0]
         m = means.mean(dim=0)
         v = (variances + means ** 2).mean(dim=0) - (m ** 2)
-        mse_m= (labels - m) ** 2
+        mse_m = (labels - m) ** 2
         mse = (labels - means) ** 2
         # 1.83 = 2*pi
 
         d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
         negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean()
 
-        d = tdist.Normal(m, v)
+        d = tdist.Normal(m, torch.sqrt(v))
         negative_log_likelihood2 = -d.log_prob(labels).mean()
 
-        #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.83)
-        #nll1 = negative_log_likelihood1.mean(dim=-1).mean()
-        #nll2 = 0.5*(torch.log(v)+ mse_m/v + 1.83)
-        #nll2 = negative_log_likelihood2.mean()
+        #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.834)
+        #nll1 = nll1.mean(dim=-1).mean()
+        #nll2 = 0.5*(torch.log(v)+ mse_m/v + 1.834)
+        #nll2 = nll2.mean()
 
+        #print('shapes:', labels.shape, m.shape, means.shape, variances.shape)
         #print('c:', negative_log_likelihood1, nll1)
         #print('c:', negative_log_likelihood2, nll2)
 

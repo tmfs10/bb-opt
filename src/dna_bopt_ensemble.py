@@ -5,6 +5,7 @@ sys.path.append('/cluster/sj1/bb_opt/src')
 
 import os
 import torch
+import pprint
 import random
 import torch.nn as nn
 from torch.nn.parameter import Parameter
@@ -109,8 +110,8 @@ for filename in filenames:
 
     print('label stats:', labels.mean(), labels.max(), labels.std())
 
-    train_X = torch.FloatTensor(train_inputs).to(device)
-    train_Y = torch.FloatTensor(train_labels).to(device)
+    train_X_init = torch.FloatTensor(train_inputs).to(device)
+    train_Y_cur = torch.FloatTensor(train_labels).to(device)
 
     X = torch.tensor(inputs, device=device)
     Y = torch.tensor(labels, device=device)
@@ -118,7 +119,7 @@ for filename in filenames:
     cur_rng = ops.get_rng_state()
     ops.set_rng_state(ensemble_init_rng)
 
-    model = dbopt.get_model_nn_ensemble(
+    init_model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
             params.train_batch_size, 
             params.num_models, 
@@ -146,14 +147,14 @@ for filename in filenames:
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
 
-    preds, preds_vars = model(X) # (num_candidate_points, num_samples)
+    preds, preds_vars = init_model(X) # (num_candidate_points, num_samples)
     preds = preds.detach()
     preds_vars = preds_vars.detach()
     bopt.get_pred_stats(
             preds,
             torch.sqrt(preds_vars),
             Y,
-            train_Y,
+            train_Y_cur,
             params.output_dist_fn, 
             set(),
             params.sigmoid_coeff,
@@ -163,23 +164,22 @@ for filename in filenames:
     if os.path.isfile(init_model_path) and not params.clean:
         loaded = True
         checkpoint = torch.load(init_model_path)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        init_model.load_state_dict(checkpoint['model_state_dict'])
         logging = checkpoint["logging"]
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
 
-        model, optim, logging, best_gamma, ensemble_init_rng, data_split_rng = dbopt.hyper_param_train(
+        init_model, optim, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
             params,
-            model,
-            [train_X, train_Y, X, Y],
-            ensemble_init_rng,
+            init_model,
+            [train_X_init, train_Y_cur, X, Y],
             data_split_rng,
             predict_info_models=predict_info_models if params.predict_mi else None,
             )
 
         torch.save({
-            'model_state_dict': model.state_dict(), 
+            'model_state_dict': init_model.state_dict(), 
             'logging': logging,
             'best_gamma': best_gamma,
             'optim': optim.state_dict(),
@@ -189,7 +189,7 @@ for filename in filenames:
 
     with open(file_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as main_f:
         if not loaded:
-            main_f.write(str([k[-1] for k in logging]) + "\n")
+            main_f.write(pprint.pformat(logging[1]) + "\n")
 
         for ack_batch_size in [params.ack_batch_size]:
             print('doing batch', ack_batch_size)
@@ -199,10 +199,10 @@ for filename in filenames:
             except OSError as e:
                 pass
 
-            train_X_cur = train_X.clone()
-            train_Y_cur = train_Y.clone()
+            train_X_cur = train_X_init.clone()
+            train_Y_cur = train_Y_cur.clone()
 
-            model_cur = copy.deepcopy(model)
+            cur_model = copy.deepcopy(init_model)
 
             skip_idx_cur = set(train_idx.tolist())
             ack_all_cur = set()
@@ -216,12 +216,12 @@ for filename in filenames:
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
                     if os.path.exists(batch_ack_output_file) and not params.clean:
                         checkpoint = torch.load(batch_ack_output_file)
-                        model_cur.load_state_dict(checkpoint['model_state_dict'])
+                        cur_model.load_state_dict(checkpoint['model_state_dict'])
                         if params.predict_mi and "predict_info_models_state_dict" in checkpoint:
                             predict_info_models.load_state_dict(checkpoint["predict_info_models_state_dict"])
                         logging = checkpoint['logging']
 
-                        model_parameters = list(model_cur.parameters())
+                        model_parameters = list(cur_model.parameters())
                         optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
                         optim = optim.load_state_dict(checkpoint['optim'])
 
@@ -233,7 +233,7 @@ for filename in filenames:
                     # test stats computation
                     print('doing ack_iter', ack_iter)
                     with torch.no_grad():
-                        preds, preds_vars = model_cur(X) # (num_candidate_points, num_samples)
+                        preds, preds_vars = cur_model(X) # (num_candidate_points, num_samples)
                         preds = preds.detach()
                         preds_vars = preds_vars.detach()
                         assert preds.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(preds.shape), str(Y.shape))
@@ -245,7 +245,7 @@ for filename in filenames:
                                 preds,
                                 torch.sqrt(preds_vars),
                                 Y,
-                                train_Y,
+                                train_Y_cur,
                                 params.output_dist_fn, 
                                 skip_idx_cur,
                                 params.sigmoid_coeff,
@@ -269,7 +269,7 @@ for filename in filenames:
                         cur_ack_idx = bopt.get_empirical_condensation_ack(
                                 X,
                                 preds,
-                                model_cur,
+                                cur_model,
                                 optim,
                                 ack_to_condense,
                                 skip_idx_cur,
@@ -291,17 +291,18 @@ for filename in filenames:
                                 skip_idx_cur,
                                 )
 
-                    rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic = bopt.pairwise_logging_pre_ack(
-                            params,
-                            preds,
-                            preds_vars,
-                            skip_idx_cur,
-                            cur_ack_idx,
-                            Y,
-                            do_hsic_rand=False,
-                            do_mi_rand=False,
-                            do_batch_hsic=params.hsic_kernel_fn is not None,
-                            )
+                    if params.ack_change_stat_logging:
+                        rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic = bopt.pairwise_logging_pre_ack(
+                                params,
+                                preds,
+                                preds_vars,
+                                skip_idx_cur,
+                                cur_ack_idx,
+                                Y,
+                                do_hsic_rand=False,
+                                do_mi_rand=False,
+                                do_batch_hsic=params.hsic_kernel_fn is not None,
+                                )
 
                     ack_all_cur.update(cur_ack_idx)
                     skip_idx_cur.update(cur_ack_idx)
@@ -322,38 +323,44 @@ for filename in filenames:
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
 
-                    model_cur, optim, logging, best_gamma, ensemble_init_rng, data_split_rng = dbopt.hyper_param_train(
+                    cur_model, ensemble_init_rng = dbopt.reinit_model(
                         params,
-                        model_cur,
-                        [train_X, train_Y, X, Y],
-                        ensemble_init_rng,
+                        init_model,
+                        cur_model,
+                        ensemble_init_rng
+                        )
+                    cur_model, optim, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                        params,
+                        cur_model,
+                        [train_X_cur, train_Y_cur, X, Y],
                         data_split_rng,
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )
 
-                    with torch.no_grad():
-                        preds, pred_vars = model_cur(X) # (num_samples, num_points)
-                        preds = preds.detach()
-                        preds_vars = preds_vars.detach()
+                    if params.ack_change_stat_logging:
+                        with torch.no_grad():
+                            preds, pred_vars = cur_model(X) # (num_samples, num_points)
+                            preds = preds.detach()
+                            preds_vars = preds_vars.detach()
 
-                        stats_pred = None
-                        if params.predict_mi:
-                            stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
+                            stats_pred = None
+                            if params.predict_mi:
+                                stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
 
-                        corr_stats = bopt.pairwise_logging_post_ack(
-                                params,
-                                preds[:, rand_idx],
-                                preds_vars[:, rand_idx],
-                                old_std,
-                                old_nll,
-                                corr_rand,
-                                Y[rand_idx],
-                                hsic_rand=hsic_rand,
-                                mi_rand=mi_rand,
-                                ack_batch_hsic=ack_batch_hsic,
-                                rand_batch_hsic=rand_batch_hsic,
-                                stats_pred=stats_pred
-                                )
+                            corr_stats = bopt.pairwise_logging_post_ack(
+                                    params,
+                                    preds[:, rand_idx],
+                                    preds_vars[:, rand_idx],
+                                    old_std,
+                                    old_nll,
+                                    corr_rand,
+                                    Y[rand_idx],
+                                    hsic_rand=hsic_rand,
+                                    mi_rand=mi_rand,
+                                    ack_batch_hsic=ack_batch_hsic,
+                                    rand_batch_hsic=rand_batch_hsic,
+                                    stats_pred=stats_pred
+                                    )
 
                     ack_array = np.array(list(ack_all_cur), dtype=np.int32)
 
@@ -361,7 +368,7 @@ for filename in filenames:
                     
                     # inference regret computation using retrained ensemble
                     s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
-                            model_cur,
+                            cur_model,
                             X,
                             labels,
                             ack_all_cur,
@@ -375,7 +382,7 @@ for filename in filenames:
                     f.write(s + "\n")
 
                     torch.save({
-                        'model_state_dict': model_cur.state_dict(), 
+                        'model_state_dict': cur_model.state_dict(), 
                         'logging': logging,
                         'optim': optim.state_dict(),
                         'best_gamma': best_gamma,
@@ -390,7 +397,7 @@ for filename in filenames:
                         'test_std_list': torch.tensor(std_list),
                         'test_mse_std_corr': torch.tensor(mse_std_corr),
                         'test_pred_corr': torch.tensor(pred_corr),
-                        'corr_stats': torch.tensor(corr_stats),
+                        'corr_stats': torch.tensor(corr_stats) if params.ack_change_stat_logging else None,
                         }, batch_ack_output_file)
                     sys.stdout.flush()
                     

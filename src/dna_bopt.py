@@ -12,6 +12,7 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import non_matplotlib_utils as utils
 import ops
+import pprint
 import bayesian_opt as bopt
 from scipy.stats import kendalltau, pearsonr
 
@@ -438,6 +439,31 @@ def predict_info_loss(
     return stats_loss
 
 
+def reinit_model(
+    params,
+    init_model,
+    cur_model,
+    reset_rng_state=None,
+):
+    if params.ack_model_init_mode == "new_init":
+        assert reset_rng_state is not None
+        cur_rng_state = ops.get_rng_state()
+        ops.set_rng_state(reset_rng_state)
+
+        cur_model.reset_parameters()
+
+        reset_rng_state = ops.get_rng_state()
+        ops.set_rng_state(cur_rng_state)
+    elif params.ack_model_init_mode == "init_init":
+        cur_model = copy.deepcopy(init_model)
+    elif params.ack_model_init_mode == "finetune":
+        pass
+    else:
+        assert False, params.ack_model_init_mode + " not implemented"
+
+    return cur_model, reset_rng_state
+
+
 def train_ensemble(
     params,
     batch_size,
@@ -455,19 +481,10 @@ def train_ensemble(
     adv_epsilon=0.0,
     predict_info_models=None,
     hsic_custom_kernel=None,
-    reset_rng_state=None,
     data_split_rng=None,
     jupyter=False,
     ood_val=0.0,
 ):
-    if reset_rng_state is not None and params.reset_model_every_iter:
-        cur_rng_state = ops.get_rng_state()
-        ops.set_rng_state(reset_rng_state)
-
-        model_ensemble.reset_parameters()
-
-        reset_rng_state = ops.get_rng_state()
-        ops.set_rng_state(cur_rng_state)
     do_early_stopping = "val" in choose_type or "train" in choose_type
 
     adv_train = adv_epsilon > 1e-9
@@ -499,7 +516,7 @@ def train_ensemble(
     train_mean = train_Y.mean()
     train_std = train_Y.std()
     train_normal = tdist.normal.Normal(train_mean, train_std)
-    val_baseline_nll = -train_normal.log_prob(val_Y).mean()
+    val_baseline_nll = -train_normal.log_prob(val_Y).mean().item()
 
     if normalize_fn is not None:
         mean = train_Y.mean()
@@ -518,11 +535,11 @@ def train_ensemble(
     num_batches = N//batch_size+1
     batches = [i*batch_size  for i in range(num_batches)] + [N]
 
-    corrs = []
-    val_corrs = []
+    kt_corrs = []
+    val_kt_corrs = []
+    train_nlls = []
     val_nlls = [[], []]
     val_mses = []
-    train_nlls = []
     train_mses = []
     train_std = []
     val_std = []
@@ -533,6 +550,7 @@ def train_ensemble(
         progress = trange(num_epochs)
 
     best_nll = float('inf')
+    best_epoch_iter = -1
     best_kt_corr = -2.
     best_model = None
     best_optim = None
@@ -630,7 +648,7 @@ def train_ensemble(
             mean_of_means = means.mean(0)
             assert mean_of_means.shape == train_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
             kt_corr = kendalltau(mean_of_means, train_Y)[0]
-            corrs += [kt_corr]
+            kt_corrs += [kt_corr]
 
             if "train" in choose_type:
                 train_nll1, train_nll2 = NNEnsemble.report_metric(
@@ -644,12 +662,14 @@ def train_ensemble(
                 if train_nll2 < best_nll:
                     best_nll = train_nll2
                     if "nll" in choose_type:
+                        best_epoch_iter = epoch_iter
                         time_since_last_best_epoch = 0
                         best_model = copy.deepcopy(model_ensemble.state_dict())
                         best_optim = copy.deepcopy(optim.state_dict())
                 if kt_corr > best_kt_corr:
                     best_kt_corr = kt_corr
                     if "kt_corr" in choose_type:
+                        best_epoch_iter = epoch_iter
                         time_since_last_best_epoch = 0
                         best_model = copy.deepcopy(model_ensemble.state_dict())
                         best_optim = copy.deepcopy(optim.state_dict())
@@ -670,18 +690,20 @@ def train_ensemble(
             mean_of_means = means.mean(0)
             assert mean_of_means.shape == val_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
             kt_corr = kendalltau(mean_of_means, val_Y)[0]
-            val_corrs += [kt_corr]
+            val_kt_corrs += [kt_corr]
 
             if "val" in choose_type:
-                if val_nll2 < best_nll:
-                    best_nll = val_nll2
+                if val_nll1 < best_nll:
+                    best_nll = val_nll1
                     if "nll" in choose_type:
+                        best_epoch_iter = epoch_iter
                         time_since_last_best_epoch = 0
                         best_model = copy.deepcopy(model_ensemble.state_dict())
                         best_optim = copy.deepcopy(optim.state_dict())
                 if kt_corr > best_kt_corr:
                     best_kt_corr = kt_corr
                     if "kt_corr" in choose_type:
+                        best_epoch_iter = epoch_iter
                         time_since_last_best_epoch = 0
                         best_model = copy.deepcopy(model_ensemble.state_dict())
                         best_optim = copy.deepcopy(optim.state_dict())
@@ -699,22 +721,69 @@ def train_ensemble(
         else:
             assert num_epochs == 0
     if num_epochs == 0:
-        corrs = [-1]
+        kt_corrs = [-1]
         train_nlls = [-1]
         train_mses = [-1]
         train_std = [-1]
-        val_corrs = [-1]
+        val_kt_corrs = [-1]
         val_nlls = [[-1], [-1]]
         val_mses = [-1]
         val_std = [-1]
 
-    return [corrs, train_nlls, train_mses, train_std, val_corrs, val_nlls[0], val_nlls[1], val_mses, val_std, [val_baseline_nll], [best_nll, best_kt_corr]], optim, reset_rng_state, data_split_rng
+    logging =  [{
+            'train' : {
+                'kt_corr': kt_corrs,
+                'nll': train_nlls,
+                'mse': train_mses,
+                'std': train_std,
+                },
+            'val' : {
+                'kt_corr': val_kt_corrs,
+                'nll1': val_nlls[0],
+                'nll2': val_nlls[1],
+                'mse': val_mses,
+                'std': val_std,
+                },
+            'baseline': {
+                'nll': val_baseline_nll
+                },
+            'best': {
+                'nll': best_nll,
+                'kt_corr': best_kt_corr,
+                'epoch_iter': best_epoch_iter,
+                },
+            },
+            {
+                'train' : {
+                    'kt_corr': float(kt_corrs[-1]),
+                    'nll': float(train_nlls[-1]),
+                    'mse': float(train_mses[-1]),
+                    'std': float(train_std[-1]),
+                    },
+                'val' : {
+                    'kt_corr': float(val_kt_corrs[-1]),
+                    'nll1': float(val_nlls[0][best_epoch_iter]),
+                    'nll2': float(val_nlls[1][best_epoch_iter]),
+                    'mse': float(val_mses[-1]),
+                    'std': float(val_std[-1]),
+                    },
+                'baseline': {
+                    'nll': val_baseline_nll
+                    },
+                'best': {
+                    'nll': best_nll,
+                    'kt_corr': best_kt_corr,
+                    'epoch_iter': best_epoch_iter,
+                    },
+                },
+    ]
+
+    return logging, optim, data_split_rng
 
 def hyper_param_train(
     params,
     model,
     data,
-    ensemble_init_rng,
     data_split_rng,
     predict_info_models=None,
 ):
@@ -736,8 +805,8 @@ def hyper_param_train(
         optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
         if predict_info_models is not None:
             predict_info_models.init_opt(params, train_idx, X.shape[0])
-        logging, optim, ensemble_init_rng2, data_split_rng2 = train_ensemble(
-                params, 
+        logging, optim, data_split_rng2 = train_ensemble(
+                params,
                 params.train_batch_size,
                 params.init_train_epochs, 
                 [train_X, train_Y, X, Y],
@@ -750,13 +819,12 @@ def hyper_param_train(
                 val_frac=params.val_frac,
                 early_stopping=params.early_stopping,
                 predict_info_models=predict_info_models,
-                reset_rng_state=ensemble_init_rng,
                 data_split_rng=data_split_rng,
                 ood_val=params.ood_val if do_model_hparam_search else 0.0,
                 )
         found_best = False
-        val_nll_cur = logging[-1][0]
-        val_kt_corr_cur = logging[-1][1]
+        val_nll_cur = logging[0]['best']['nll']
+        val_kt_corr_cur = logging[0]['best']['kt_corr'] 
 
         if "nll" in params.choose_type and val_nll_cur < best_nll:
             best_nll = val_nll_cur
@@ -775,7 +843,7 @@ def hyper_param_train(
         assert best_gamma is not None
         model_copy = copy.deepcopy(model)
         optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
-        logging, optim, ensemble_init_rng2, data_split_rng2 = dbopt.train_ensemble(
+        logging, optim, data_split_rng2 = dbopt.train_ensemble(
                 params, 
                 params.train_batch_size,
                 params.init_train_epochs, 
@@ -789,21 +857,23 @@ def hyper_param_train(
                 val_frac=params.val_frac,
                 early_stopping=params.early_stopping,
                 predict_info_models=predict_info_models,
-                reset_rng_state=ensemble_init_rng,
                 data_split_rng=data_split_rng,
                 ood_val=0.0,
                 )
         best_model = model_copy
+        best_optim = optim
+        best_logging = logging
+        best_gamma = gamma
 
-    ensemble_init_rng = ensemble_init_rng2
     data_split_rng = data_split_rng2
     logging = best_logging
     model = best_model
     optim = best_optim
-    print('logging:', [k[-1] for k in logging])
-    logging = [torch.tensor(k) for k in logging]
+    assert logging[0] is not None
+    assert logging[1] is not None
+    print('logging:', pprint.pformat(logging[1]))
 
-    return model, optim, logging, best_gamma, ensemble_init_rng, data_split_rng
+    return model, optim, logging, best_gamma, data_split_rng
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3

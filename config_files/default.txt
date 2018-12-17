@@ -5,6 +5,7 @@
 --device cuda
 --clean True
 --reset_model_every_iter True
+--ack_change_stat_logging True
 
 --exclude_top 0.1
 --init_train_examples 200
