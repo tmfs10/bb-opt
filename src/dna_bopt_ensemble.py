@@ -174,6 +174,7 @@ for filename in filenames:
             params,
             init_model,
             [train_X_init, train_Y_cur, X, Y],
+            stage="init",
             data_split_rng,
             predict_info_models=predict_info_models if params.predict_mi else None,
             )
@@ -333,6 +334,7 @@ for filename in filenames:
                         params,
                         cur_model,
                         [train_X_cur, train_Y_cur, X, Y],
+                        stage="re",
                         data_split_rng,
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )

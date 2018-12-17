@@ -9,20 +9,20 @@
 
 --exclude_top 0.1
 --init_train_examples 200
---init_train_epochs 200
---train_lr 0.01
---train_batch_size 128
---retrain_num_epochs 200
---retrain_lr 0.01
---retrain_batch_size 128
+--init_train_num_epochs 200
+--init_train_lr 0.01
+--init_train_batch_size 128
+--re_train_num_epochs 200
+--re_train_lr 0.01
+--re_train_batch_size 128
 --val_frac 0.1
 --ood_val 0.1
 
---num_hidden 100
+--num_hidden 10
 --sigmoid_coeff 1.0
 --output_dist_fn Normal
---train_l2 0.01
---retrain_l2 0.01
+--init_train_l2 0.01
+--re_train_l2 0.01
 --early_stopping 10
 --take_log True
 

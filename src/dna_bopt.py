@@ -516,6 +516,7 @@ def train_ensemble(
     train_mean = train_Y.mean()
     train_std = train_Y.std()
     train_normal = tdist.normal.Normal(train_mean, train_std)
+    val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).item()
     val_baseline_nll = -train_normal.log_prob(val_Y).mean().item()
 
     if normalize_fn is not None:
@@ -539,8 +540,8 @@ def train_ensemble(
     val_kt_corrs = []
     train_nlls = []
     val_nlls = [[], []]
-    val_mses = []
-    train_mses = []
+    val_rmses = []
+    train_rmses = []
     train_std = []
     val_std = []
 
@@ -598,8 +599,8 @@ def train_ensemble(
                 loss = nll
 
             train_nlls += [nll.item()]
-            mse = torch.sqrt(torch.mean((means-bY)**2)).item()
-            train_mses += [mse]
+            rmse = torch.sqrt(torch.mean((means-bY)**2)).item()
+            train_rmses += [rmse]
 
             loss += unseen_data_loss(
                     model_ensemble,
@@ -680,13 +681,14 @@ def train_ensemble(
                     val_Y,
                     means,
                     variances,
+                    custom_std=train_Y.std(),
                     return_mse=False)
             val_nll1 = val_nll1.item()
             val_nll2 = val_nll2.item()
-            mse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
+            rmse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
             val_nlls[0] += [val_nll1]
             val_nlls[1] += [val_nll2]
-            val_mses += [mse]
+            val_rmses += [rmse]
             mean_of_means = means.mean(0)
             assert mean_of_means.shape == val_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
             kt_corr = kendalltau(mean_of_means, val_Y)[0]
@@ -723,29 +725,30 @@ def train_ensemble(
     if num_epochs == 0:
         kt_corrs = [-1]
         train_nlls = [-1]
-        train_mses = [-1]
+        train_rmses = [-1]
         train_std = [-1]
         val_kt_corrs = [-1]
         val_nlls = [[-1], [-1]]
-        val_mses = [-1]
+        val_rmses = [-1]
         val_std = [-1]
 
     logging =  [{
             'train' : {
                 'kt_corr': kt_corrs,
                 'nll': train_nlls,
-                'mse': train_mses,
+                'rmse': train_rmses,
                 'std': train_std,
                 },
             'val' : {
                 'kt_corr': val_kt_corrs,
                 'nll1': val_nlls[0],
                 'nll2': val_nlls[1],
-                'mse': val_mses,
+                'rmse': val_rmses,
                 'std': val_std,
                 },
             'baseline': {
-                'nll': val_baseline_nll
+                'nll': val_baseline_nll,
+                'rmse': val_baseline_rmse,
                 },
             'best': {
                 'nll': best_nll,
@@ -757,18 +760,19 @@ def train_ensemble(
                 'train' : {
                     'kt_corr': float(kt_corrs[-1]),
                     'nll': float(train_nlls[-1]),
-                    'mse': float(train_mses[-1]),
+                    'rmse': float(train_rmses[-1]),
                     'std': float(train_std[-1]),
                     },
                 'val' : {
                     'kt_corr': float(val_kt_corrs[-1]),
                     'nll1': float(val_nlls[0][best_epoch_iter]),
                     'nll2': float(val_nlls[1][best_epoch_iter]),
-                    'mse': float(val_mses[-1]),
+                    'rmse': float(val_rmses[-1]),
                     'std': float(val_std[-1]),
                     },
                 'baseline': {
-                    'nll': val_baseline_nll
+                    'nll': val_baseline_nll,
+                'rmse': val_baseline_rmse,
                     },
                 'best': {
                     'nll': best_nll,
@@ -784,6 +788,7 @@ def hyper_param_train(
     params,
     model,
     data,
+    stage,
     data_split_rng,
     predict_info_models=None,
 ):
@@ -794,6 +799,11 @@ def hyper_param_train(
     best_logging = None
     best_gamma = None
 
+    train_batch_size = getattr(params, stage + "_train_batch_size")
+    train_epochs = getattr(params, stage + "_train_num_epochs")
+    lr = getattr(params, stage + "_train_lr")
+    l2 = getattr(params, stage + "_train_l2")
+
     train_X, train_Y, X, Y = data
     do_model_hparam_search = len(params.gammas) > 1
     for gamma in params.gammas:
@@ -802,13 +812,13 @@ def hyper_param_train(
             model_copy = copy.deepcopy(model)
         else:
             model_copy = model
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+        optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
         if predict_info_models is not None:
             predict_info_models.init_opt(params, train_idx, X.shape[0])
         logging, optim, data_split_rng2 = train_ensemble(
                 params,
-                params.train_batch_size,
-                params.init_train_epochs, 
+                train_batch_size,
+                train_epochs, 
                 [train_X, train_Y, X, Y],
                 model_copy,
                 optim,
@@ -842,11 +852,11 @@ def hyper_param_train(
     if do_model_hparam_search and do_ood_val:
         assert best_gamma is not None
         model_copy = copy.deepcopy(model)
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=params.train_lr, weight_decay=params.train_l2)
+        optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
         logging, optim, data_split_rng2 = dbopt.train_ensemble(
                 params, 
-                params.train_batch_size,
-                params.init_train_epochs, 
+                train_batch_size,
+                train_epochs, 
                 [train_X, train_Y, X, Y],
                 model_copy,
                 optim,

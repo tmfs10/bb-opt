@@ -53,7 +53,7 @@ class NN(torch.nn.Module):
             mean = torch.sigmoid(output[:,0])*self.sigmoid_coeff
         else:
             mean = output[:,0]
-        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        variance =torch.sigmoid(output[:,1])+self.min_variance
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
@@ -280,7 +280,7 @@ class NNEnsemble(torch.nn.Module):
         return negative_log_likelihood
 
     def report_metric(
-        labels, means, variances, return_mse: bool = False
+        labels, means, variances, custom_std=None, return_mse=False
     ):
         num_samples = means.shape[0]
         m = means.mean(dim=0)
@@ -292,7 +292,10 @@ class NNEnsemble(torch.nn.Module):
         d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
         negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean()
 
-        d = tdist.Normal(m, torch.sqrt(v))
+        if custom_std is None:
+            d = tdist.Normal(m, torch.sqrt(v))
+        else:
+            d = tdist.Normal(m, custom_std)
         negative_log_likelihood2 = -d.log_prob(labels).mean()
 
         #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.834)

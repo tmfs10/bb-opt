@@ -56,12 +56,12 @@ def add_parse_args(parser):
     # train params
     parser.add_argument('--exclude_top', type=float01)
     parser.add_argument('--init_train_examples', type=int)
-    parser.add_argument('--init_train_epochs', type=int)
-    parser.add_argument('--train_lr', type=float)
-    parser.add_argument('--train_batch_size', type=int)
-    parser.add_argument('--retrain_num_epochs', type=int)
-    parser.add_argument('--retrain_lr', type=float)
-    parser.add_argument('--retrain_batch_size', type=int)
+    parser.add_argument('--init_train_num_epochs', type=int)
+    parser.add_argument('--init_train_lr', type=float)
+    parser.add_argument('--init_train_batch_size', type=int)
+    parser.add_argument('--re_train_num_epochs', type=int)
+    parser.add_argument('--re_train_lr', type=float)
+    parser.add_argument('--re_train_batch_size', type=int)
     parser.add_argument('--choose_type', type=strlower, help="last/val")
     parser.add_argument('--early_stopping', type=int, 
             help="num early stopping iters. 0 means no early stoppping")
@@ -74,8 +74,8 @@ def add_parse_args(parser):
     parser.add_argument('--num_hidden', type=int)
     parser.add_argument('--sigmoid_coeff', type=float)
     parser.add_argument('--output_dist_fn', type=str2dist)
-    parser.add_argument('--train_l2', type=float)
-    parser.add_argument('--retrain_l2', type=float)
+    parser.add_argument('--init_train_l2', type=float)
+    parser.add_argument('--re_train_l2', type=float)
 
     parser.add_argument('--unseen_reg', type=strlower)
     parser.add_argument('--gammas', type=float, nargs='+',
