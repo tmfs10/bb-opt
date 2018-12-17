@@ -34,7 +34,6 @@ print('PARAMS:')
 for k, v in vars(params).items():
     print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
-do_ood_val = params.ood_val > 1e-9
 
 gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
@@ -121,7 +120,6 @@ for filename in filenames:
 
     init_model = dbopt.get_model_nn_ensemble(
             inputs.shape[1], 
-            params.train_batch_size, 
             params.num_models, 
             params.num_hidden, 
             sigmoid_coeff=params.sigmoid_coeff, 
@@ -175,7 +173,7 @@ for filename in filenames:
             init_model,
             [train_X_init, train_Y_cur, X, Y],
             stage="init",
-            data_split_rng,
+            data_split_rng=data_split_rng,
             predict_info_models=predict_info_models if params.predict_mi else None,
             )
 
@@ -335,7 +333,7 @@ for filename in filenames:
                         cur_model,
                         [train_X_cur, train_Y_cur, X, Y],
                         stage="re",
-                        data_split_rng,
+                        data_split_rng=data_split_rng,
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )
 

@@ -8,7 +8,7 @@
 --ack_change_stat_logging True
 
 --exclude_top 0.1
---init_train_examples 200
+--init_train_examples 600
 --init_train_num_epochs 200
 --init_train_lr 0.01
 --init_train_batch_size 128
@@ -16,7 +16,7 @@
 --re_train_lr 0.01
 --re_train_batch_size 128
 --val_frac 0.1
---ood_val 0.1
+--ood_val_frac 0.1
 
 --num_hidden 100
 --sigmoid_coeff 1.0
@@ -38,7 +38,8 @@
 --num_acks 30
 
 --single_gaussian_test_nll True
---choose_type val_nll
+--hyper_search_choose_type val,nll,ood
+--final_train_choose_type val,nll,ood
 
 --ei_diversity_measure none_ucb
 --ucb 1.0

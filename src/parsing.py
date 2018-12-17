@@ -38,6 +38,16 @@ def verify_model_update_mode(mode):
             ]
     return mode
 
+
+def verify_choose_type(choose_type):
+    print(choose_type)
+    choose_type = [k.lower() for k in choose_type.split(',')]
+    assert len(choose_type) == 3, choose_type
+    assert choose_type[0] in ["val", "train", "last"], choose_type
+    assert choose_type[1] in ["nll", "kt_corr"], choose_type
+    assert choose_type[2] in ["ind", "ood"], choose_type
+    return choose_type
+
 def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
@@ -62,12 +72,13 @@ def add_parse_args(parser):
     parser.add_argument('--re_train_num_epochs', type=int)
     parser.add_argument('--re_train_lr', type=float)
     parser.add_argument('--re_train_batch_size', type=int)
-    parser.add_argument('--choose_type', type=strlower, help="last/val")
+    parser.add_argument('--hyper_search_choose_type', type=verify_choose_type)
+    parser.add_argument('--final_train_choose_type', type=verify_choose_type)
     parser.add_argument('--early_stopping', type=int, 
             help="num early stopping iters. 0 means no early stoppping")
     parser.add_argument('--val_frac', type=float,
             help="val frac to hold out as in-distribution validation set")
-    parser.add_argument('--ood_val', type=float,
+    parser.add_argument('--ood_val_frac', type=float,
             help="top frac to hold out as out-of-distribution validation set")
 
     # model params

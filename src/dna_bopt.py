@@ -222,14 +222,13 @@ def get_model_nn(
 
 def get_model_nn_ensemble(
     num_inputs,
-    batch_size,
     num_models,
     num_hidden,
     device,
     sigmoid_coeff,
     extra_random: bool = False,
 ):
-    model = NNEnsemble.get_model(num_inputs, batch_size, num_models, num_hidden, device, sigmoid_coeff=sigmoid_coeff, extra_random=extra_random)
+    model = NNEnsemble.get_model(num_inputs, num_models, num_hidden, device, sigmoid_coeff=sigmoid_coeff, extra_random=extra_random)
     model = model.to(device)
     return model
 
@@ -471,9 +470,9 @@ def train_ensemble(
     data,
     model_ensemble,
     optim,
+    choose_type,
     unseen_reg="normal",
     gamma=0.0,
-    choose_type="val",
     normalize_fn=None,
     val_frac=0.1,
     early_stopping=10,
@@ -483,7 +482,7 @@ def train_ensemble(
     hsic_custom_kernel=None,
     data_split_rng=None,
     jupyter=False,
-    ood_val=0.0,
+    ood_val_frac=0.0,
 ):
     do_early_stopping = "val" in choose_type or "train" in choose_type
 
@@ -493,19 +492,22 @@ def train_ensemble(
     assert val_frac >= 0.01
     assert val_frac <= 0.9
 
-    if ood_val > 1e-3:
-        assert ood_val <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val)
+    if "ood" in choose_type:
+        assert ood_val_frac > 1e-3
+        assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
         sorted_idx = torch.sort(train_Y, descending=True)[1]
-        val_N = int(N * ood_val)
+        val_N = int(N * ood_val_frac)
         idx = torch.arange(N)
         train_idx = idx[sorted_idx[val_N:]]
         val_idx = idx[sorted_idx[:val_N]]
-    else:
+    elif "ind" in choose_type:
         train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
                 N, 
                 [1-val_frac, val_frac],
                 rng=data_split_rng,
                 )
+    else:
+        assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
     assert val_idx.shape[0] > 0
     val_X = train_X[val_idx]
@@ -806,6 +808,7 @@ def hyper_param_train(
 
     train_X, train_Y, X, Y = data
     do_model_hparam_search = len(params.gammas) > 1
+    do_ood_val = do_model_hparam_search and params.ood_val_frac > 1e-3
     for gamma in params.gammas:
         if len(params.gammas) > 1:
             assert do_model_hparam_search
@@ -822,24 +825,24 @@ def hyper_param_train(
                 [train_X, train_Y, X, Y],
                 model_copy,
                 optim,
+                choose_type=params.hyper_search_choose_type,
                 unseen_reg=params.unseen_reg,
                 gamma=gamma,
-                choose_type=params.choose_type,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 val_frac=params.val_frac,
                 early_stopping=params.early_stopping,
                 predict_info_models=predict_info_models,
                 data_split_rng=data_split_rng,
-                ood_val=params.ood_val if do_model_hparam_search else 0.0,
+                ood_val_frac=params.ood_val_frac,
                 )
         found_best = False
         val_nll_cur = logging[0]['best']['nll']
         val_kt_corr_cur = logging[0]['best']['kt_corr'] 
 
-        if "nll" in params.choose_type and val_nll_cur < best_nll:
+        if "nll" in params.hyper_search_choose_type and val_nll_cur < best_nll:
             best_nll = val_nll_cur
             found_best = True
-        elif "kt_corr" in params.choose_type and val_kt_corr_cur > best_kt_corr:
+        elif "kt_corr" in params.hyper_search_choose_type and val_kt_corr_cur > best_kt_corr:
             best_kt_corr = val_kt_corr_cur
             found_best = True
 
@@ -849,7 +852,7 @@ def hyper_param_train(
             best_logging = logging
             best_gamma = gamma
 
-    if do_model_hparam_search and do_ood_val:
+    if params.hyper_search_choose_type != params.final_train_choose_type:
         assert best_gamma is not None
         model_copy = copy.deepcopy(model)
         optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
@@ -860,15 +863,15 @@ def hyper_param_train(
                 [train_X, train_Y, X, Y],
                 model_copy,
                 optim,
+                choose_type=params.final_train_choose_type,
                 unseen_reg=params.unseen_reg,
                 gamma=best_gamma,
-                choose_type=params.choose_type,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 val_frac=params.val_frac,
                 early_stopping=params.early_stopping,
                 predict_info_models=predict_info_models,
                 data_split_rng=data_split_rng,
-                ood_val=0.0,
+                ood_val_frac=params.ood_val_frac,
                 )
         best_model = model_copy
         best_optim = optim

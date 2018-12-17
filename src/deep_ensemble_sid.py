@@ -327,7 +327,6 @@ class NNEnsemble(torch.nn.Module):
     def get_model(
         cls,
         n_inputs: int,
-        batch_size: int = 200,
         n_models: int = 5,
         n_hidden: int = 100,
         adversarial_epsilon: Optional = None,
