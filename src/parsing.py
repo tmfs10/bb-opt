@@ -42,9 +42,9 @@ def verify_model_update_mode(mode):
 def verify_choose_type(choose_type):
     print(choose_type)
     choose_type = [k.lower() for k in choose_type.split(',')]
-    assert len(choose_type) == 3, choose_type
+    #assert len(choose_type) == 3, choose_type
     assert choose_type[0] in ["val", "train", "last"], choose_type
-    assert choose_type[1] in ["nll", "kt_corr"], choose_type
+    assert choose_type[1] in ["nll", "kt_corr", "classify", "bopt"], choose_type
     assert choose_type[2] in ["ind", "ood"], choose_type
     return choose_type
 
@@ -60,6 +60,7 @@ def add_parse_args(parser):
             help='use cuda (default: True)')
     parser.add_argument('--clean', type=str2bool, 
             help='remove existing saved dir')
+    parser.add_argument('--log_all_train_iter', type=str2bool)
     parser.add_argument("--ack_model_init_mode", type=verify_model_update_mode)
     parser.add_argument("--ack_change_stat_logging", type=str2bool)
 
@@ -80,10 +81,12 @@ def add_parse_args(parser):
             help="val frac to hold out as in-distribution validation set")
     parser.add_argument('--ood_val_frac', type=float,
             help="top frac to hold out as out-of-distribution validation set")
+    parser.add_argument('--num_train_val_splits', type=int)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
     parser.add_argument('--sigmoid_coeff', type=float)
+    parser.add_argument('--separate_mean_var', type=str2bool)
     parser.add_argument('--output_dist_fn', type=str2dist)
     parser.add_argument('--init_train_l2', type=float)
     parser.add_argument('--re_train_l2', type=float)

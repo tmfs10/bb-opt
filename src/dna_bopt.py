@@ -5,6 +5,7 @@ from scipy.stats import kendalltau
 import hsic
 import torch
 import torch.nn as nn
+import math
 import sys
 import hsic
 import copy
@@ -226,9 +227,18 @@ def get_model_nn_ensemble(
     num_hidden,
     device,
     sigmoid_coeff,
+    separate_mean_var=False,
     extra_random: bool = False,
 ):
-    model = NNEnsemble.get_model(num_inputs, num_models, num_hidden, device, sigmoid_coeff=sigmoid_coeff, extra_random=extra_random)
+    model = NNEnsemble.get_model(
+            num_inputs, 
+            num_models, 
+            num_hidden, 
+            device, 
+            sigmoid_coeff=sigmoid_coeff, 
+            extra_random=extra_random,
+            separate_mean_var=separate_mean_var,
+            )
     model = model.to(device)
     return model
 
@@ -474,6 +484,7 @@ def train_ensemble(
     unseen_reg="normal",
     gamma=0.0,
     normalize_fn=None,
+    num_epoch_iters=None,
     val_frac=0.1,
     early_stopping=10,
     adv_alpha=1.0,
@@ -484,7 +495,7 @@ def train_ensemble(
     jupyter=False,
     ood_val_frac=0.0,
 ):
-    do_early_stopping = "val" in choose_type or "train" in choose_type
+    do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
     adv_train = adv_epsilon > 1e-9
     train_X, train_Y, X, Y = data
@@ -492,7 +503,9 @@ def train_ensemble(
     assert val_frac >= 0.01
     assert val_frac <= 0.9
 
-    if "ood" in choose_type:
+    if num_epoch_iters is not None:
+        assert num_epoch_iters > 0
+    elif "ood" in choose_type:
         assert ood_val_frac > 1e-3
         assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
         sorted_idx = torch.sort(train_Y, descending=True)[1]
@@ -509,28 +522,32 @@ def train_ensemble(
     else:
         assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
-    assert val_idx.shape[0] > 0
-    val_X = train_X[val_idx]
-    train_X = train_X[train_idx]
-    val_Y = train_Y[val_idx]
-    train_Y = train_Y[train_idx]
-
-    train_mean = train_Y.mean()
-    train_std = train_Y.std()
-    train_normal = tdist.normal.Normal(train_mean, train_std)
-    val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).item()
-    val_baseline_nll = -train_normal.log_prob(val_Y).mean().item()
+    if num_epoch_iters is None:
+        assert val_idx.shape[0] > 0
+        val_X = train_X[val_idx]
+        train_X = train_X[train_idx]
+        val_Y = train_Y[val_idx]
+        train_Y = train_Y[train_idx]
+        print("%d num_val" % (val_X.shape[0]))
 
     if normalize_fn is not None:
         mean = train_Y.mean()
         std = train_Y.std()
         train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
-        val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+        if num_epoch_iters is None:
+            val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+
+    train_mean = train_Y.mean()
+    train_std = train_Y.std()
+    train_normal = tdist.normal.Normal(train_mean, train_std)
+    train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).item()
+    if num_epoch_iters is None:
+        val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).item()
+        val_baseline_nll = -train_normal.log_prob(val_Y).mean().item()
 
     N = train_X.shape[0]
     print("training:")
     print("%d num_train" % (N))
-    print("%d num_val" % (val_X.shape[0]))
     print(str(batch_size) + " batch_size")
     print(str(num_epochs) + " num_epochs")
     print(str(gamma) + " gamma")
@@ -546,6 +563,7 @@ def train_ensemble(
     train_rmses = []
     train_std = []
     val_std = []
+    best_val_indv_rmse = None
 
     if jupyter:
         progress = tnrange(num_epochs)
@@ -555,11 +573,15 @@ def train_ensemble(
     best_nll = float('inf')
     best_epoch_iter = -1
     best_kt_corr = -2.
+    best_measure = None
     best_model = None
     best_optim = None
 
     time_since_last_best_epoch = 0
+    logging = None
     for epoch_iter in progress:
+        if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
+            break
         time_since_last_best_epoch += 1
         model_ensemble.train()
         for bi in range(num_batches):
@@ -613,6 +635,12 @@ def train_ensemble(
                     gamma,
                     )
 
+            mean_across_data = means.mean(dim=1)
+            mean_diff = mean_across_data[:-1]-mean_across_data[1:]
+            mean_diff = (mean_diff**2).mean()
+
+            #loss += gamma * mean_diff
+
             if predict_info_models is not None:
                 s_idx = predict_info_models.sample_points(params.num_predict_sample_points)
                 with torch.no_grad():
@@ -646,145 +674,151 @@ def train_ensemble(
 
         model_ensemble.eval()
         with torch.no_grad():
-            means, variances = model_ensemble(train_X)
-            train_std += [means.std(0).mean().item()]
-            mean_of_means = means.mean(0)
-            assert mean_of_means.shape == train_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
-            kt_corr = kendalltau(mean_of_means, train_Y)[0]
+            train_means, train_variances = model_ensemble(train_X)
+            train_std += [train_means.std(0).mean().item()]
+            train_mean_of_means = train_means.mean(dim=0)
+            assert train_mean_of_means.shape == train_Y.shape, "%s == %s" % (train_mean_of_means.shape, val_Y.shape)
+            kt_corr = kendalltau(train_mean_of_means, train_Y)[0]
             kt_corrs += [kt_corr]
 
-            if "train" in choose_type:
-                train_nll1, train_nll2 = NNEnsemble.report_metric(
-                        train_Y, 
-                        means, 
-                        variances, 
+            if num_epoch_iters is None:
+                val_means, val_variances = model_ensemble(val_X)
+                indv_rmse = torch.sqrt(((val_means-val_Y)**2).mean(dim=1))
+                val_std += [val_means.std(0).mean().item()]
+                val_nll1, val_nll2 = NNEnsemble.report_metric(
+                        val_Y,
+                        val_means,
+                        val_variances,
+                        custom_std=train_Y.std(),
                         return_mse=False)
-                train_nll1 = nll1.item() # mixture of gaussians
-                train_nll2 = nll2.item() # single gaussian
+                val_nll1 = val_nll1.item()
+                val_nll2 = val_nll2.item()
+                rmse = torch.sqrt(torch.mean((val_means-val_Y)**2)).item()
+                val_nlls[0] += [val_nll1]
+                val_nlls[1] += [val_nll2]
+                val_rmses += [rmse]
+                val_mean_of_means = val_means.mean(dim=0)
+                assert val_mean_of_means.shape == val_Y.shape, "%s == %s" % (val_mean_of_means.shape, val_Y.shape)
+                kt_corr = kendalltau(val_mean_of_means, val_Y)[0]
+                val_kt_corrs += [kt_corr]
 
-                if train_nll2 < best_nll:
-                    best_nll = train_nll2
-                    if "nll" in choose_type:
-                        best_epoch_iter = epoch_iter
-                        time_since_last_best_epoch = 0
-                        best_model = copy.deepcopy(model_ensemble.state_dict())
-                        best_optim = copy.deepcopy(optim.state_dict())
-                if kt_corr > best_kt_corr:
-                    best_kt_corr = kt_corr
-                    if "kt_corr" in choose_type:
-                        best_epoch_iter = epoch_iter
-                        time_since_last_best_epoch = 0
-                        best_model = copy.deepcopy(model_ensemble.state_dict())
-                        best_optim = copy.deepcopy(optim.state_dict())
+                if "val" in choose_type:
+                    if val_nll1 < best_nll:
+                        best_nll = val_nll1
+                        if "nll" in choose_type:
+                            best_epoch_iter = epoch_iter
+                            time_since_last_best_epoch = 0
+                            best_model = copy.deepcopy(model_ensemble.state_dict())
+                            #best_model = copy.deepcopy(model_ensemble)
+                            #best_optim = copy.deepcopy(optim)
+                            best_val_indv_rmse = indv_rmse
+                            best_measure = best_nll
+                    if kt_corr > best_kt_corr:
+                        best_kt_corr = kt_corr
+                        if "kt_corr" in choose_type:
+                            best_epoch_iter = epoch_iter
+                            time_since_last_best_epoch = 0
+                            best_model = copy.deepcopy(model_ensemble)
+                            best_val_indv_rmse = indv_rmse
+                            best_measure = best_kt_corr
+                    if "classify" in choose_type:
+                        kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
+                        mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
+                        classify_kt_corr = kendalltau(mean_preds, kt_labels)[0]
+                        if best_measure is None or best_measure < classify_kt_corr:
+                            best_measure = classify_kt_corr
+                            time_since_last_best_epoch = 0
+                            best_model = copy.deepcopy(model_ensemble)
+                            best_val_indv_rmse = indv_rmse
+                    if "bopt" in choose_type:
+                        max_idx = torch.argmax(val_mean_of_means)
+                        measure = val_Y[max_idx]
+                        if best_measure is None or best_measure < measure:
+                            best_measure = measure
+                            time_since_last_best_epoch = 0
+                            best_model = copy.deepcopy(model_ensemble)
+                            best_val_indv_rmse = indv_rmse
 
-            means, variances = model_ensemble(val_X)
-            val_std += [means.std(0).mean().item()]
-            val_nll1, val_nll2 = NNEnsemble.report_metric(
-                    val_Y,
-                    means,
-                    variances,
-                    custom_std=train_Y.std(),
-                    return_mse=False)
-            val_nll1 = val_nll1.item()
-            val_nll2 = val_nll2.item()
-            rmse = torch.sqrt(torch.mean((means-val_Y)**2)).item()
-            val_nlls[0] += [val_nll1]
-            val_nlls[1] += [val_nll2]
-            val_rmses += [rmse]
-            mean_of_means = means.mean(0)
-            assert mean_of_means.shape == val_Y.shape, "%s == %s" % (mean_of_means.shape, val_Y.shape)
-            kt_corr = kendalltau(mean_of_means, val_Y)[0]
-            val_kt_corrs += [kt_corr]
+                progress.set_description(f"Corr: {kt_corr:.3f}")
 
-            if "val" in choose_type:
-                if val_nll1 < best_nll:
-                    best_nll = val_nll1
-                    if "nll" in choose_type:
-                        best_epoch_iter = epoch_iter
-                        time_since_last_best_epoch = 0
-                        best_model = copy.deepcopy(model_ensemble.state_dict())
-                        best_optim = copy.deepcopy(optim.state_dict())
-                if kt_corr > best_kt_corr:
-                    best_kt_corr = kt_corr
-                    if "kt_corr" in choose_type:
-                        best_epoch_iter = epoch_iter
-                        time_since_last_best_epoch = 0
-                        best_model = copy.deepcopy(model_ensemble.state_dict())
-                        best_optim = copy.deepcopy(optim.state_dict())
+                if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
+                    assert epoch_iter >= early_stopping
+                    break
 
-            progress.set_description(f"Corr: {kt_corr:.3f}")
+                if do_early_stopping:
+                    if best_model is not None:
+                        model_ensemble.load_state_dict(best_model)
+                    else:
+                        assert num_epochs == 0
+                if num_epochs == 0:
+                    kt_corrs = [-1]
+                    train_nlls = [-1]
+                    train_rmses = [-1]
+                    train_std = [-1]
+                    val_kt_corrs = [-1]
+                    val_nlls = [[-1], [-1]]
+                    val_rmses = [-1]
+                    val_std = [-1]
 
-        if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
-            assert epoch_iter >= early_stopping
-            break
-
-    if do_early_stopping:
-        if best_model is not None:
-            model_ensemble.load_state_dict(best_model)
-            optim.load_state_dict(best_optim)
-        else:
-            assert num_epochs == 0
-    if num_epochs == 0:
-        kt_corrs = [-1]
-        train_nlls = [-1]
-        train_rmses = [-1]
-        train_std = [-1]
-        val_kt_corrs = [-1]
-        val_nlls = [[-1], [-1]]
-        val_rmses = [-1]
-        val_std = [-1]
-
-    logging =  [{
-            'train' : {
-                'kt_corr': kt_corrs,
-                'nll': train_nlls,
-                'rmse': train_rmses,
-                'std': train_std,
-                },
-            'val' : {
-                'kt_corr': val_kt_corrs,
-                'nll1': val_nlls[0],
-                'nll2': val_nlls[1],
-                'rmse': val_rmses,
-                'std': val_std,
-                },
-            'baseline': {
-                'nll': val_baseline_nll,
-                'rmse': val_baseline_rmse,
-                },
-            'best': {
-                'nll': best_nll,
-                'kt_corr': best_kt_corr,
-                'epoch_iter': best_epoch_iter,
-                },
-            },
-            {
+    if num_epoch_iters is None:
+        logging =  [
+                {
                 'train' : {
-                    'kt_corr': float(kt_corrs[-1]),
-                    'nll': float(train_nlls[-1]),
-                    'rmse': float(train_rmses[-1]),
-                    'std': float(train_std[-1]),
+                    'kt_corr': kt_corrs,
+                    'nll': train_nlls,
+                    'rmse': train_rmses,
+                    'std': train_std,
                     },
                 'val' : {
-                    'kt_corr': float(val_kt_corrs[-1]),
-                    'nll1': float(val_nlls[0][best_epoch_iter]),
-                    'nll2': float(val_nlls[1][best_epoch_iter]),
-                    'rmse': float(val_rmses[-1]),
-                    'std': float(val_std[-1]),
+                    'kt_corr': val_kt_corrs,
+                    'nll1': val_nlls[0],
+                    'nll2': val_nlls[1],
+                    'rmse': val_rmses,
+                    'std': val_std,
                     },
                 'baseline': {
                     'nll': val_baseline_nll,
-                'rmse': val_baseline_rmse,
+                    'rmse': val_baseline_rmse,
+                    'train_rmse': train_baseline_rmse,
                     },
                 'best': {
                     'nll': best_nll,
                     'kt_corr': best_kt_corr,
                     'epoch_iter': best_epoch_iter,
+                    'indv_rmse': best_val_indv_rmse,
+                    'measure': best_measure,
                     },
                 },
-    ]
+                {
+                'train' : {
+                    'kt_corr': float(kt_corrs[best_epoch_iter]),
+                    'nll': float(train_nlls[best_epoch_iter]),
+                    'rmse': float(train_rmses[best_epoch_iter]),
+                    'std': float(train_std[best_epoch_iter]),
+                    },
+                'val' : {
+                    'kt_corr': float(val_kt_corrs[best_epoch_iter]),
+                    'nll1': float(val_nlls[0][best_epoch_iter]),
+                    'nll2': float(val_nlls[1][best_epoch_iter]),
+                    'rmse': float(val_rmses[best_epoch_iter]),
+                    'std': float(val_std[best_epoch_iter]),
+                    },
+                'baseline': {
+                    'nll': val_baseline_nll,
+                    'rmse': val_baseline_rmse,
+                    'train_rmse': train_baseline_rmse,
+                    },
+                'best': {
+                    'nll': best_nll,
+                    'kt_corr': best_kt_corr,
+                    'epoch_iter': best_epoch_iter,
+                    'indv_rmse': best_val_indv_rmse,
+                    'measure': best_measure,
+                    },
+                },
+        ]
 
-    return logging, optim, data_split_rng
+    return logging, data_split_rng, best_model, optim
 
 def hyper_param_train(
     params,
@@ -796,6 +830,7 @@ def hyper_param_train(
 ):
     best_nll = float('inf')
     best_kt_corr = -2.
+    best_measure = None
     best_model = None
     best_optim = None
     best_logging = None
@@ -809,35 +844,39 @@ def hyper_param_train(
     train_X, train_Y, X, Y = data
     do_model_hparam_search = len(params.gammas) > 1
     do_ood_val = do_model_hparam_search and params.ood_val_frac > 1e-3
+    best_epoch_iter = None
     for gamma in params.gammas:
-        if len(params.gammas) > 1:
-            assert do_model_hparam_search
-            model_copy = copy.deepcopy(model)
-        else:
-            model_copy = model
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
+        model_copy = copy.deepcopy(model)
         if predict_info_models is not None:
             predict_info_models.init_opt(params, train_idx, X.shape[0])
-        logging, optim, data_split_rng2 = train_ensemble(
-                params,
-                train_batch_size,
-                train_epochs, 
-                [train_X, train_Y, X, Y],
-                model_copy,
-                optim,
-                choose_type=params.hyper_search_choose_type,
-                unseen_reg=params.unseen_reg,
-                gamma=gamma,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                val_frac=params.val_frac,
-                early_stopping=params.early_stopping,
-                predict_info_models=predict_info_models,
-                data_split_rng=data_split_rng,
-                ood_val_frac=params.ood_val_frac,
-                )
+        data_split_rng2 = data_split_rng
+        best_cur_epoch_iter = []
+        for split_iter in range(params.num_train_val_splits):
+            optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
+            logging, data_split_rng2, _, _ = train_ensemble(
+                    params,
+                    train_batch_size,
+                    train_epochs, 
+                    [train_X, train_Y, X, Y],
+                    model_copy,
+                    optim,
+                    choose_type=params.hyper_search_choose_type,
+                    unseen_reg=params.unseen_reg,
+                    gamma=gamma,
+                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                    val_frac=params.val_frac,
+                    early_stopping=params.early_stopping,
+                    predict_info_models=predict_info_models,
+                    data_split_rng=data_split_rng2,
+                    ood_val_frac=params.ood_val_frac,
+                    )
+            best_cur_epoch_iter += [logging[1]['best']['epoch_iter']]
+            print('best_epoch:', logging[1]['best']['epoch_iter'])
+        best_cur_epoch_iter = int(math.ceil(sum(best_cur_epoch_iter)/float(len(best_cur_epoch_iter))))
         found_best = False
-        val_nll_cur = logging[0]['best']['nll']
-        val_kt_corr_cur = logging[0]['best']['kt_corr'] 
+        val_nll_cur = logging[1]['best']['nll']
+        val_kt_corr_cur = logging[1]['best']['kt_corr'] 
+        val_best_measure = logging[1]['best']['measure']
 
         if "nll" in params.hyper_search_choose_type and val_nll_cur < best_nll:
             best_nll = val_nll_cur
@@ -845,48 +884,42 @@ def hyper_param_train(
         elif "kt_corr" in params.hyper_search_choose_type and val_kt_corr_cur > best_kt_corr:
             best_kt_corr = val_kt_corr_cur
             found_best = True
+        elif ("classify" in params.hyper_search_choose_type or "bopt" in params.hyper_search_choose_type) and (best_measure is None or val_best_measure > best_measure):
+            best_measure = val_best_measure
+            found_best = True
 
         if found_best:
             best_model = model_copy
             best_optim = optim
             best_logging = logging
             best_gamma = gamma
-
-    if params.hyper_search_choose_type != params.final_train_choose_type:
-        assert best_gamma is not None
-        model_copy = copy.deepcopy(model)
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
-        logging, optim, data_split_rng2 = dbopt.train_ensemble(
-                params, 
-                train_batch_size,
-                train_epochs, 
-                [train_X, train_Y, X, Y],
-                model_copy,
-                optim,
-                choose_type=params.final_train_choose_type,
-                unseen_reg=params.unseen_reg,
-                gamma=best_gamma,
-                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-                val_frac=params.val_frac,
-                early_stopping=params.early_stopping,
-                predict_info_models=predict_info_models,
-                data_split_rng=data_split_rng,
-                ood_val_frac=params.ood_val_frac,
-                )
-        best_model = model_copy
-        best_optim = optim
-        best_logging = logging
-        best_gamma = gamma
-
+            best_epoch_iter = best_cur_epoch_iter
     data_split_rng = data_split_rng2
     logging = best_logging
-    model = best_model
-    optim = best_optim
+
     assert logging[0] is not None
     assert logging[1] is not None
     print('logging:', pprint.pformat(logging[1]))
 
-    return model, optim, logging, best_gamma, data_split_rng
+    assert best_epoch_iter is not None
+    assert best_gamma is not None
+    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+    _, _, _, _ = train_ensemble(
+            params, 
+            train_batch_size,
+            train_epochs, 
+            [train_X, train_Y, X, Y],
+            model,
+            optim,
+            choose_type=params.final_train_choose_type,
+            unseen_reg=params.unseen_reg,
+            gamma=best_gamma,
+            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+            num_epoch_iters=best_epoch_iter+1,
+            predict_info_models=predict_info_models,
+            )
+
+    return model, logging, best_gamma, data_split_rng
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3

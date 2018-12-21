@@ -3,9 +3,11 @@ import sys
 import os
 import numpy as np
 import torch
+import matplotlib.pyplot as plt
+import seaborn as sns
 
 
-def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10):
+def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False):
     stats_to_extract = [
             'logging',
             'ack_idx',
@@ -61,9 +63,68 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10):
                     for stat in stats_to_extract:
                         if stat not in checkpoint:
                             continue
+                        if not read_all_train_iter and stat == 'logging':
+                            checkpoint[stat][0] = None
                         stats[-1][filename][batch_size][-1][stat] = checkpoint[stat]
 
     return stats
+
+
+# 1 plot per filename
+# mode takes the following values
+# - avg_seeds : average over seeds before ack
+# - avg_ratio : compute ratio change across ack and then avg
+# - no_avg : look at all seeds in one plot
+def plot_data_vs_ack_iter(
+    batch_size,
+    filenames,
+    mode,
+    ylabel,
+    data_extractor_fn,
+    num_acks,
+    arrs,
+    to_eval,
+    legend_loc=0,
+):
+    assert mode in ["avg_seeds", "avg_ratio", "no_avg"]
+    for filename in filenames:
+        if mode in ["avg_seeds", "avg_ratio"]:
+            plt.figure(figsize=(15,4))
+            plt.xlabel('ack_iter')
+            plt.ylabel(ylabel)
+            plt.title(filename)
+        legend = []
+        points = {}
+        for exp in to_eval:
+            if mode == "no_avg":
+                plt.figure(figsize=(6,4))
+                plt.xlabel('ack_iter')
+                plt.ylabel(ylabel)
+                plt.title(filename + " ; " + arrs[exp][1])
+            points[exp] = []
+
+            # iterates over the diff seeds
+            for stats in arrs[exp][0]:
+                if filename not in stats:
+                    continue
+                if batch_size not in stats[filename]:
+                    continue
+                if len(stats[filename][batch_size]) < num_acks:
+                    continue
+                cur_stats = stats[filename][batch_size]
+                cur_points = [data_extractor_fn(cur_stats[ack_iter]) for ack_iter in range(num_acks)]
+                cur_points = np.array(cur_points)
+                if mode == 'no_avg':
+                    plt.plot(cur_points)
+                else:
+                    points[exp] += [cur_points]
+
+            if mode == 'avg_seeds':
+                points[exp] = np.array(points[exp]).mean(axis=0)
+                plt.plot(points[exp])
+                legend += [arrs[exp][1]]
+        if mode in ["avg_seeds", "avg_ratio"]:
+            plt.legend(legend, loc=legend_loc)
 
 
 def compute_logprob(prior_mean, prior_std, exp_folder, data_dir, suffix):

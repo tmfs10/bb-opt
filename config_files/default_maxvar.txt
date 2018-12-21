@@ -4,11 +4,12 @@
 --data_split_seed 1
 --device cuda
 --clean True
+--log_all_train_iter False
 --reset_model_every_iter True
 --ack_change_stat_logging True
 
 --exclude_top 0.1
---init_train_examples 600
+--init_train_examples 200
 --init_train_num_epochs 200
 --init_train_lr 0.01
 --init_train_batch_size 128
@@ -17,13 +18,15 @@
 --re_train_batch_size 128
 --val_frac 0.1
 --ood_val_frac 0.1
+--num_train_val_splits 1
 
 --num_hidden 100
 --sigmoid_coeff 1.0
+--separate_mean_var False
 --output_dist_fn Normal
 --init_train_l2 0.01
 --re_train_l2 0.01
---early_stopping 30
+--early_stopping 10
 --take_log True
 
 --unseen_reg normal
@@ -38,8 +41,8 @@
 --num_acks 30
 
 --single_gaussian_test_nll True
---hyper_search_choose_type val,nll,ood
---final_train_choose_type val,nll,ood
+--hyper_search_choose_type val,nll,ind
+--final_train_choose_type val,nll,ind
 
 --ei_diversity_measure none_ucb
 --ucb 1.0

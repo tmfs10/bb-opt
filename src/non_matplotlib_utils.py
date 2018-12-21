@@ -83,10 +83,10 @@ def train_val_test_split(n, split, shuffle=True, rng=None):
         ops.set_rng_state(rng)
 
     if shuffle:
-        rng = ops.get_rng_state()
         np.random.shuffle(idx)
 
     if rng is not None:
+        rng = ops.get_rng_state()
         ops.set_rng_state(cur_rng)
 
     if split[0] < 1:

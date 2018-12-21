@@ -11,6 +11,7 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
+import torch.nn as nn
 from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
 import torch.distributions as tdist
@@ -36,31 +37,52 @@ class NN(torch.nn.Module):
             n_inputs: int, 
             n_hidden: int, 
             min_variance: float = 1e-5,
-            sigmoid_coeff: float = 1.
+            sigmoid_coeff: float = 1.,
+            separate_mean_var=False,
             ):
         super().__init__()
-        self.hidden = Linear(n_inputs, n_hidden)
-        self.output = Linear(n_hidden, 2)
+        if separate_mean_var:
+            self.hidden = [Linear(n_inputs, n_hidden), Linear(n_inputs, n_hidden)]
+            self.output = [Linear(n_hidden, 1), Linear(n_hidden, 1)]
+        else:
+            self.hidden = [Linear(n_inputs, n_hidden)]
+            self.output = [Linear(n_hidden, 2)]
+        self.hidden = nn.ModuleList(self.hidden)
+        self.output = nn.ModuleList(self.output)
+
         self.non_linearity = ReLU()
         self.softplus = Softplus()
         self.min_variance = min_variance
         self.sigmoid_coeff = sigmoid_coeff
 
     def forward(self, x):
-        hidden = self.non_linearity(self.hidden(x))
-        output = self.output(hidden)
-        if self.sigmoid_coeff > 0:
-            mean = torch.sigmoid(output[:,0])*self.sigmoid_coeff
+        hidden = []
+        output = []
+        for i in range(len(self.output)):
+            hidden += [self.non_linearity(self.hidden[i](x))]
+            output += [self.output[i](hidden[-1])]
+
+        if len(output) == 1:
+            if self.sigmoid_coeff > 0:
+                mean = torch.sigmoid(output[0][:, 0])*self.sigmoid_coeff
+            else:
+                mean = output[:, 0]
+            variance = torch.sigmoid(output[0][:, 1])+self.min_variance
         else:
-            mean = output[:,0]
-        variance =torch.sigmoid(output[:,1])+self.min_variance
-        #mean = output[:, 0]
+            if self.sigmoid_coeff > 0:
+                mean = torch.sigmoid(output[0])*self.sigmoid_coeff
+            else:
+                mean = output[0]
+            variance = torch.sigmoid(output[1])+self.min_variance
+
         #variance = self.softplus(output[:, 1]) + self.min_variance
-        return mean, variance
+        return mean.view(-1), variance.view(-1)
 
     def reset_parameters(self):
-        self.hidden.reset_parameters()
-        self.output.reset_parameters()
+        for h in self.hidden:
+            h.reset_parameters()
+        for o in self.output:
+            o.reset_parameters()
 
 class NN2(torch.nn.Module):
     """
@@ -71,7 +93,8 @@ class NN2(torch.nn.Module):
 			n_inputs: int, 
 			n_hidden: int, 
 			min_variance: float = 1e-5,
-            sigmoid_coeff: float = 1.
+            sigmoid_coeff: float = 1.,
+            separate_mean_var=False,
 			):
         super().__init__()
         self.hidden1 = Linear(n_inputs, n_hidden)
@@ -335,11 +358,12 @@ class NNEnsemble(torch.nn.Module):
         extra_random: bool = True,
         single_layer:bool = True,
         sigmoid_coeff : float = 1.,
+        separate_mean_var = False,
     ):
         device = device or "cpu"
 
         if not extra_random:
-            model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden, "sigmoid_coeff": sigmoid_coeff}
+            model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden, "sigmoid_coeff": sigmoid_coeff, "separate_mean_var": separate_mean_var}
             if single_layer:
                 model = cls(
                     n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon

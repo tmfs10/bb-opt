@@ -123,7 +123,8 @@ for filename in filenames:
             params.num_models, 
             params.num_hidden, 
             sigmoid_coeff=params.sigmoid_coeff, 
-            device=params.device
+            device=params.device,
+            separate_mean_var=params.separate_mean_var,
             )
 
     ensemble_init_rng = ops.get_rng_state()
@@ -168,7 +169,7 @@ for filename in filenames:
             train_idx = checkpoint["train_idx"].numpy()
     else:
 
-        init_model, optim, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+        init_model, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
             params,
             init_model,
             [train_X_init, train_Y_cur, X, Y],
@@ -177,11 +178,12 @@ for filename in filenames:
             predict_info_models=predict_info_models if params.predict_mi else None,
             )
 
+        if not params.log_all_train_iter:
+            logging[0] = None
         torch.save({
             'model_state_dict': init_model.state_dict(), 
             'logging': logging,
             'best_gamma': best_gamma,
-            'optim': optim.state_dict(),
             'train_idx': torch.from_numpy(train_idx),
             'global_params': vars(params),
             }, init_model_path)
@@ -213,21 +215,6 @@ for filename in filenames:
             with open(batch_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
-                    if os.path.exists(batch_ack_output_file) and not params.clean:
-                        checkpoint = torch.load(batch_ack_output_file)
-                        cur_model.load_state_dict(checkpoint['model_state_dict'])
-                        if params.predict_mi and "predict_info_models_state_dict" in checkpoint:
-                            predict_info_models.load_state_dict(checkpoint["predict_info_models_state_dict"])
-                        logging = checkpoint['logging']
-
-                        model_parameters = list(cur_model.parameters())
-                        optim = torch.optim.Adam(model_parameters, lr=params.retrain_lr)
-                        optim = optim.load_state_dict(checkpoint['optim'])
-
-                        ack_idx = checkpoint['ack_idx'].numpy().tolist()
-                        ack_all_cur.update(ack_idx)
-                        skip_idx_cur.update(ack_idx)
-                        continue
 
                     # test stats computation
                     print('doing ack_iter', ack_iter)
@@ -328,7 +315,7 @@ for filename in filenames:
                         cur_model,
                         ensemble_init_rng
                         )
-                    cur_model, optim, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                    cur_model, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
                         params,
                         cur_model,
                         [train_X_cur, train_Y_cur, X, Y],
@@ -381,10 +368,11 @@ for filename in filenames:
                     print(s)
                     f.write(s + "\n")
 
+                    if not params.log_all_train_iter:
+                        logging[0] = None
                     torch.save({
                         'model_state_dict': cur_model.state_dict(), 
                         'logging': logging,
-                        'optim': optim.state_dict(),
                         'best_gamma': best_gamma,
                         'ack_idx': torch.from_numpy(ack_array),
                         'ack_labels': torch.from_numpy(labels[ack_array]),

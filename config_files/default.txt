@@ -4,6 +4,7 @@
 --data_split_seed 1
 --device cuda
 --clean True
+--log_all_train_iter False
 --reset_model_every_iter True
 --ack_change_stat_logging True
 
@@ -17,9 +18,11 @@
 --re_train_batch_size 128
 --val_frac 0.1
 --ood_val_frac 0.1
+--num_train_val_splits 1
 
 --num_hidden 10
 --sigmoid_coeff 1.0
+--separate_mean_var False
 --output_dist_fn Normal
 --init_train_l2 0.01
 --re_train_l2 0.01
