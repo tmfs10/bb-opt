@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
+from scipy.stats import ttest_ind
 
 
 def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False):
@@ -125,6 +126,48 @@ def plot_data_vs_ack_iter(
                 legend += [arrs[exp][1]]
         if mode in ["avg_seeds", "avg_ratio"]:
             plt.legend(legend, loc=legend_loc)
+
+
+def prop_test(
+    batch_size,
+    filenames,
+    data_extractor_fn,
+    arrs,
+    exp,
+    ack_iter,
+    pval_threshold=0.05,
+):
+    assert len(exp) == 2
+    count = 0
+    total = 0
+    print('comparing', arrs[exp[0]][1], arrs[exp[1]][1])
+    for filename in filenames:
+        stat = [[], []]
+        for i in range(2):
+            if len(arrs[exp[i]][0]) == 0:
+                break
+            for stats in arrs[exp[i]][0]:
+                if filename not in stats:
+                    break
+                if batch_size not in stats[filename]:
+                    break
+                cur_stats = stats[filename][batch_size]
+                stat[i] += [data_extractor_fn(cur_stats[ack_iter])]
+        if len(stat[0]) == 0 or len(stat[1]) == 0:
+            break
+
+        ret = ttest_ind(stat[0], stat[1], equal_var=False)
+        score = ret[0]
+        pval = ret[1]
+        if pval <= pval_threshold:
+            m = [np.mean(stat[0]), np.mean(stat[1])]
+            c = 1 if m[1] > m[0] else 0
+            count += c
+            total += 1
+            print(filename, pval, m[0], m[1], c)
+
+    print('count: %d/%d' % (count, total))
+
 
 
 def compute_logprob(prior_mean, prior_std, exp_folder, data_dir, suffix):

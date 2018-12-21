@@ -82,6 +82,9 @@ def add_parse_args(parser):
     parser.add_argument('--ood_val_frac', type=float,
             help="top frac to hold out as out-of-distribution validation set")
     parser.add_argument('--num_train_val_splits', type=int)
+    parser.add_argument("--combine_train_val", type=str2bool)
+    parser.add_argument("--gamma_cutoff", type=str2bool,
+            help="Search starting from first gamma and end search as soon as new gamma is not best so far")
 
     # model params
     parser.add_argument('--num_hidden', type=int)

@@ -846,12 +846,15 @@ def hyper_param_train(
     do_ood_val = do_model_hparam_search and params.ood_val_frac > 1e-3
     best_epoch_iter = None
     for gamma in params.gammas:
-        model_copy = copy.deepcopy(model)
         if predict_info_models is not None:
             predict_info_models.init_opt(params, train_idx, X.shape[0])
         data_split_rng2 = data_split_rng
         best_cur_epoch_iter = []
+        if not params.combine_train_val:
+            model_copy = copy.deepcopy(model)
         for split_iter in range(params.num_train_val_splits):
+            if params.combine_train_val:
+                model_copy = copy.deepcopy(model)
             optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
             logging, data_split_rng2, _, _ = train_ensemble(
                     params,
@@ -888,12 +891,16 @@ def hyper_param_train(
             best_measure = val_best_measure
             found_best = True
 
+        if params.gamma_cutoff:
+            if not found_best:
+                break
         if found_best:
             best_model = model_copy
             best_optim = optim
             best_logging = logging
             best_gamma = gamma
             best_epoch_iter = best_cur_epoch_iter
+
     data_split_rng = data_split_rng2
     logging = best_logging
 
@@ -903,21 +910,46 @@ def hyper_param_train(
 
     assert best_epoch_iter is not None
     assert best_gamma is not None
-    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-    _, _, _, _ = train_ensemble(
-            params, 
-            train_batch_size,
-            train_epochs, 
-            [train_X, train_Y, X, Y],
-            model,
-            optim,
-            choose_type=params.final_train_choose_type,
-            unseen_reg=params.unseen_reg,
-            gamma=best_gamma,
-            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
-            num_epoch_iters=best_epoch_iter+1,
-            predict_info_models=predict_info_models,
-            )
+
+    if params.combine_train_val:
+        assert best_epoch_iter >= 0
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        _, _, _, _ = train_ensemble(
+                params, 
+                train_batch_size,
+                train_epochs, 
+                [train_X, train_Y, X, Y],
+                model,
+                optim,
+                choose_type=params.final_train_choose_type,
+                unseen_reg=params.unseen_reg,
+                gamma=best_gamma,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                num_epoch_iters=best_epoch_iter+1,
+                predict_info_models=predict_info_models,
+                )
+    elif params.hyper_search_choose_type != params.final_train_choose_type:
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        logging, data_split_rng2, _, _ = train_ensemble(
+                params,
+                train_batch_size,
+                train_epochs, 
+                [train_X, train_Y, X, Y],
+                model,
+                optim,
+                choose_type=params.final_train_choose_type,
+                unseen_reg=params.unseen_reg,
+                gamma=best_gamma,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                val_frac=params.val_frac,
+                early_stopping=params.early_stopping,
+                predict_info_models=predict_info_models,
+                data_split_rng=data_split_rng2,
+                ood_val_frac=params.ood_val_frac,
+                )
+    else:
+        assert best_model is not None
+        model = best_model
 
     return model, logging, best_gamma, data_split_rng
 

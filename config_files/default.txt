@@ -19,6 +19,8 @@
 --val_frac 0.1
 --ood_val_frac 0.1
 --num_train_val_splits 1
+--combine_train_val True
+--gamma_cutoff False
 
 --num_hidden 10
 --sigmoid_coeff 1.0
