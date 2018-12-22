@@ -148,10 +148,12 @@ def prop_test(
                 break
             for stats in arrs[exp[i]][0]:
                 if filename not in stats:
-                    break
+                    continue
                 if batch_size not in stats[filename]:
-                    break
+                    continue
                 cur_stats = stats[filename][batch_size]
+                if len(cur_stats) <= ack_iter:
+                    continue
                 stat[i] += [data_extractor_fn(cur_stats[ack_iter])]
         if len(stat[0]) == 0 or len(stat[1]) == 0:
             break
