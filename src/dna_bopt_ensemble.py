@@ -35,7 +35,7 @@ for k, v in vars(params).items():
     print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
 
-gpu_id = gpu_init(best_gpu_metric="mem")
+gpu_id = gpu_init(best_gpu_metric="util")
 print(f"Running on GPU {gpu_id}")
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 params.device = device
@@ -242,25 +242,52 @@ for filename in filenames:
 
                     if "empirical_cond_" in params.ei_diversity_measure:
                         if params.ei_diversity_measure == "empirical_cond_pdts":
-                            ack_to_condense = bopt.get_pdts_idx(
+                            ack_idx_to_condense = bopt.get_pdts_idx(
                                     preds, 
                                     params.num_diversity*ack_batch_size, 
                                     density=False)
                         elif params.ei_diversity_measure == "empirical_cond_er":
-                            er = preds.mean(dim=0).view(-1).cpu().numpy()
-                            er[:, list(skip_idx)] = er.min()
-                            er_sortidx = np.argsort(er)
-                            ack_to_condense = er_sortidx[-params.num_diversity*ack_batch_size:]
+                            er = preds.mean(dim=0).view(-1)
+                            er[list(skip_idx_cur)] = er.min()
+                            er_sortidx = torch.sort(er, descending=True)[1]
+
+                            ack_idx_to_condense = []
+                            condense_size = params.num_diversity*ack_batch_size
+                            for i in range(er_sortidx.shape[0]):
+                                idx = er_sortidx[i].item()
+                                if idx in skip_idx_cur:
+                                    continue
+                                ack_idx_to_condense += [idx]
+                                if len(ack_idx_to_condense) == condense_size:
+                                    break
 
                         cur_ack_idx = bopt.get_empirical_condensation_ack(
+                                params,
                                 X,
+                                Y,
                                 preds,
                                 cur_model,
-                                optim,
-                                ack_to_condense,
+                                params.re_train_lr,
+                                params.re_train_l2,
+                                ack_idx_to_condense,
                                 skip_idx_cur,
                                 ack_batch_size,
+                                idx_to_monitor=set(range(X.shape[0])) if params.empirical_stat == 'mes' else None,
+                                er_values=er,
+                                seen_batch_size=params.re_train_batch_size,
+                                stat_fn=bopt.compute_maxdist_entropy if params.empirical_stat == 'mes' else bopt.compute_std,
+                                val_nll_metric="val" in params.empirical_stat,
                                 )
+
+                        if len(cur_ack_idx) < ack_batch_size:
+                            for i in range(er.shape[0]):
+                                idx = er_sortidx[i].item()
+                                if idx not in cur_ack_idx:
+                                    assert idx not in skip_idx_cur, idx
+                                    cur_ack_idx += [idx]
+                                if len(cur_ack_idx) == ack_batch_size:
+                                    break
+
                     elif params.ei_diversity_measure != "info":
                         cur_ack_idx = bopt.get_noninfo_ack(
                                 params,
@@ -277,6 +304,7 @@ for filename in filenames:
                                 skip_idx_cur,
                                 )
 
+                    unseen_idx = set(range(Y.shape[0])).difference(skip_idx_cur.union(cur_ack_idx))
                     if params.ack_change_stat_logging:
                         rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic = bopt.pairwise_logging_pre_ack(
                                 params,
@@ -284,17 +312,41 @@ for filename in filenames:
                                 preds_vars,
                                 skip_idx_cur,
                                 cur_ack_idx,
+                                unseen_idx,
                                 Y,
                                 do_hsic_rand=False,
                                 do_mi_rand=False,
                                 do_batch_hsic=params.hsic_kernel_fn is not None,
                                 )
 
+                    if params.empirical_ack_change_stat_logging:
+                        empirical_stat_fn = lambda preds : preds.std(dim=0)
+                        #idx_to_monitor = cur_ack_idx
+                        #idx_to_monitor = np.random.choice(list(unseen_idx), 20, replace=False).tolist()
+                        idx_to_monitor = ack_idx_to_condense
+                        guess_ack_stats, old_ack_stats = bopt.compute_ack_stat_change(
+                            params,
+                            X,
+                            Y,
+                            preds,
+                            cur_ack_idx,
+                            cur_model,
+                            params.re_train_lr,
+                            params.re_train_l2,
+                            skip_idx_cur,
+                            idx_to_monitor,
+                            stat_fn=empirical_stat_fn,
+                            seen_batch_size=params.re_train_batch_size,
+                            )
+
                     ack_all_cur.update(cur_ack_idx)
                     skip_idx_cur.update(cur_ack_idx)
+                    expected_num_points = (ack_iter+1)*ack_batch_size
                     #print("cur_ack_idx:", cur_ack_idx)
-                    #print('ei_labels', labels[cur_ack_idx])
-                    print('ei_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
+                    #print('er_labels', labels[cur_ack_idx])
+                    print('er_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
+
+                    assert len(skip_idx_cur) == int(params.init_train_examples) + expected_num_points, str(len(skip_idx_cur)) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
 
                     new_idx = list(skip_idx_cur)
                     random.shuffle(new_idx)
@@ -305,7 +357,6 @@ for filename in filenames:
 
                     print("train_X_cur.shape", train_X_cur.shape)
                     
-                    expected_num_points = (ack_iter+1)*ack_batch_size
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
 
@@ -324,30 +375,40 @@ for filename in filenames:
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )
 
-                    if params.ack_change_stat_logging:
+                    if params.ack_change_stat_logging or params.empirical_ack_change_stat_logging:
                         with torch.no_grad():
                             preds, pred_vars = cur_model(X) # (num_samples, num_points)
                             preds = preds.detach()
                             preds_vars = preds_vars.detach()
 
-                            stats_pred = None
-                            if params.predict_mi:
-                                stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
+                            if params.empirical_ack_change_stat_logging:
+                                true_ack_stats = empirical_stat_fn(preds[:, idx_to_monitor])
+                                true_ack_stats -= old_ack_stats
 
-                            corr_stats = bopt.pairwise_logging_post_ack(
-                                    params,
-                                    preds[:, rand_idx],
-                                    preds_vars[:, rand_idx],
-                                    old_std,
-                                    old_nll,
-                                    corr_rand,
-                                    Y[rand_idx],
-                                    hsic_rand=hsic_rand,
-                                    mi_rand=mi_rand,
-                                    ack_batch_hsic=ack_batch_hsic,
-                                    rand_batch_hsic=rand_batch_hsic,
-                                    stats_pred=stats_pred
-                                    )
+                                p1 = pearsonr(true_ack_stats, guess_ack_stats)[0]
+                                kt = kendalltau(true_ack_stats, guess_ack_stats)[0]
+
+                                print('empirical p1: %0.5f, k1: %0.5f' % (p1, kt))
+
+                            if params.ack_change_stat_logging:
+                                stats_pred = None
+                                if params.predict_mi:
+                                    stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
+
+                                corr_stats = bopt.pairwise_logging_post_ack(
+                                        params,
+                                        preds[:, rand_idx],
+                                        preds_vars[:, rand_idx],
+                                        old_std,
+                                        old_nll,
+                                        corr_rand,
+                                        Y[rand_idx],
+                                        hsic_rand=hsic_rand,
+                                        mi_rand=mi_rand,
+                                        ack_batch_hsic=ack_batch_hsic,
+                                        rand_batch_hsic=rand_batch_hsic,
+                                        stats_pred=stats_pred
+                                        )
 
                     ack_array = np.array(list(ack_all_cur), dtype=np.int32)
 

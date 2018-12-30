@@ -6,7 +6,9 @@
 --clean True
 --log_all_train_iter False
 --reset_model_every_iter True
---ack_change_stat_logging True
+--ack_model_init_mode finetune
+--ack_change_stat_logging False
+--empirical_ack_change_stat_logging True
 
 --exclude_top 0.1
 --init_train_examples 200
@@ -22,7 +24,7 @@
 --combine_train_val True
 --gamma_cutoff False
 
---num_hidden 10
+--num_hidden 100
 --sigmoid_coeff 1.0
 --separate_mean_var False
 --output_dist_fn Normal
@@ -36,17 +38,21 @@
 
 --data_dir ../data/paper_data2
 --filename_file ../data/tatsu_pbm/test_files
---output_dir ../experiments/ensemble/o
+--output_dir ../experiments/ensemble3/o
 --num_test_tfs 10
 
 --ack_batch_size 100
 --num_acks 10
 
---single_gaussian_test_nll True
+--single_gaussian_test_nll False
+--report_metric_train_std True
+--empirical_stat std
+--empirical_stat_val_fraction 0.2
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 
 --ei_diversity_measure none_ucb
+--num_diversity 1
 --ucb 0.0
 --hsic_kernel_fn mixrbf_kernels
 --normalize_hsic True

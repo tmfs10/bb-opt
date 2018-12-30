@@ -6,7 +6,9 @@
 --clean True
 --log_all_train_iter False
 --reset_model_every_iter True
+--ack_model_init_mode finetune
 --ack_change_stat_logging True
+--empirical_ack_change_stat_logging False
 
 --exclude_top 0.1
 --init_train_examples 200
@@ -36,17 +38,21 @@
 
 --data_dir ../data/paper_data2
 --filename_file ../data/maxvar_saber_tfs.txt
---output_dir ../experiments/ensemble/take_log
+--output_dir ../experiments/ensemble3/o
 --num_test_tfs 38
 
 --ack_batch_size 10
 --num_acks 30
 
 --single_gaussian_test_nll True
+--report_metric_train_std False
+--empirical_stat std
+--empirical_stat_val_fraction 0.1
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 
 --ei_diversity_measure none_ucb
+--num_diversity 1
 --ucb 1.0
 
 --num_models 4

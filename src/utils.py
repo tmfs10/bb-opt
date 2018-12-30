@@ -124,6 +124,7 @@ train_val_test_split = non_matplotlib_utils.train_val_test_split
 save_checkpoint = non_matplotlib_utils.save_checkpoint
 load_checkpoint = non_matplotlib_utils.load_checkpoint
 collated_expand = non_matplotlib_utils.collated_expand
+make_batches = non_matplotlib_utils.make_batches
 
 def jointplot(
     x,

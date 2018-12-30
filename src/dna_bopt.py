@@ -350,12 +350,12 @@ def collect_stats_to_predict(
             assert False, "Not implemented"
 
         if nll:
-            _, nll = NNEnsemble.report_metric(
+            nll_mixture, nll_single_gaussian = NNEnsemble.report_metric(
                     Y,
                     preds.mean(dim=0),
                     preds.var(dim=0),
                     return_mse=False)
-            stats['nll'] = nll
+            stats['nll'] = nll_single_gaussian.item()
 
     if hsic:
         assert hsic_custom_kernel is not None
@@ -689,7 +689,7 @@ def train_ensemble(
                         val_Y,
                         val_means,
                         val_variances,
-                        custom_std=train_Y.std(),
+                        custom_std=train_Y.std() if params.report_metric_train_std else None,
                         return_mse=False)
                 val_nll1 = val_nll1.item()
                 val_nll2 = val_nll2.item()
@@ -702,9 +702,11 @@ def train_ensemble(
                 kt_corr = kendalltau(val_mean_of_means, val_Y)[0]
                 val_kt_corrs += [kt_corr]
 
+                nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
+
                 if "val" in choose_type:
-                    if val_nll1 < best_nll:
-                        best_nll = val_nll1
+                    if nll_criterion < best_nll:
+                        best_nll = nll_criterion
                         if "nll" in choose_type:
                             best_epoch_iter = epoch_iter
                             time_since_last_best_epoch = 0

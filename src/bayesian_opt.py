@@ -2217,6 +2217,7 @@ def pairwise_logging_pre_ack(
     preds_vars,
     train_idx,
     ack_idx,
+    unseen_idx,
     Y,
     do_hsic_rand=True,
     do_mi_rand=True,
@@ -2229,7 +2230,7 @@ def pairwise_logging_pre_ack(
         ack_batch_hsic = None
         rand_batch_hsic = None
         rand_idx = None
-        unseen_idx_rand_set = set(range(Y.shape[0])).difference(train_idx.union(ack_idx))
+        unseen_idx_rand_set = unseen_idx
         unseen_idx_rand = list(unseen_idx_rand_set)
 
         if do_batch_hsic:
@@ -2423,89 +2424,260 @@ def pairwise_logging_post_ack(
 
         return corr_stats
 
-def compute_ack_stat_change(
+def compute_ack_stat_change_val_nll_ensemble(
+    params,
     X,
+    Y,
     preds,
     ack_idx,
-    model_ensemble,
-    target_idx,
-    stat_fn, # (num_samples, indices) -> stddev/mmd to uniform/etc
-    optim,
-    old_model_state_dict,
-    old_optim_state_dict,
+    model,
+    lr,
+    l2,
+    seen_idx,
+    normalize_fn=None,
+    seen_batch_size=0,
 ):
-    stat = stat_fn(preds[:, target_idx])
+    from deep_ensemble_sid import NNEnsemble
+    assert len(set(seen_idx).intersection(ack_idx)) == 0
+    seen_idx = np.array(list(seen_idx))
 
-    bX = X[ack_idx]
-    bY = preds[:, ack_idx].mean(dim=0)
+    N = len(seen_idx)
+    val_frac = params.empirical_stat_val_fraction
+    train_idx, val_idx, _, _ = utils.train_val_test_split(
+            N, 
+            [1-val_frac, val_frac],
+            )
+    train_idx = seen_idx[train_idx].tolist()
+    idx_to_monitor = seen_idx[val_idx].tolist()
 
-    means, variances = model_ensemble(bX)
+    train_X = X[train_idx]
+    train_Y = Y[train_idx]
+    monitor_X = X[idx_to_monitor]
+    monitor_Y = Y[idx_to_monitor]
 
-    nll = NNEnsemble.compute_negative_log_likelihood(
-        bY,
-        means,
-        variances,
-        return_mse=False,
-    )
+    if params.empirical_stat == "val_classify":
+        monitor_sorted_idx = torch.sort(monitor_Y)[1]
 
-    optim.zero_grad()
-    nll.backward()
-    optim.step()
+    if normalize_fn is not None:
+        mean = train_Y.mean()
+        std = train_Y.std()
+        train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
+        monitor_Y = normalize_fn(monitor_Y, mean, std, exp=torch.exp)
 
     with torch.no_grad():
-        means2, variances2 = model_ensemble(X[target_idx])
+        monitor_means, monitor_variances = model(monitor_X)
+
+        if params.empirical_stat == "val_nll":
+            nll_mixture, nll_single_gaussian = NNEnsemble.report_metric(
+                    monitor_Y,
+                    monitor_means,
+                    monitor_variances,
+                    custom_std=train_Y.std() if params.report_metric_train_std else None,
+                    return_mse=False)
+            if params.single_gaussian_test_nll:
+                stat = nll_single_gaussian
+            else:
+                stat = nll_mixture
+        elif params.empirical_stat == "val_classify":
+            kt_labels = torch.arange(monitor_X.shape[0])[monitor_sorted_idx]
+            mean_of_means = monitor_means.mean(dim=0)
+            classify_kt_corr = kendalltau(mean_of_means[monitor_sorted_idx], kt_labels)[0]
+            stat = -torch.tensor(classify_kt_corr, device=params.device)
+        else:
+            assert False, "params.empirical_stat %s not implemented" % (params.empirical_stat,)
+
+    #print('X.shape', X.shape, ack_idx)
+    if seen_batch_size == 0:
+        bX = X[ack_idx + train_idx]
+        rand_idx = train_idx
+    else:
+        rand_idx = np.random.randint(len(train_idx), size=seen_batch_size)
+        rand_idx = np.array(train_idx)[rand_idx].tolist()
+        bX = X[ack_idx + rand_idx]
+
+    if len(bX.shape) == 1:
+        bX = bX.unsqueeze(dim=0)
+
+    bY = preds[:, ack_idx].mean(dim=0)
+    bY = torch.cat([bY, Y[rand_idx]], dim=0)
+
+    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+    for i in range(1):
+        means, variances = model(bX)
+        nll = NNEnsemble.compute_negative_log_likelihood(
+            bY,
+            means,
+            variances,
+            return_mse=False,
+        )
+        optim.zero_grad()
+        nll.backward()
+        optim.step()
+
+    with torch.no_grad():
+        monitor_means2, monitor_variances2 = model(monitor_X)
+        if params.empirical_stat == "val_nll":
+            nll_mixture, nll_single_gaussian = NNEnsemble.report_metric(
+                    monitor_Y,
+                    monitor_means2,
+                    monitor_variances2,
+                    custom_std=train_Y.std() if params.report_metric_train_std else None,
+                    return_mse=False)
+            if params.single_gaussian_test_nll:
+                stat2 = nll_single_gaussian
+            else:
+                stat2 = nll_mixture
+        elif params.empirical_stat == "val_classify":
+            kt_labels = torch.arange(monitor_X.shape[0])[monitor_sorted_idx]
+            mean_of_means = monitor_means2.mean(dim=0)
+            classify_kt_corr = kendalltau(mean_of_means[monitor_sorted_idx], kt_labels)[0]
+            stat2 = -torch.tensor(classify_kt_corr, device=params.device)
+        else:
+            assert False, "params.empirical_stat %s not implemented" % (params.empirical_stat,)
+
+    return stat2-stat, stat
+
+
+
+def compute_ack_stat_change(
+    X,
+    Y,
+    preds,
+    ack_idx,
+    model,
+    lr,
+    l2,
+    seen_idx,
+    idx_to_monitor,
+    stat_fn, # (num_samples, indices) -> stddev/mmd to uniform/etc
+    seen_batch_size=0,
+):
+    from deep_ensemble_sid import NNEnsemble
+
+    #assert len(set(seen_idx).intersection(idx_to_monitor)) == 0
+    assert len(set(seen_idx).intersection(ack_idx)) == 0
+
+    seen_idx = list(seen_idx)
+    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+    stat = stat_fn(preds[:, idx_to_monitor])
+
+    #print('X.shape', X.shape, ack_idx)
+    if seen_batch_size == 0:
+        bX = X[ack_idx + seen_idx]
+        rand_idx = seen_idx
+    else:
+        rand_idx = np.random.randint(len(seen_idx), size=seen_batch_size)
+        rand_idx = np.array(seen_idx)[rand_idx].tolist()
+        bX = X[ack_idx + rand_idx]
+
+    if len(bX.shape) == 1:
+        bX = bX.unsqueeze(dim=0)
+
+    bY = preds[:, ack_idx].mean(dim=0)
+    bY = torch.cat([bY, Y[rand_idx]], dim=0)
+
+    for i in range(2):
+        means, variances = model(bX)
+        nll = NNEnsemble.compute_negative_log_likelihood(
+            bY,
+            means,
+            variances,
+            return_mse=False,
+        )
+        optim.zero_grad()
+        nll.backward()
+        optim.step()
+
+    with torch.no_grad():
+        means2, variances2 = model(X[idx_to_monitor])
         stat2 = stat_fn(means2)
 
     optim.zero_grad()
-    model_ensemble.load_state_dict(old_model_state_dict)
-    optim.load_state_dict(old_optim_state_dict)
 
-    return stats2-stat
+    return stat2-stat, stat
 
 
 
 def get_empirical_condensation_ack(
+    params,
     X,
+    Y,
     preds,
-    model_ensemble,
-    optim,
-    target_idx,
-    skip_idx,
+    model,
+    lr,
+    l2,
+    idx_to_condense,
+    seen_idx,
     ack_batch_size,
+    idx_to_monitor=None,
+    er_values=None,
     stat_fn = lambda preds : preds.std(dim=0),
     predict_info_model=None,
+    seen_batch_size=0,
+    val_nll_metric=False,
 ):
+    assert len(set(idx_to_condense).intersection(seen_idx)) == 0
     cur_ack_batch = []
 
-    model_state_dict = copy.deepcopy(model_ensemble.state_dict())
-    optim_state_dict = copy.deepcopy(optim.state_dict())
-
     for ack_batch_iter in range(ack_batch_size):
-        stat_change_list = torch.zeros(X.shape[0])
-        for idx in range(X.shape[0]):
-            if idx in skip_idx or idx in cur_ack_batch:
+        #print('ack_batch_iter:', ack_batch_iter)
+        stat_change_list = torch.ones(X.shape[0])*1000
+        #for idx in range(X.shape[0]):
+        new_idx_to_condense = []
+        for idx in idx_to_condense:
+            if idx in seen_idx or idx in cur_ack_batch:
                 continue
-
-            with torch.no_grad():
-                stat_change = compute_ack_stat_change(
+            new_idx_to_condense += [idx]
+        max_stat_change = 0
+        new_idx_to_condense = set(new_idx_to_condense)
+        idx_stats = []
+        for idx in new_idx_to_condense:
+            model_copy = copy.deepcopy(model)
+            if val_nll_metric:
+                stat_change, old_stat = compute_ack_stat_change_val_nll_ensemble(
+                        params,
                         X,
+                        Y,
                         preds,
                         cur_ack_batch + [idx],
-                        model_ensemble,
-                        target_idx,
-                        stat_fn,
-                        optim,
-                        model_state_dict,
-                        optim_state_dict,
+                        model_copy,
+                        lr,
+                        l2,
+                        seen_idx,
+                        seen_batch_size=seen_batch_size,
+                        normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                         )
+            else:
+                stat_change, old_stat = compute_ack_stat_change(
+                        X,
+                        Y,
+                        preds,
+                        cur_ack_batch + [idx],
+                        model_copy,
+                        lr,
+                        l2,
+                        seen_idx,
+                        list(new_idx_to_condense.difference({idx})) if idx_to_monitor is None else list(set(idx_to_monitor).difference({idx})),
+                        stat_fn,
+                        seen_batch_size=seen_batch_size,
+                        )
+            stat_change_list[idx] = torch.mean(stat_change).item()
+            idx_stats += [stat_change_list[idx]]
 
-            stat_change_list[idx] = stat_change.median().detach()
+        #er_std_factor = float(np.std(idx_stats))/er_values.std()
+        #for idx in new_idx_to_condense:
+        #    stat_change_list[idx] -= (er_values[idx] * er_std_factor).item() 
         stat_change_sort, stat_change_sort_idx = torch.sort(stat_change_list)
+        print('stat_change_sort:', stat_change_sort)
         cur_ack_batch += [stat_change_sort_idx[0].item()]
 
     return cur_ack_batch
 
 
-def compute_maxdist_entropy(preds, k=5):
-    h = info.get_h(preds.max(dim=1).cpu().numpy(), k)
-    return h
+def compute_maxdist_entropy(preds, k=5, device='cuda'):
+    #h = info.get_h(preds.max(dim=1)[0].unsqueeze(dim=-1).cpu().numpy(), k)
+    #return torch.tensor(h, device=device)
+    return preds.max(dim=1)[0].std()
+
+def compute_std(preds):
+    return preds.std(dim=0)

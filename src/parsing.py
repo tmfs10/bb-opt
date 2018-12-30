@@ -40,13 +40,18 @@ def verify_model_update_mode(mode):
 
 
 def verify_choose_type(choose_type):
-    print(choose_type)
     choose_type = [k.lower() for k in choose_type.split(',')]
     #assert len(choose_type) == 3, choose_type
     assert choose_type[0] in ["val", "train", "last"], choose_type
     assert choose_type[1] in ["nll", "kt_corr", "classify", "bopt"], choose_type
     assert choose_type[2] in ["ind", "ood"], choose_type
     return choose_type
+
+
+def verify_empirical_stat(stat):
+    stat = stat.lower().strip()
+    assert stat in ["val_nll", "val_classify", "mes", "std"]
+    return stat
 
 def add_parse_args(parser):
     parser.add_argument('--config_file', type=str, nargs='+')
@@ -63,6 +68,7 @@ def add_parse_args(parser):
     parser.add_argument('--log_all_train_iter', type=str2bool)
     parser.add_argument("--ack_model_init_mode", type=verify_model_update_mode)
     parser.add_argument("--ack_change_stat_logging", type=str2bool)
+    parser.add_argument("--empirical_ack_change_stat_logging", type=str2bool)
 
     # train params
     parser.add_argument('--exclude_top', type=float01)
@@ -85,6 +91,10 @@ def add_parse_args(parser):
     parser.add_argument("--combine_train_val", type=str2bool)
     parser.add_argument("--gamma_cutoff", type=str2bool,
             help="Search starting from first gamma and end search as soon as new gamma is not best so far")
+    parser.add_argument('--single_gaussian_test_nll', type=str2bool)
+    parser.add_argument('--report_metric_train_std', type=str2bool)
+    parser.add_argument('--empirical_stat', type=verify_empirical_stat)
+    parser.add_argument('--empirical_stat_val_fraction', type=float)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -109,9 +119,6 @@ def add_parse_args(parser):
     # bopt params
     parser.add_argument('--ack_batch_size', type=int)
     parser.add_argument('--num_acks', type=int)
-
-    # log params
-    parser.add_argument('--single_gaussian_test_nll', type=str2bool)
 
     # predictor params
     parser.add_argument('--predict_mi', type=str2bool)
