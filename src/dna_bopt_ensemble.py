@@ -212,7 +212,7 @@ for filename in filenames:
                 print('already done batch', ack_batch_size)
                 continue
 
-            with open(batch_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as f:
+            with open(batch_output_dir + "/stats.txt", 'w', buffering=1) as f:
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
 
@@ -302,6 +302,7 @@ for filename in filenames:
                                 preds,
                                 ack_batch_size,
                                 skip_idx_cur,
+                                labels,
                                 )
 
                     unseen_idx = set(range(Y.shape[0])).difference(skip_idx_cur.union(cur_ack_idx))

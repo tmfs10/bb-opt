@@ -898,7 +898,7 @@ def er_diversity_selection_detk(
     num_ucb=100,
     device = 'cuda',
     do_correlation=True,
-    add_I=False,
+    add_I=True,
     do_kernel=False,
 ):
     ack_batch_size = params.ack_batch_size
@@ -2139,71 +2139,74 @@ def get_info_ack(
     preds, 
     ack_batch_size,
     skip_idx,
+    labels,
 ):
     with torch.no_grad():
-        ei = preds.mean(dim=0).view(-1).cpu().numpy()
+        er = preds.mean(dim=0).view(-1).cpu().numpy()
         std = preds.std(dim=0).view(-1).cpu().numpy()
+
+        er += params.ucb*std
+
         if not params.compare_w_old:
-            ei[:, list(skip_idx)] = ei.min()
-            std[:, list(skip_idx)] = ei.min()
+            er[list(skip_idx)] = er.min()
         
         top_k = params.num_diversity
 
         sorted_preds_idx = torch.sort(preds)[1].cpu().numpy()
-        f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
+        #f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
         sorted_preds = torch.sort(preds, dim=1)[0]    
         #best_pred = preds.max(dim=1)[0].view(-1)
         #best_pred = sorted_preds[:, -top_k:]
 
         opt_weighting = None
-        if params.measure == 'ei_mves_mix':
-            print(filename, 'ei_mves_mix')
-            ei_sortidx = np.argsort(ei)
-            ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
-            best_pred = torch.cat([preds[:, ei_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
-        elif params.measure == 'ei_condense':
-            print(filename, 'ei_condense')
-            ei_sortidx = np.argsort(ei)
-            ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
-            best_pred = preds[:, ei_idx]
-            opt_weighting = torch.tensor((ei[ei_idx]-ei[ei_idx].min()))
-        elif params.measure == 'ei_pdts_mix':
-            print(filename, 'ei_pdts_mix')
-            ei_sortidx = np.argsort(ei)
+        if params.measure == 'er_mves_mix':
+            print('er_mves_mix')
+            er_sortidx = np.argsort(er)
+            er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
+            best_pred = torch.cat([preds[:, er_idx], sorted_preds[:, -1].unsqueeze(-1)], dim=-1)
+        elif params.measure == 'er_condense':
+            print('er_condense')
+            er_sortidx = np.argsort(er)
+            er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
+            best_pred = preds[:, er_idx]
+            opt_weighting = torch.tensor((er[er_idx]-er[er_idx].min()))
+        elif params.measure == 'er_pdts_mix':
+            print('er_pdts_mix')
+            er_sortidx = np.argsort(er)
             pdts_idx = bopt.get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True)
             print('pdts_idx:', pdts_idx)
-            ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
-            best_pred = torch.cat([preds[:, ei_idx], preds[:, pdts_idx]], dim=-1)
+            er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
+            best_pred = torch.cat([preds[:, er_idx], preds[:, pdts_idx]], dim=-1)
         elif params.measure == 'cma_es':
-            print(filename, 'cma_es')
+            print('cma_es')
             indices = torch.LongTensor(list(skip_idx)).to(params.device)
             sortidx = torch.sort(Y[indices])[1]
             indices = indices[sortidx]
             assert indices.ndimension() == 1
             best_pred = preds[:, indices[-10:]]
-            ei_sortidx = np.argsort(ei)
-            ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
+            er_sortidx = np.argsort(er)
+            er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
         elif params.measure == 'mves':
-            print(filename, 'mves')
-            ei_sortidx = np.argsort(ei)
-            ei_idx = ei_sortidx[-params.num_diversity*ack_batch_size:]
+            print('mves')
+            er_sortidx = np.argsort(er)
+            er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
             best_pred = sorted_preds[:, -top_k:]
         else:
             assert False
 
         print('best_pred.shape\t' + str(best_pred.shape))
-        f.write('best_pred.shape\t' + str(best_pred.shape))
+        #f.write('best_pred.shape\t' + str(best_pred.shape))
 
         print('best_pred:', best_pred.mean(0).mean(), best_pred.std(0).mean())
 
-        condense_idx, best_hsic = bopt.acquire_batch_mves_sid(
+        condense_idx, best_hsic = acquire_batch_mves_sid(
                 params,
                 best_pred, 
                 preds, 
                 skip_idx, 
                 params.mves_compute_batch_size, 
                 ack_batch_size, 
-                true_labels=labels, 
+                #true_labels=labels, 
                 greedy_ordering=params.mves_greedy, 
                 pred_weighting=params.pred_weighting, 
                 normalize=True, 
@@ -2213,12 +2216,12 @@ def get_info_ack(
                 double=True,
                 )
 
-        print('ei_idx', ei_idx)
+        print('er_idx', er_idx)
         print('condense_idx', condense_idx)
-        print('intersection size', len(set(condense_idx).intersection(set(ei_idx.tolist()))))
+        print('intersection size', len(set(condense_idx).intersection(set(er_idx.tolist()))))
 
         if len(condense_idx) < ack_batch_size:
-            for idx in ei_idx[::-1]:
+            for idx in er_idx[::-1]:
                 idx = int(idx)
                 if len(condense_idx) >= ack_batch_size:
                     break
@@ -2228,14 +2231,13 @@ def get_info_ack(
         assert len(condense_idx) == ack_batch_size
         assert len(set(condense_idx)) == ack_batch_size
 
-        print('ei_labels', labels[ei_idx])
+        print('er_labels', labels[er_idx])
         print('mves_labels', labels[list(condense_idx)])
 
         print('best_hsic\t' + str(best_hsic))
-        print("train_X.shape:", train_X_mves.shape)
 
-        f.write('best_hsic\t' + str(best_hsic) + "\n")
-        f.write('train_X.shape\t' + str(train_X_mves.shape) + "\n")
+        #f.write('best_hsic\t' + str(best_hsic) + "\n")
+        #f.write('train_X.shape\t' + str(train_X_mves.shape) + "\n")
 
         return condense_idx
 
