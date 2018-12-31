@@ -180,3 +180,6 @@ def make_batches(batch_size, N):
     num_batches = N//batch_size+1
     batches = [i*batch_size  for i in range(num_batches)] + [N]
     return batches
+
+def randint(low, n):
+    return np.sort(np.random.choice(np.arange(low), size=(n,), replace=False))

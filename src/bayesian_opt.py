@@ -818,106 +818,118 @@ def acquire_batch_es(
     return batch
 
 
-def ei_diversity_selection_hsic(
+def er_diversity_selection_hsic(
     params,
-    preds, #(num_samples, num_candidate_points)
-    skip_idx_ei,
-    num_ei=100,
+    preds, #(num_samples (n), num_candidate_points)
+    skip_idx,
+    num_er=100,
     device = 'cuda',
     ucb=False,
 ):
     ack_batch_size = params.ack_batch_size
     kernel_fn = getattr(hsic, params.hsic_kernel_fn)
 
-    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-    ei_sortidx = np.argsort(ei)
+    er = preds.mean(dim=0).view(-1)
+    std = preds.std(dim=0).view(-1)
+
+    er += params.ucb*std
+    ucb = er
+
+    # extract top ucb idx not already used and their preds
+    ucb_sortidx = torch.sort(ucb, descending=True)[1]
     temp = []
-    for idx in ei_sortidx[::-1]:
-        if idx not in skip_idx_ei:
+    for idx in ucb_sortidx:
+        if idx.item() not in skip_idx:
             temp += [idx]
-        if len(temp) == num_ei:
+        if len(temp) == num_er:
             break
-    ei_sortidx = np.array(temp)
-    ei = ei[ei_sortidx]
-    ei -= ei.min().item()
-    preds = preds[:, ei_sortidx]
+    ucb_sortidx = torch.stack(temp) # len == m
+    ucb = ucb[ucb_sortidx]
+    ucb -= ucb.min()
+    preds = preds[:, ucb_sortidx]
 
-    chosen_org_idx = [ei_sortidx[-1]]
+    chosen_orig_idx = [ucb_sortidx[0].item()]
+    chosen_idx = [0]
 
-    chosen_idx = [num_ei-1]
-    batch_dist_matrix = hsic.sqdist(preds[:, -1].unsqueeze(-1)) # (n, n, 1)
-    self_kernel_matrix = kernel_fn(batch_dist_matrix).detach().repeat([1, 1, 2])
+    ack_batch_dist_matrix = hsic.sqdist(preds[:, 0].unsqueeze(-1)) # (n, n, len(choose_idx))
+    self_kernel_matrix = kernel_fn(ack_batch_dist_matrix).detach().repeat([1, 1, 2]) # (n, n, 2)
     normalizer = torch.log(hsic.total_hsic(self_kernel_matrix))
 
+    # precomputation for normalizer
+    m = ucb_sortidx.shape[0]
     all_dist_matrix = hsic.sqdist(preds) # (n, n, m)
     all_kernel_matrix = kernel_fn(all_dist_matrix) # (n, n, m)
-    self_kernel_matrix = all_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
+    permuted_all_kernel_matrix = all_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1) # (m, n, n, 1)
+    self_kernel_matrix = permuted_all_kernel_matrix.repeat([1, 1, 1, 2]) # (m, n, n, 2)
     hsic_var = hsic.total_hsic_parallel(self_kernel_matrix)
     hsic_logvar = torch.log(hsic_var).view(-1)
 
     while len(chosen_idx) < ack_batch_size:
-        if ucb:
-            dist_matrix = all_dist_matrix + batch_dist_matrix
-            kernel_matrix = kernel_fn(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1).repeat([1, 1, 1, 2]) # (m, n, n, 2)
-            hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
-        else:
-            a = len(chosen_idx)
-            m = all_kernel_matrix.shape[-1]
-            kernel_matrix = all_kernel_matrix[:, :, chosen_idx].unsqueeze(-1).repeat([1, 1, 1, m]).permute([3, 0, 1, 2]) # (m, n, n, a)
-            kernel_matrix = torch.cat([kernel_matrix, all_kernel_matrix.permute([2, 0 ,1]).unsqueeze(-1)], dim=-1)
-            hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
+        kernel_matrix = all_kernel_matrix[:, :, chosen_idx].unsqueeze(-1).repeat([1, 1, 1, m]).permute([3, 0, 1, 2]) # (m, n, n, len(chosen_idx))
+        kernel_matrix = torch.cat([kernel_matrix, permuted_all_kernel_matrix], dim=-1)
+        hsic_covar = hsic.total_hsic_parallel(kernel_matrix).detach()
 
-        normalizer = torch.exp((hsic_logvar + hsic_logvar[chosen_idx].sum())/(len(chosen_idx)+1))
-        hsic_corr = hsic_covar/normalizer
+        normalizer = torch.exp((hsic_logvar + hsic_logvar[chosen_idx].sum())/(len(chosen_idx)+1)) # doesn't double count as we exclude any idx already in choose_idx
 
-        hsic_ucb = ei/hsic_corr
-        hsic_ucb_sort_idx = hsic_ucb.detach().cpu().numpy().argsort()
+        factor = ucb.std()/hsic_covar.std()
+        hsic_corr = hsic_covar * factor
+        hsic_corr = ucb - hsic_corr
+        #print('hsic_corr:', hsic_corr)
 
-        for idx in hsic_ucb_sort_idx[::-1]:
+        _, sort_idx = torch.sort(hsic_corr, descending=True)
+
+        for idx in sort_idx:
+            idx = int(idx.item())
             if idx not in chosen_idx:
                 break
 
-        choice = ei_sortidx[idx]
+        choice = ucb_sortidx[idx]
         chosen_idx += [idx]
-        chosen_org_idx += [choice]
-        batch_dist_matrix += all_dist_matrix[:, :, idx:idx+1]
+        chosen_orig_idx += [choice.item()]
+        ack_batch_dist_matrix += all_dist_matrix[:, :, idx:idx+1]
 
-    return list(chosen_org_idx)
+    return list(chosen_orig_idx)
 
 
-def ei_diversity_selection_detk(
+def er_diversity_selection_detk(
     params,
     preds, #(num_samples, num_candidate_points)
-    skip_idx_ei,
-    num_ei=100,
+    skip_idx,
+    num_ucb=100,
     device = 'cuda',
     do_correlation=True,
     add_I=False,
-    do_kernel=True,
+    do_kernel=False,
 ):
     ack_batch_size = params.ack_batch_size
 
-    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-    ei_sortidx = np.argsort(ei)
+    er = preds.mean(dim=0).view(-1)
+    std = preds.std(dim=0).view(-1)
+
+    er += params.ucb*std
+    ucb = er
+
+    ucb_sortidx = torch.sort(ucb, descending=True)[1]
     temp = []
-    for idx in ei_sortidx[::-1]:
-        if idx not in skip_idx_ei:
+    for idx in ucb_sortidx:
+        if idx.item() not in skip_idx:
             temp += [idx]
-        if len(temp) == num_ei:
+        if len(temp) == num_ucb:
             break
-    ei_sortidx = np.array(temp)
-    ei = ei[ei_sortidx]
-    ei -= ei.min().item()
+    ucb_sortidx = torch.stack(temp) # len == m
+    ucb = ucb[ucb_sortidx]
+    ucb -= ucb.min()
+    ucb = ucb.cpu().numpy()
 
     if do_kernel:
-        preds = preds[:, ei_sortidx]
+        preds = preds[:, ucb_sortidx]
         kernel_fn = getattr(hsic, params.hsic_kernel_fn)
         dist_matrix = hsic.sqdist(preds.transpose(0, 1).unsqueeze(1)) # (m, m, 1)
         covar_matrix = kernel_fn(dist_matrix)[:, :, 0] # (m, m)
     else:
-        preds = preds[:, ei_sortidx].cpu().numpy()
+        preds = preds[:, ucb_sortidx]
         covar_matrix = np.cov(preds)
-        covar_matrix = torch.FloatTensor(covar_matrix).to(device) # (num_candidate_points, num_candidate_points)
+        covar_matrix = torch.FloatTensor(covar_matrix, device=device) # (num_candidate_points, num_candidate_points)
 
     if add_I:
         covar_matrix += torch.eye(covar_matrix.shape[0])
@@ -926,15 +938,13 @@ def ei_diversity_selection_detk(
         normalizer = torch.sqrt(variances.unsqueeze(0)*variances.unsqueeze(1))
         covar_matrix /= normalizer
 
-    chosen_org_idx = [ei_sortidx[-1]]
-    chosen_idx = [num_ei-1]
+    chosen_orig_idx = [ucb_sortidx[0].item()]
+    chosen_idx = [0]
     while len(chosen_idx) < ack_batch_size:
         K_values = []
-        num_already_chosen = len(chosen_idx)
-
-        for idx in range(num_ei-1):
+        for idx in range(preds.shape[1]):
             if idx in chosen_idx:
-                K_values += [1e-9]
+                K_values += [0]
                 continue
 
             cur_chosen = torch.LongTensor(chosen_idx+[idx])
@@ -943,14 +953,22 @@ def ei_diversity_selection_detk(
 
         K_values = np.array(K_values)
 
-        K_ucb = ei[:-1]/K_values
-        K_ucb_sort_idx = K_ucb.argsort()
+        factor = ucb.std()/K_values.std()
+        K_values *= factor
+        K_ucb = ucb + K_values
+        sort_idx = K_ucb.argsort()
 
-        choice = ei_sortidx[K_ucb_sort_idx[-1]]
-        chosen_idx += [K_ucb_sort_idx[-1]]
-        chosen_org_idx += [choice]
+        for idx in sort_idx:
+            idx = int(idx)
+            if idx not in chosen_idx:
+                break
 
-    return chosen_idx
+        choice = ucb_sortidx[idx].item()
+        chosen_idx += [idx]
+        chosen_orig_idx += [choice]
+
+    return list(chosen_orig_idx)
+
 
 def acquire_batch_self_hsic(
     params,
@@ -2049,23 +2067,33 @@ def get_noninfo_ack(
             er_sortidx = np.argsort(er + params.ucb*std)
 
     if "none" in diversity_measure:
+        assert params.num_diversity >= 1
         cur_ack_idx = []
+        num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
         for idx in er_sortidx[::-1]:
             if idx not in skip_idx:
                 cur_ack_idx += [idx]
-            if len(cur_ack_idx) >= ack_batch_size:
+            if len(cur_ack_idx) >= num_to_select:
                 break
+        if params.num_diversity > 1:
+            temp = utils.randint(num_to_select, ack_batch_size)
+            cur_ack_idx = np.array(cur_ack_idx)[temp].tolist()
+        assert len(cur_ack_idx) == ack_batch_size
     elif "hsic" in diversity_measure:
-        cur_ack_idx = bopt.er_diversity_selection_hsic(
+        num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
+        cur_ack_idx = er_diversity_selection_hsic(
                 params, 
                 preds, 
                 skip_idx, 
+                num_er=num_to_select,
                 device=params.device)
     elif "detk" in diversity_measure:
-        cur_ack_idx = bopt.er_diversity_selection_detk(
+        num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
+        cur_ack_idx = er_diversity_selection_detk(
                 params, 
                 preds, 
                 skip_idx, 
+                num_ucb=num_to_select,
                 device=params.device)
     elif "pdts" in diversity_measure:
         cur_ack_idx = set()
@@ -2455,6 +2483,8 @@ def compute_ack_stat_change_val_nll_ensemble(
     monitor_X = X[idx_to_monitor]
     monitor_Y = Y[idx_to_monitor]
 
+    seen_batch_size = min(seen_batch_size, train_X.shape[0])
+
     if params.empirical_stat == "val_classify":
         monitor_sorted_idx = torch.sort(monitor_Y)[1]
 
@@ -2491,7 +2521,7 @@ def compute_ack_stat_change_val_nll_ensemble(
         bX = X[ack_idx + train_idx]
         rand_idx = train_idx
     else:
-        rand_idx = np.random.randint(len(train_idx), size=seen_batch_size)
+        rand_idx = utils.randint(len(train_idx), seen_batch_size)
         rand_idx = np.array(train_idx)[rand_idx].tolist()
         bX = X[ack_idx + rand_idx]
 
@@ -2566,7 +2596,7 @@ def compute_ack_stat_change(
         bX = X[ack_idx + seen_idx]
         rand_idx = seen_idx
     else:
-        rand_idx = np.random.randint(len(seen_idx), size=seen_batch_size)
+        rand_idx = utils.randint(len(seen_idx), seen_batch_size)
         rand_idx = np.array(seen_idx)[rand_idx].tolist()
         bX = X[ack_idx + rand_idx]
 

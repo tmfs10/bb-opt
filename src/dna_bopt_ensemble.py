@@ -316,7 +316,7 @@ for filename in filenames:
                                 Y,
                                 do_hsic_rand=False,
                                 do_mi_rand=False,
-                                do_batch_hsic=params.hsic_kernel_fn is not None,
+                                do_batch_hsic=params.ack_hsic_stat_logging,
                                 )
 
                     if params.empirical_ack_change_stat_logging:
@@ -346,7 +346,7 @@ for filename in filenames:
                     #print('er_labels', labels[cur_ack_idx])
                     print('er_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
 
-                    assert len(skip_idx_cur) == int(params.init_train_examples) + expected_num_points, str(len(skip_idx_cur)) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
+                    assert len(skip_idx_cur) == int(params.init_train_examples) + expected_num_points, str(len(skip_idx_cur)) + " == " + str(int(params.init_train_examples) + expected_num_points)
 
                     new_idx = list(skip_idx_cur)
                     random.shuffle(new_idx)

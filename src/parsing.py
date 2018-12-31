@@ -68,6 +68,7 @@ def add_parse_args(parser):
     parser.add_argument('--log_all_train_iter', type=str2bool)
     parser.add_argument("--ack_model_init_mode", type=verify_model_update_mode)
     parser.add_argument("--ack_change_stat_logging", type=str2bool)
+    parser.add_argument("--ack_hsic_stat_logging", type=str2bool)
     parser.add_argument("--empirical_ack_change_stat_logging", type=str2bool)
 
     # train params

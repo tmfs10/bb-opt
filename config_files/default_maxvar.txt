@@ -8,6 +8,7 @@
 --reset_model_every_iter True
 --ack_model_init_mode finetune
 --ack_change_stat_logging True
+--ack_hsic_stat_logging False
 --empirical_ack_change_stat_logging False
 
 --exclude_top 0.1
@@ -54,6 +55,8 @@
 --ei_diversity_measure none_ucb
 --num_diversity 1
 --ucb 1.0
+--hsic_kernel_fn mixrbf_kernels
+--normalize_hsic True
 
 --num_models 4
 

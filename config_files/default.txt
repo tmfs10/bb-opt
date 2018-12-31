@@ -8,6 +8,7 @@
 --reset_model_every_iter True
 --ack_model_init_mode finetune
 --ack_change_stat_logging False
+--ack_hsic_stat_logging False
 --empirical_ack_change_stat_logging True
 
 --exclude_top 0.1
