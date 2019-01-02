@@ -14,8 +14,8 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
             'ack_idx',
             'ack_labels',
             'best_hsic',
-            'ir_batch',
-            'ir_batch_idx',
+            'ir_batch_cur',
+            'ir_batch_cur_idx',
             'idx_frac',
             'test_log_prob',
             'test_mse',
@@ -154,7 +154,7 @@ def prop_test(
                 cur_stats = stats[filename][batch_size]
                 if len(cur_stats) <= ack_iter:
                     continue
-                stat[i] += [data_extractor_fn(cur_stats[ack_iter])]
+                stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
         if len(stat[0]) == 0 or len(stat[1]) == 0:
             break
 

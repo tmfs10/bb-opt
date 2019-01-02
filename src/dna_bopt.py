@@ -747,20 +747,21 @@ def train_ensemble(
                     assert epoch_iter >= early_stopping
                     break
 
-                if do_early_stopping:
-                    if best_model is not None:
-                        model_ensemble.load_state_dict(best_model)
-                    else:
-                        assert num_epochs == 0
-                if num_epochs == 0:
-                    kt_corrs = [-1]
-                    train_nlls = [-1]
-                    train_rmses = [-1]
-                    train_std = [-1]
-                    val_kt_corrs = [-1]
-                    val_nlls = [[-1], [-1]]
-                    val_rmses = [-1]
-                    val_std = [-1]
+    if do_early_stopping:
+        if best_model is not None:
+            model_ensemble.load_state_dict(best_model)
+        else:
+            assert num_epochs == 0
+
+    if num_epochs == 0:
+        kt_corrs = [-1]
+        train_nlls = [-1]
+        train_rmses = [-1]
+        train_std = [-1]
+        val_kt_corrs = [-1]
+        val_nlls = [[-1], [-1]]
+        val_rmses = [-1]
+        val_std = [-1]
 
     if num_epoch_iters is None:
         logging =  [

@@ -873,7 +873,7 @@ def er_diversity_selection_hsic(
 
         factor = ucb.std()/hsic_covar.std()
         hsic_corr = hsic_covar * factor
-        hsic_corr = ucb - hsic_corr
+        hsic_corr = ucb - params.diversity_coeff*hsic_corr
         #print('hsic_corr:', hsic_corr)
 
         _, sort_idx = torch.sort(hsic_corr, descending=True)
@@ -955,7 +955,7 @@ def er_diversity_selection_detk(
 
         factor = ucb.std()/K_values.std()
         K_values *= factor
-        K_ucb = ucb + K_values
+        K_ucb = ucb + params.diversity_coeff*K_values
         sort_idx = K_ucb.argsort()
 
         for idx in sort_idx:
@@ -2016,38 +2016,46 @@ def pairwise_mi(
 
 def get_kriging_believer_ack(
     params,
-    diversity_measure, 
-    model_ensemble,
+    model,
     data,
     ack_batch_size,
     skip_idx,
     train_fn,
-    ensemble_init_rng,
-    data_split_rng,
 ):
+    skip_idx = list(skip_idx)
     train_X, train_Y, X, Y = data
     ack_idx = []
 
-    model_copy = copy.deepcopy(model_ensemble)
+    model = copy.deepcopy(model)
+    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
     for batch_iter in range(ack_batch_size):
-        pred_means, pred_vars = model_copy(X)
-        er = pred_means.mean(dim=0).view(-1)
-        std = preds.std(dim=0).view(-1).cpu().numpy()
-        ucb_measure = er + params.ucb*std
-        max_idx = torch.argmax(ucb_measure)
-        ack_idx += [max_idx]
+        with torch.no_grad():
+            pred_means, pred_vars = model(X)
+            er = pred_means.mean(dim=0).view(-1)
+            std = pred_means.std(dim=0).view(-1)
+            ucb_measure = er + params.ucb*std
+            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+            max_idx = torch.argmax(ucb_measure).item()
+            ack_idx += [max_idx]
+
+        if len(ack_idx) >= ack_batch_size:
+            break
 
         train2_X = torch.cat([train_X, X[ack_idx]], dim=0)
-        train2_Y = torch.cat([train_Y, Y[ack_idx]], dim=0)
+        train2_Y = torch.cat([train_Y, er[ack_idx]], dim=0)
 
-        model_copy, optim, logging, ensemble_init_rng, data_split_rng = train_fn(
+        print('batch_iter', batch_iter)
+        logging, _, _, _ = train_fn(
                 params,
-                model_copy,
-                ensemble_init_rng,
-                data_split_rng,
+                params.re_train_batch_size,
+                params.re_train_num_epochs,
+                [train2_X, train2_Y, X, Y],
+                model,
+                optim,
+                params.final_train_choose_type,
                 )
 
-    return ack_idx, ensemble_init_rng, data_split_rng
+    return ack_idx
 
 
 def get_noninfo_ack(
@@ -2065,6 +2073,8 @@ def get_noninfo_ack(
             er_sortidx = np.argsort(er/std)
         elif "ucb" in diversity_measure:
             er_sortidx = np.argsort(er + params.ucb*std)
+        else:
+            assert False, diversity_measure  + " not implemented"
 
     if "none" in diversity_measure:
         assert params.num_diversity >= 1
@@ -2711,5 +2721,20 @@ def compute_maxdist_entropy(preds, k=5, device='cuda'):
     #return torch.tensor(h, device=device)
     return preds.max(dim=1)[0].std()
 
-def compute_std(preds):
-    return preds.std(dim=0)
+
+def metalearn(
+    params,
+    model,
+    X,
+    Y,
+    seen_idx,
+    rollout_length=5,
+):
+    assert False, "Not implemented"
+    seen_idx = list(seen_idx)
+
+    model = copy.deepcopy(model)
+    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
+
+    for ack_iter in range(rollout_length):
+        pass

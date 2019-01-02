@@ -52,8 +52,9 @@
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 
---ei_diversity_measure none_ucb
+--ack_fun none_ucb
 --num_diversity 1
+--diversity_coeff 0.3
 --ucb 0.0
 --hsic_kernel_fn mixrbf_kernels
 --normalize_hsic True

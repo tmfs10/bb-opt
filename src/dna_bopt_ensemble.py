@@ -47,7 +47,7 @@ torch.manual_seed(params.seed)
 random_label = datetime.datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
 if params.output_dir[-1] == "/":
     params.output_dir = params.output_dir[:-1]
-params.output_dir = params.output_dir + "_" + params.ei_diversity_measure + "_" + params.suffix
+params.output_dir = params.output_dir + "_" + params.ack_fun + "_" + params.suffix
 
 if not os.path.exists(params.output_dir):
     os.mkdir(params.output_dir)
@@ -238,15 +238,15 @@ for filename in filenames:
                                 single_gaussian=params.single_gaussian_test_nll
                                 )
 
-                    print('filename:', filename, '; measure:', params.ei_diversity_measure, '; output folder', params.output_dir)
+                    print('filename:', filename, '; measure:', params.ack_fun, '; output folder', params.output_dir)
 
-                    if "empirical_cond_" in params.ei_diversity_measure:
-                        if params.ei_diversity_measure == "empirical_cond_pdts":
+                    if "empirical_cond_" in params.ack_fun:
+                        if params.ack_fun == "empirical_cond_pdts":
                             ack_idx_to_condense = bopt.get_pdts_idx(
                                     preds, 
                                     params.num_diversity*ack_batch_size, 
                                     density=False)
-                        elif params.ei_diversity_measure == "empirical_cond_er":
+                        elif params.ack_fun == "empirical_cond_er":
                             er = preds.mean(dim=0).view(-1)
                             er[list(skip_idx_cur)] = er.min()
                             er_sortidx = torch.sort(er, descending=True)[1]
@@ -275,7 +275,7 @@ for filename in filenames:
                                 idx_to_monitor=set(range(X.shape[0])) if params.empirical_stat == 'mes' else None,
                                 er_values=er,
                                 seen_batch_size=params.re_train_batch_size,
-                                stat_fn=bopt.compute_maxdist_entropy if params.empirical_stat == 'mes' else bopt.compute_std,
+                                stat_fn=bopt.compute_maxdist_entropy if params.empirical_stat == 'mes' else lambda preds : preds.std(dim=0),
                                 val_nll_metric="val" in params.empirical_stat,
                                 )
 
@@ -288,15 +288,7 @@ for filename in filenames:
                                 if len(cur_ack_idx) == ack_batch_size:
                                     break
 
-                    elif params.ei_diversity_measure != "info":
-                        cur_ack_idx = bopt.get_noninfo_ack(
-                                params,
-                                params.ei_diversity_measure,
-                                preds,
-                                ack_batch_size,
-                                skip_idx_cur,
-                                )
-                    else:
+                    elif params.ack_fun == "info":
                         cur_ack_idx = bopt.get_info_ack(
                                 params,
                                 preds,
@@ -304,6 +296,25 @@ for filename in filenames:
                                 skip_idx_cur,
                                 labels,
                                 )
+                    elif params.ack_fun == "kriging_believer":
+                        cur_ack_idx = bopt.get_kriging_believer_ack(
+                                params,
+                                cur_model,
+                                [train_X_cur, train_Y_cur, X, Y],
+                                ack_batch_size,
+                                skip_idx_cur,
+                                dbopt.train_ensemble,
+                                )
+                    elif "_ucb" in params.ack_fun:
+                        cur_ack_idx = bopt.get_noninfo_ack(
+                                params,
+                                params.ack_fun,
+                                preds,
+                                ack_batch_size,
+                                skip_idx_cur,
+                                )
+                    else:
+                        assert False, params.ack_fun + " not implemented"
 
                     unseen_idx = set(range(Y.shape[0])).difference(skip_idx_cur.union(cur_ack_idx))
                     if params.ack_change_stat_logging:
