@@ -36,6 +36,7 @@
 
 --unseen_reg normal
 --gammas 1.0 5.0 10.0 20.0
+--ood_data_batch_factor 1.0
 
 --data_dir ../data/paper_data2
 --filename_file ../data/maxvar_saber_tfs.txt
@@ -56,6 +57,7 @@
 --num_diversity 1
 --diversity_coeff 0.3
 --ucb 1.0
+--ucb_step 0.0
 --hsic_kernel_fn mixrbf_kernels
 --normalize_hsic True
 

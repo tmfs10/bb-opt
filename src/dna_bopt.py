@@ -272,6 +272,11 @@ def unseen_data_loss(
         elif unseen_reg == "maxinvar":
             invar = means.var(dim=0).mean()
             loss -= gamma*invar
+        elif unseen_reg == "maxinoutvar":
+            var_mean = means_o.var(dim=0).mean()
+            loss -= gamma/2*var_mean
+            invar = means.var(dim=0).mean()
+            loss -= gamma/2*invar
         elif unseen_reg == "maxinstd":
             instd = means.std(dim=0).mean()
             loss -= gamma*instd
@@ -594,6 +599,8 @@ def train_ensemble(
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
 
+            ood_data_batch_factor = int(math.ceil(bN*params.ood_data_batch_factor))
+
             means, variances = model_ensemble(bX)
 
             optim.zero_grad()
@@ -630,7 +637,7 @@ def train_ensemble(
                     model_ensemble,
                     means,
                     sample_uniform,
-                    bN,
+                    ood_data_batch_factor,
                     unseen_reg,
                     gamma,
                     )
@@ -747,7 +754,7 @@ def train_ensemble(
                     assert epoch_iter >= early_stopping
                     break
 
-    if do_early_stopping:
+    if do_early_stopping and (num_epoch_iters is None):
         if best_model is not None:
             model_ensemble.load_state_dict(best_model)
         else:

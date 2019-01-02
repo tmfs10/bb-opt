@@ -213,23 +213,26 @@ for filename in filenames:
                 continue
 
             with open(batch_output_dir + "/stats.txt", 'w', buffering=1) as f:
+                ack_iter_info = {
+                        'ucb_beta': params.ucb,
+                        }
                 for ack_iter in range(params.num_acks):
                     batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
 
                     # test stats computation
                     print('doing ack_iter', ack_iter)
                     with torch.no_grad():
-                        preds, preds_vars = cur_model(X) # (num_candidate_points, num_samples)
-                        preds = preds.detach()
-                        preds_vars = preds_vars.detach()
-                        assert preds.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(preds.shape), str(Y.shape))
+                        pre_ack_preds, pre_ack_preds_vars = cur_model(X) # (num_candidate_points, num_samples)
+                        pre_ack_preds = pre_ack_preds.detach()
+                        pre_ack_preds_vars = pre_ack_preds_vars.detach()
+                        assert pre_ack_preds.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_preds.shape), str(Y.shape))
 
                         #preds_for_cur = torch.max(preds - train_Y_cur.max(), torch.tensor(0.).to(params.device))
                         #assert preds_for_cur.shape == preds.shape, str(preds_for_cur.shape)
 
                         log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr, pred_corr = bopt.get_pred_stats(
-                                preds,
-                                torch.sqrt(preds_vars),
+                                pre_ack_preds,
+                                torch.sqrt(pre_ack_preds_vars),
                                 Y,
                                 train_Y_cur,
                                 params.output_dist_fn, 
@@ -243,11 +246,11 @@ for filename in filenames:
                     if "empirical_cond_" in params.ack_fun:
                         if params.ack_fun == "empirical_cond_pdts":
                             ack_idx_to_condense = bopt.get_pdts_idx(
-                                    preds, 
+                                    pre_ack_preds, 
                                     params.num_diversity*ack_batch_size, 
                                     density=False)
                         elif params.ack_fun == "empirical_cond_er":
-                            er = preds.mean(dim=0).view(-1)
+                            er = pre_ack_preds.mean(dim=0).view(-1)
                             er[list(skip_idx_cur)] = er.min()
                             er_sortidx = torch.sort(er, descending=True)[1]
 
@@ -265,7 +268,7 @@ for filename in filenames:
                                 params,
                                 X,
                                 Y,
-                                preds,
+                                pre_ack_preds,
                                 cur_model,
                                 params.re_train_lr,
                                 params.re_train_l2,
@@ -291,7 +294,7 @@ for filename in filenames:
                     elif params.ack_fun == "info":
                         cur_ack_idx = bopt.get_info_ack(
                                 params,
-                                preds,
+                                pre_ack_preds,
                                 ack_batch_size,
                                 skip_idx_cur,
                                 labels,
@@ -309,9 +312,10 @@ for filename in filenames:
                         cur_ack_idx = bopt.get_noninfo_ack(
                                 params,
                                 params.ack_fun,
-                                preds,
+                                pre_ack_preds,
                                 ack_batch_size,
                                 skip_idx_cur,
+                                ack_iter_info=ack_iter_info,
                                 )
                     else:
                         assert False, params.ack_fun + " not implemented"
@@ -320,8 +324,8 @@ for filename in filenames:
                     if params.ack_change_stat_logging:
                         rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic = bopt.pairwise_logging_pre_ack(
                                 params,
-                                preds,
-                                preds_vars,
+                                pre_ack_preds,
+                                pre_ack_preds_vars,
                                 skip_idx_cur,
                                 cur_ack_idx,
                                 unseen_idx,
@@ -340,7 +344,7 @@ for filename in filenames:
                             params,
                             X,
                             Y,
-                            preds,
+                            pre_ack_preds,
                             cur_ack_idx,
                             cur_model,
                             params.re_train_lr,
@@ -387,14 +391,26 @@ for filename in filenames:
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )
 
+                    # ucb beta selection
+                    if params.ucb_step >= 0.04:
+                        ucb_beta_range = np.arange(0, params.ucb+0.01, params.ucb_step)
+                        new_ucb_beta = bopt.get_best_ucb_beta(
+                                pre_ack_preds[:, cur_ack_idx],
+                                Y[cur_ack_idx],
+                                ucb_beta_range,
+                                )
+                        if new_ucb_beta is not None:
+                            ack_iter_info['ucb_beta'] = new_ucb_beta
+                        print('new ucb_beta:', ack_iter_info['ucb_beta'])
+
                     if params.ack_change_stat_logging or params.empirical_ack_change_stat_logging:
                         with torch.no_grad():
-                            preds, pred_vars = cur_model(X) # (num_samples, num_points)
-                            preds = preds.detach()
-                            preds_vars = preds_vars.detach()
+                            post_ack_preds, post_ack_pred_vars = cur_model(X) # (num_samples, num_points)
+                            post_ack_preds = post_ack_preds.detach()
+                            post_ack_pred_vars = post_ack_pred_vars.detach()
 
                             if params.empirical_ack_change_stat_logging:
-                                true_ack_stats = empirical_stat_fn(preds[:, idx_to_monitor])
+                                true_ack_stats = empirical_stat_fn(post_ack_preds[:, idx_to_monitor])
                                 true_ack_stats -= old_ack_stats
 
                                 p1 = pearsonr(true_ack_stats, guess_ack_stats)[0]
@@ -405,12 +421,12 @@ for filename in filenames:
                             if params.ack_change_stat_logging:
                                 stats_pred = None
                                 if params.predict_mi:
-                                    stats_pred = predict_info_models(X[rand_idx], preds[:, rand_idx], X[cur_ack_idx])
+                                    stats_pred = predict_info_models(X[rand_idx], post_ack_preds[:, rand_idx], X[cur_ack_idx])
 
                                 corr_stats = bopt.pairwise_logging_post_ack(
                                         params,
-                                        preds[:, rand_idx],
-                                        preds_vars[:, rand_idx],
+                                        post_ack_preds[:, rand_idx],
+                                        post_ack_pred_vars[:, rand_idx],
                                         old_std,
                                         old_nll,
                                         corr_rand,

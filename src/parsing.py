@@ -108,6 +108,7 @@ def add_parse_args(parser):
     parser.add_argument('--unseen_reg', type=strlower)
     parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
+    parser.add_argument('--ood_data_batch_factor', type=float)
     parser.add_argument('--take_log', type=str2bool)
 
     # data/output files/folders
@@ -134,6 +135,7 @@ def add_parse_args_nongrad(parser):
     parser.add_argument('--ack_fun', type=strlower, 
             help="none/hsic/detk/pdts_ucb/var")
     parser.add_argument('--ucb', type=float, help="stddev coeff")
+    parser.add_argument('--ucb_step', type=float)
 
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')

@@ -2060,23 +2060,25 @@ def get_kriging_believer_ack(
 
 def get_noninfo_ack(
     params,
-    diversity_measure, 
+    ack_fun, 
     preds, 
     ack_batch_size,
     skip_idx,
+    ack_iter_info=dict(),
 ):
     with torch.no_grad():
         er = preds.mean(dim=0).view(-1).cpu().numpy()
         std = preds.std(dim=0).view(-1).cpu().numpy()
 
-        if "var" in diversity_measure:
+        if "var" in ack_fun:
             er_sortidx = np.argsort(er/std)
-        elif "ucb" in diversity_measure:
-            er_sortidx = np.argsort(er + params.ucb*std)
+        elif "ucb" in ack_fun:
+            assert 'ucb_beta' in ack_iter_info
+            er_sortidx = np.argsort(er + ack_iter_info['ucb_beta']*std)
         else:
-            assert False, diversity_measure  + " not implemented"
+            assert False, ack_fun  + " not implemented"
 
-    if "none" in diversity_measure:
+    if "none" in ack_fun:
         assert params.num_diversity >= 1
         cur_ack_idx = []
         num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
@@ -2089,7 +2091,7 @@ def get_noninfo_ack(
             temp = utils.randint(num_to_select, ack_batch_size)
             cur_ack_idx = np.array(cur_ack_idx)[temp].tolist()
         assert len(cur_ack_idx) == ack_batch_size
-    elif "hsic" in diversity_measure:
+    elif "hsic" in ack_fun:
         num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
         cur_ack_idx = er_diversity_selection_hsic(
                 params, 
@@ -2097,7 +2099,7 @@ def get_noninfo_ack(
                 skip_idx, 
                 num_er=num_to_select,
                 device=params.device)
-    elif "detk" in diversity_measure:
+    elif "detk" in ack_fun:
         num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
         cur_ack_idx = er_diversity_selection_detk(
                 params, 
@@ -2105,14 +2107,14 @@ def get_noninfo_ack(
                 skip_idx, 
                 num_ucb=num_to_select,
                 device=params.device)
-    elif "pdts" in diversity_measure:
+    elif "pdts" in ack_fun:
         cur_ack_idx = set()
         er_sortidx = np.argsort(er)
         sorted_preds_idx = []
         for i in range(preds.shape[0]):
             sorted_preds_idx += [np.argsort(preds[i].numpy())]
         sorted_preds_idx = np.array(sorted_preds_idx)
-        if "density" in diversity_measure:
+        if "density" in ack_fun:
             counts = np.zeros(sorted_preds_idx.shape[1])
             for rank in range(sorted_preds_idx.shape[1]):
                 counts[:] = 0
@@ -2127,7 +2129,7 @@ def get_noninfo_ack(
                 if len(cur_ack_idx) >= ack_batch_size:
                     break
         else:
-            assert diversity_measure == "pdts", diversity_measure
+            assert ack_fun == "pdts", ack_fun
             for i_model in range(sorted_preds_idx.shape[0]):
                 for idx in sorted_preds_idx[i_model]:
                     idx2 = int(idx)
@@ -2138,7 +2140,7 @@ def get_noninfo_ack(
                     break
         cur_ack_idx = list(cur_ack_idx)
     else:
-        assert False, "Not implemented " + diversity_measure
+        assert False, "Not implemented " + ack_fun
     assert len(cur_ack_idx) == ack_batch_size, len(cur_ack_idx)
 
     return cur_ack_idx
@@ -2720,6 +2722,27 @@ def compute_maxdist_entropy(preds, k=5, device='cuda'):
     #h = info.get_h(preds.max(dim=1)[0].unsqueeze(dim=-1).cpu().numpy(), k)
     #return torch.tensor(h, device=device)
     return preds.max(dim=1)[0].std()
+
+
+def get_best_ucb_beta(
+    pre_ack_preds,
+    Y,
+    ucb_beta_range,
+):
+    best_kt = -1
+    best_ucb = None
+
+    Y = Y.cpu().numpy()
+    er = pre_ack_preds.mean(dim=0).cpu().numpy()
+    std = pre_ack_preds.std(dim=0).cpu().numpy()
+    for ucb_beta in ucb_beta_range:
+        ucb = er + (ucb_beta * std)
+        kt = kendalltau(ucb, Y)[0]
+
+        if kt > best_kt:
+            best_kt = kt
+            best_ucb = float(ucb_beta)
+    return best_ucb
 
 
 def metalearn(
