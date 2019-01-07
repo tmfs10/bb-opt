@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import ttest_ind
+from scipy.stats import ttest_ind, combine_pvalues
 
 
 def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False):
@@ -141,6 +141,7 @@ def prop_test(
     count = 0
     total = 0
     print('comparing', arrs[exp[0]][1], arrs[exp[1]][1])
+    pval_list = [[], []]
     for filename in filenames:
         stat = [[], []]
         for i in range(2):
@@ -166,8 +167,13 @@ def prop_test(
             c = 1 if m[1] > m[0] else 0
             count += c
             total += 1
+            if c == 1:
+                pval_list[1] += [pval]
+            else:
+                pval_list[0] += [pval]
             print(filename, pval, m[0], m[1], c)
 
+    print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
     print('count: %d/%d' % (count, total))
 
 

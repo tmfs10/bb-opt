@@ -49,6 +49,7 @@
 --single_gaussian_test_nll False
 --report_metric_train_std True
 --empirical_stat std
+--empirical_diversity_only False
 --empirical_stat_val_fraction 0.2
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
@@ -70,3 +71,9 @@
 --predict_mmd False
 --num_predict_sample_points 400
 --ack_emb_kernel_dim 100
+
+--predict_ood False
+--ood_pred_emb_size 10
+--ood_pred_lr 0.01
+--ood_pred_epoch_iter 20
+--ood_pred_batch_size 1000

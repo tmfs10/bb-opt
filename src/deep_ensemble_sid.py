@@ -302,6 +302,19 @@ class NNEnsemble(torch.nn.Module):
             return negative_log_likelihood, mse
         return negative_log_likelihood
 
+    @staticmethod
+    def get_per_point_nll(
+        labels, means, variances, return_mse: bool = False
+    ):
+        mse = (labels - means) ** 2
+        negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
+        negative_log_likelihood = negative_log_likelihood.mean(dim=0)
+
+        if return_mse:
+            mse = mse.mean(dim=-1).sum()
+            return negative_log_likelihood, mse
+        return negative_log_likelihood
+
     def report_metric(
         labels, means, variances, custom_std=None, return_mse=False
     ):

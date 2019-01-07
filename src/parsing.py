@@ -95,6 +95,7 @@ def add_parse_args(parser):
     parser.add_argument('--single_gaussian_test_nll', type=str2bool)
     parser.add_argument('--report_metric_train_std', type=str2bool)
     parser.add_argument('--empirical_stat', type=verify_empirical_stat)
+    parser.add_argument('--empirical_diversity_only', type=str2bool)
     parser.add_argument('--empirical_stat_val_fraction', type=float)
 
     # model params
@@ -174,6 +175,13 @@ def add_parse_args_grad(parser):
 def add_parse_args_ensemble(parser):
     parser.add_argument('--num_models', type=int, help='number of models in ensemble')
     parser.add_argument('--adv_epsilon', type=float, help='adversarial epsilon')
+
+def add_parse_args_wrongness(parser):
+    parser.add_argument('--predict_ood', type=str2bool)
+    parser.add_argument('--ood_pred_emb_size', type=int)
+    parser.add_argument('--ood_pred_lr', type=float)
+    parser.add_argument('--ood_pred_epoch_iter', type=int)
+    parser.add_argument('--ood_pred_batch_size', type=int)
 
 def parse_args(parser):
     args = parser.parse_args()

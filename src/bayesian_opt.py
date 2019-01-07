@@ -1837,7 +1837,7 @@ def get_pred_stats(
     rmse_list = []
     kt_corr_list = []
     std_list = []
-    mse_std_corr = []
+    rmse_std_corr = []
     pred_corr = []
 
     for frac in [1., 0.1, 0.01]:
@@ -1862,19 +1862,19 @@ def get_pred_stats(
                         )
                     ).item()]
 
-        pred_means = preds[:, labels_sort_idx].mean(0)
+        pred_means = preds[:, labels_sort_idx].mean(dim=0)
         mse = (pred_means-labels2)**2
         rmse_list += [torch.sqrt(torch.mean(mse)).item()]
         kt_corr_list += [kendalltau(pred_means, unscaled_Y[labels_sort_idx])[0]]
-        pred_std = preds[:, labels_sort_idx].std(0)
+        pred_std = preds[:, labels_sort_idx].std(dim=0)
         std_list += [pred_std.mean().item()]
-        mse_std_corr += [float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_std.cpu().numpy())[0])]
+        rmse_std_corr += [float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_std.cpu().numpy())[0])]
 
     max_idx = labels_sort_idx[0]
     log_prob_list += [torch.mean(-output_dist_fn(preds[:, max_idx], std[:, max_idx]).log_prob(Y[max_idx])).item()]
     rmse_list += [torch.abs(preds[:, max_idx].mean(0)-Y[max_idx]).item()]
     kt_corr_list += [0]
-    mse_std_corr += [0]
+    rmse_std_corr += [0]
     pred_corr += [0]
     std_list += [preds[:, max_idx].std(0).item()]
 
@@ -1882,10 +1882,10 @@ def get_pred_stats(
     print('rmse_list:', rmse_list)
     print('kt_corr_list:', kt_corr_list)
     print('std_list:', std_list)
-    print('mse_std_corr:', mse_std_corr)
+    print('rmse_std_corr:', rmse_std_corr)
     print('pred_corr:', pred_corr)
 
-    return log_prob_list, rmse_list, kt_corr_list, std_list, mse_std_corr, pred_corr
+    return log_prob_list, rmse_list, kt_corr_list, std_list, rmse_std_corr, pred_corr
 
 def compute_ir_regret_ensemble(
         model_ensemble,
@@ -2014,6 +2014,96 @@ def pairwise_mi(
     return mi_matrix
 
 
+def get_empirical_kriging_believer_ack(
+    params,
+    model,
+    data,
+    ack_batch_size,
+    skip_idx,
+    train_fn,
+):
+    skip_idx = list(skip_idx)
+    train_X, train_Y, X, Y = data
+    ack_idx = []
+
+    model = copy.deepcopy(model)
+    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
+    for batch_iter in range(ack_batch_size):
+        with torch.no_grad():
+            pred_means, pred_vars = model(X)
+            er = pred_means.mean(dim=0).view(-1)
+            std = pred_means.std(dim=0).view(-1)
+            ucb_measure = er + params.ucb*std
+            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+            ucb_sort, ucb_sortidx = torch.sort(ucb_measure, descending=True)
+
+            ack_idx_to_condense = []
+            #condense_size = params.num_diversity*ack_batch_size
+            condense_size = params.num_diversity
+            for i in range(ucb_sortidx.shape[0]):
+                idx = ucb_sortidx[i].item()
+                if idx in skip_idx:
+                    continue
+                ack_idx_to_condense += [idx]
+                if len(ack_idx_to_condense) == condense_size:
+                    break
+
+        cur_ack_idx = get_empirical_condensation_ack3(
+                params,
+                X,
+                Y,
+                pred_means,
+                model,
+                params.re_train_lr,
+                params.re_train_l2,
+                ack_idx_to_condense,
+                skip_idx,
+                ack_batch_size,
+                idx_to_monitor=None,
+                er_values=ucb_measure,
+                seen_batch_size=params.re_train_batch_size,
+                stat_fn=lambda preds, info : preds.std(dim=0),
+                val_nll_metric=False,
+                )
+
+        ack_idx += [cur_ack_idx[0]]
+
+        if len(ack_idx) >= ack_batch_size:
+            break
+
+        if params.sigmoid_coeff > 0:
+            bY = utils.sigmoid_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+        else:
+            bY = utils.normal_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+
+        bX = torch.cat([train_X, X[ack_idx]], dim=0)
+        bY = torch.cat([bY, er[ack_idx]], dim=0)
+
+        print('batch_iter', batch_iter)
+        num_iter = 20
+        for i in range(num_iter):
+            means, variances = model(bX)
+            nll = model.compute_negative_log_likelihood(
+                bY,
+                means,
+                variances,
+                return_mse=False,
+            )
+            optim.zero_grad()
+            nll.backward()
+            optim.step()
+
+    return ack_idx
+
+
 def get_kriging_believer_ack(
     params,
     model,
@@ -2041,10 +2131,37 @@ def get_kriging_believer_ack(
         if len(ack_idx) >= ack_batch_size:
             break
 
-        train2_X = torch.cat([train_X, X[ack_idx]], dim=0)
-        train2_Y = torch.cat([train_Y, er[ack_idx]], dim=0)
+        if params.sigmoid_coeff > 0:
+            bY = utils.sigmoid_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+        else:
+            bY = utils.normal_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+
+        bX = torch.cat([train_X, X[ack_idx]], dim=0)
+        bY = torch.cat([bY, er[ack_idx]], dim=0)
 
         print('batch_iter', batch_iter)
+        num_iter = 20
+        for i in range(num_iter):
+            means, variances = model(bX)
+            nll = model.compute_negative_log_likelihood(
+                bY,
+                means,
+                variances,
+                return_mse=False,
+            )
+            optim.zero_grad()
+            nll.backward()
+            optim.step()
+
+        """
         logging, _, _, _ = train_fn(
                 params,
                 params.re_train_batch_size,
@@ -2054,6 +2171,7 @@ def get_kriging_believer_ack(
                 optim,
                 params.final_train_choose_type,
                 )
+        """
 
     return ack_idx
 
@@ -2469,7 +2587,7 @@ def pairwise_logging_post_ack(
 def compute_ack_stat_change_val_nll_ensemble(
     params,
     X,
-    Y,
+    unscaled_Y,
     preds,
     ack_idx,
     model,
@@ -2493,9 +2611,25 @@ def compute_ack_stat_change_val_nll_ensemble(
     idx_to_monitor = seen_idx[val_idx].tolist()
 
     train_X = X[train_idx]
-    train_Y = Y[train_idx]
+    train_Y = unscaled_Y[train_idx]
     monitor_X = X[idx_to_monitor]
+
+    if params.sigmoid_coeff > 0:
+        Y = utils.sigmoid_standardization(
+                unscaled_Y,
+                train_Y.mean(),
+                train_Y.std(),
+                exp=torch.exp)
+    else:
+        Y = utils.normal_standardization(
+                unscaled_Y,
+                train_Y.mean(),
+                train_Y.std(),
+                exp=torch.exp)
+
+    train_Y = Y[train_idx]
     monitor_Y = Y[idx_to_monitor]
+
 
     seen_batch_size = min(seen_batch_size, train_X.shape[0])
 
@@ -2584,8 +2718,9 @@ def compute_ack_stat_change_val_nll_ensemble(
 
 
 def compute_ack_stat_change(
+    params,
     X,
-    Y,
+    unscaled_Y,
     preds,
     ack_idx,
     model,
@@ -2595,15 +2730,14 @@ def compute_ack_stat_change(
     idx_to_monitor,
     stat_fn, # (num_samples, indices) -> stddev/mmd to uniform/etc
     seen_batch_size=0,
+    stat_fn_info=None,
 ):
-    from deep_ensemble_sid import NNEnsemble
-
     #assert len(set(seen_idx).intersection(idx_to_monitor)) == 0
     assert len(set(seen_idx).intersection(ack_idx)) == 0
 
     seen_idx = list(seen_idx)
     optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-    stat = stat_fn(preds[:, idx_to_monitor])
+    stat = stat_fn(preds[:, idx_to_monitor], stat_fn_info)
 
     #print('X.shape', X.shape, ack_idx)
     if seen_batch_size == 0:
@@ -2617,12 +2751,25 @@ def compute_ack_stat_change(
     if len(bX.shape) == 1:
         bX = bX.unsqueeze(dim=0)
 
-    bY = preds[:, ack_idx].mean(dim=0)
-    bY = torch.cat([bY, Y[rand_idx]], dim=0)
+    bY = unscaled_Y[rand_idx] 
+
+    if params.sigmoid_coeff > 0:
+        bY = utils.sigmoid_standardization(
+                bY,
+                bY.mean(),
+                bY.std(),
+                exp=torch.exp)
+    else:
+        bY = utils.normal_standardization(
+                bY,
+                bY.mean(),
+                bY.std(),
+                exp=torch.exp)
+    bY = torch.cat([preds[:, ack_idx].mean(dim=0), bY], dim=0)
 
     for i in range(2):
         means, variances = model(bX)
-        nll = NNEnsemble.compute_negative_log_likelihood(
+        nll = model.compute_negative_log_likelihood(
             bY,
             means,
             variances,
@@ -2634,7 +2781,7 @@ def compute_ack_stat_change(
 
     with torch.no_grad():
         means2, variances2 = model(X[idx_to_monitor])
-        stat2 = stat_fn(means2)
+        stat2 = stat_fn(means2, stat_fn_info)
 
     optim.zero_grad()
 
@@ -2655,7 +2802,8 @@ def get_empirical_condensation_ack(
     ack_batch_size,
     idx_to_monitor=None,
     er_values=None,
-    stat_fn = lambda preds : preds.std(dim=0),
+    stat_fn = lambda preds, info : preds.std(dim=0),
+    stat_fn_info = None,
     predict_info_model=None,
     seen_batch_size=0,
     val_nll_metric=False,
@@ -2693,6 +2841,7 @@ def get_empirical_condensation_ack(
                         )
             else:
                 stat_change, old_stat = compute_ack_stat_change(
+                        params,
                         X,
                         Y,
                         preds,
@@ -2703,6 +2852,7 @@ def get_empirical_condensation_ack(
                         seen_idx,
                         list(new_idx_to_condense.difference({idx})) if idx_to_monitor is None else list(set(idx_to_monitor).difference({idx})),
                         stat_fn,
+                        stat_fn_info=stat_fn_info,
                         seen_batch_size=seen_batch_size,
                         )
             stat_change_list[idx] = torch.mean(stat_change).item()
@@ -2718,7 +2868,174 @@ def get_empirical_condensation_ack(
     return cur_ack_batch
 
 
-def compute_maxdist_entropy(preds, k=5, device='cuda'):
+def get_empirical_condensation_ack2(
+    params,
+    X,
+    Y,
+    preds,
+    model,
+    lr,
+    l2,
+    idx_to_condense,
+    seen_idx,
+    ack_batch_size,
+    idx_to_monitor=None,
+    er_values=None,
+    stat_fn = lambda preds, info : preds.std(dim=0),
+    stat_fn_info = None,
+    predict_info_model=None,
+    seen_batch_size=0,
+    val_nll_metric=False,
+):
+    assert len(set(idx_to_condense).intersection(seen_idx)) == 0
+
+    model_copy = copy.deepcopy(model)
+    if val_nll_metric:
+        stat_change, old_stat = compute_ack_stat_change_val_nll_ensemble(
+                params,
+                X,
+                Y,
+                preds,
+                idx_to_condense,
+                model_copy,
+                lr,
+                l2,
+                seen_idx,
+                seen_batch_size=seen_batch_size,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                )
+    else:
+        stat_change, old_stat = compute_ack_stat_change(
+                params,
+                X,
+                Y,
+                preds,
+                idx_to_condense,
+                model_copy,
+                lr,
+                l2,
+                seen_idx,
+                idx_to_condense,
+                stat_fn,
+                stat_fn_info=stat_fn_info,
+                seen_batch_size=seen_batch_size,
+                )
+
+        #er_std_factor = float(np.std(idx_stats))/er_values.std()
+        #for idx in new_idx_to_condense:
+        #    stat_change_list[idx] -= (er_values[idx] * er_std_factor).item() 
+    stat_change_sort, stat_change_sort_idx = torch.sort(stat_change)
+    print('stat_change_sort[:10]:', stat_change_sort[:10])
+
+    cur_ack_batch = [idx_to_condense[stat_change_sort_idx[i].item()] for i in range(ack_batch_size)]
+    return cur_ack_batch
+
+
+def get_empirical_condensation_ack3(
+    params,
+    X,
+    Y,
+    preds,
+    model,
+    lr,
+    l2,
+    idx_to_condense,
+    seen_idx,
+    ack_batch_size,
+    idx_to_monitor=None,
+    er_values=None,
+    stat_fn = lambda preds, info : preds.std(dim=0),
+    stat_fn_info = None,
+    predict_info_model=None,
+    seen_batch_size=0,
+    val_nll_metric=False,
+):
+    assert len(set(idx_to_condense).intersection(seen_idx)) == 0
+
+    model = copy.deepcopy(model)
+    seen_idx = list(seen_idx)
+    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+    stat = stat_fn(preds[:, idx_to_monitor], stat_fn_info)
+
+    bX = X[idx_to_condense + seen_idx]
+
+    if len(bX.shape) == 1:
+        bX = bX.unsqueeze(dim=0)
+
+    bY = Y[seen_idx] 
+
+    if params.sigmoid_coeff > 0:
+        bY = utils.sigmoid_standardization(
+                bY,
+                bY.mean(),
+                bY.std(),
+                exp=torch.exp)
+    else:
+        bY = utils.normal_standardization(
+                bY,
+                bY.mean(),
+                bY.std(),
+                exp=torch.exp)
+    bY = torch.cat([preds[:, idx_to_condense].mean(dim=0), bY], dim=0)
+
+    corr = []
+    num_to_monitor = len(idx_to_condense)
+    num_iter = 20
+    pred_matrix = []
+    for i in range(num_iter):
+        means, variances = model(bX)
+        nll = model.compute_negative_log_likelihood(
+            bY,
+            means,
+            variances,
+            return_mse=False,
+        )
+        optim.zero_grad()
+        nll.backward()
+        optim.step()
+
+        with torch.no_grad():
+            corr += [means[:, :num_to_monitor].std(dim=0)]
+            pred_matrix += [means[:, :num_to_monitor]]
+
+    pred_matrix = torch.cat(pred_matrix, dim=0)
+    pred_corr_matrix = ops.corrcoef(pred_matrix.transpose(0, 1))
+    pred_corr = pred_corr_matrix.mean(dim=1)
+
+    corr = torch.stack(corr, dim=0)
+    assert corr.shape[1] == num_to_monitor
+    corr_matrix = ops.corrcoef(corr.transpose(0, 1))
+    corr = corr_matrix.mean(dim=1)
+
+    ucb_measure = bY[:num_to_monitor] + params.ucb * preds[:, idx_to_condense].std(dim=0)
+    if params.empirical_diversity_only:
+        stat_change_sort, stat_change_sort_idx = torch.sort(ucb_measure, descending=True)
+    else:
+        stat_change_sort, stat_change_sort_idx = torch.sort(pred_corr + ucb_measure, descending=True)
+    print('stat_change_sort[:10]:', stat_change_sort[:10])
+    stat_change_sort_idx = [k.item() for k in stat_change_sort_idx]
+
+    #cur_ack_batch = [idx_to_condense[stat_change_sort_idx[i].item()] for i in range(ack_batch_size)]
+    cur_ack_batch = []
+    for i in range(len(stat_change_sort_idx)):
+        if i == 0:
+            cur_ack_batch += [stat_change_sort_idx[i]]
+        else:
+            #m = corr_matrix[stat_change_sort_idx[i], cur_ack_batch].max()
+            #if m >= 0.8:
+            #    continue
+            cur_ack_batch += [stat_change_sort_idx[i]]
+        if len(cur_ack_batch) == ack_batch_size:
+            break
+    cur_ack_batch = [idx_to_condense[k] for k in cur_ack_batch]
+    return cur_ack_batch
+
+
+def compute_pearson(preds, info):
+    return ops.corrcoef(preds[info['rand_idx']].transpose(0, 1)).view(-1)
+
+
+def compute_maxdist_entropy(preds, info, k=5, device='cuda'):
     #h = info.get_h(preds.max(dim=1)[0].unsqueeze(dim=-1).cpu().numpy(), k)
     #return torch.tensor(h, device=device)
     return preds.max(dim=1)[0].std()
@@ -2739,10 +3056,140 @@ def get_best_ucb_beta(
         ucb = er + (ucb_beta * std)
         kt = kendalltau(ucb, Y)[0]
 
-        if kt > best_kt:
+        if kt >= best_kt-0.001:
             best_kt = kt
             best_ucb = float(ucb_beta)
-    return best_ucb
+    return best_ucb, best_kt
+
+
+def predict_ood_rand_pairs(
+    init_size,
+    ack_size,
+    num_acks_done,
+    num_pairs_needed,
+    idx_at_each_iter,
+    only_next_ack=True
+):
+    idx_at_each_iter = [idx for idx_list in idx_at_each_iter for idx in idx_list]
+
+    if only_next_ack:
+        num_total_pairs_per_ack = [(init_size+ack_size*i) * ack_size for i in range(num_acks_done)]
+    else:
+        num_total_pairs_per_ack = [(init_size+ack_size*i) * (ack_size * (num_acks_done-i)) for i in range(num_acks_done)]
+
+    cumsum_total_pairs = [sum(num_total_pairs_per_ack[:i]) for i in range(len(num_total_pairs_per_ack)+1)]
+    total_pairs = sum(num_total_pairs_per_ack)
+    num_pairs_needed = min(total_pairs, num_pairs_needed)
+
+    pairs = [ [[], []] for i in range(num_acks_done)]
+    pair_idx_list = np.random.choice(total_pairs, size=num_pairs_needed, replace=False)
+    for i in range(num_pairs_needed):
+        pair_idx = pair_idx_list[i]
+        ack_iter = utils.cumsub(pair_idx, num_total_pairs_per_ack)
+        pair_idx -= cumsum_total_pairs[ack_iter]
+        assert pair_idx >= 0, "%d, %d, %d" % (ack_iter, pair_idx, num_acks_done)
+        assert pair_idx < num_total_pairs_per_ack[ack_iter], "%d, %d" % (ack_iter, pair_idx)
+
+        if only_next_ack:
+            num_not_seen = ack_size
+        else:
+            num_not_seen = ack_size * (num_acks_done-ack_iter)
+
+        pairs[ack_iter][0] += [pair_idx//num_not_seen]
+        pairs[ack_iter][1] += [pair_idx%num_not_seen]
+        pairs[ack_iter][1][-1] = init_size + (ack_size*ack_iter) + pairs[ack_iter][1][-1]
+
+    return pairs, num_pairs_needed
+
+
+def train_ood_pred(
+    params,
+    ood_pred_model,
+    model,
+    all_pred_means,
+    all_pred_variances,
+    X,
+    unscaled_Y,
+    idx_at_each_iter,
+):
+    num_acks_done = len(all_pred_means)
+    idx_flatten = [idx for idx_list in idx_at_each_iter for idx in idx_list]
+    assert num_acks_done+1 == len(idx_at_each_iter), "%d == %d" % (len(all_preds), len(idx_at_each_iter))
+    assert num_acks_done == len(all_pred_variances)
+    optim = torch.optim.Adam(list(ood_pred_model.parameters()), lr=params.ood_pred_lr)
+
+    nll_list = []
+    with torch.no_grad():
+        for ack_iter in range(num_acks_done):
+            mean_preds = all_pred_means[ack_iter]
+            variance_preds = all_pred_variances[ack_iter]
+
+            train_Y = unscaled_Y[idx_flatten[:len(idx_at_each_iter[0])+params.ack_batch_size*ack_iter]]
+            if params.sigmoid_coeff > 0:
+                Y = utils.sigmoid_standardization(
+                        unscaled_Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+            else:
+                Y = utils.normal_standardization(
+                        unscaled_Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+
+            nll = model.get_per_point_nll(
+                    Y[idx_flatten[:len(idx_at_each_iter[0])+params.ack_batch_size*(ack_iter+1)]],
+                    mean_preds,
+                    variance_preds,
+                    )
+            nll_list += [nll]
+
+    for epoch_iter in range(params.ood_pred_epoch_iter):
+        pairs, _ = predict_ood_rand_pairs(
+                params.init_train_examples, 
+                params.ack_batch_size,
+                num_acks_done,
+                params.ood_pred_batch_size,
+                idx_at_each_iter,
+                )
+
+        assert len(pairs) == num_acks_done
+        loss = 0
+        for ack_iter in range(num_acks_done):
+
+            # TODO -- running on all idx. Could be made more efficient by running only on those selected by rand_pairs
+            # Otoh -- maybe rand_pairs should selected every idx at least once...
+            emb = ood_pred_model(X[idx_flatten])
+            pairs_emb = [emb[pairs[ack_iter][0]], emb[pairs[ack_iter][1]]]
+
+            nll_preds = torch.sum((pairs_emb[1]-pairs_emb[0])**2, dim=1)
+            assert nll_preds.shape[0] <= params.ood_pred_batch_size
+
+            nll = nll_list[ack_iter][pairs[ack_iter][1]]
+
+            loss += torch.mean((nll_preds-nll)**2)
+
+        loss /= num_acks_done
+
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+
+def predict_ood(
+    ood_pred_model,
+    seen_idx,
+    ack_idx,
+    X,
+):
+    seen_emb = ood_pred_model(X[seen_idx]) # (n, emb_size)
+    ack_emb = ood_pred_model(X[ack_idx]) # (m, emb_size)
+
+    dist_matrix = utils.sqdist(seen_emb.unsqueeze(1), ack_emb.unsqueeze(1))[:, :, 0] # (n, m)
+    nll_pred = torch.mean(dist_matrix, dim=0)
+
+    return nll_pred
 
 
 def metalearn(

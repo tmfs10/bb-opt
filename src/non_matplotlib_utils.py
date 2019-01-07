@@ -182,4 +182,88 @@ def make_batches(batch_size, N):
     return batches
 
 def randint(low, n):
-    return np.sort(np.random.choice(np.arange(low), size=(n,), replace=False))
+    return np.sort(np.random.choice(low, size=(n,), replace=False))
+
+
+def cumsub(x, l, minimum=0):
+    for i in range(len(l)):
+        x -= l[i]
+        if x < minimum:
+            break
+    return i
+
+
+def make_contiguous_idx(idx_list):
+    idx_to_new_map = {}
+    new_to_idx_map = []
+    new_idx_list = []
+    for idx in idx_list:
+        if idx not in idx_to_new_map:
+            idx_to_new_map[idx] = len(idx_to_new_map)
+            new_to_idx_map += [idx]
+        new_idx_list += [idx_to_new_map[idx]]
+    return new_idx_list, idx_to_new_map, new_to_idx_map
+
+
+def randpairs(m, h, num_pairs=1, l=0):
+    assert m >= l
+    assert m < h-1
+    assert num_pairs > 0
+    s1 = m-l+1
+    s2 = h-m
+    total_pairs = s1*s2
+    assert num_pairs <= total_pairs
+
+    rand_pair_ids = np.randint(total_pairs, size=num_pairs, replace=False)
+    pairs = [[], []]
+    for i in range(rand_pair_ids):
+        pair_id = rand_pair_ids[i]
+        first = pair_id//s1
+        second = pair_id % s1
+        assert second < s2
+        pairs[0] += [first]
+        pairs[1] += [second]
+    return pairs
+
+def sqdist(X1, X2=None, do_mean=False, collect=True):
+    if X2 is None:
+        """
+        X is of shape (n, d, k) or (n, d)
+        return is of shape (n, n, d)
+        """
+        if X1.ndimension() == 2:
+            return (X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2
+        else:
+            assert X1.ndimension() == 3, X1.shape
+            if not collect:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
+
+            if do_mean:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                sq = ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2)
+                #assert not ops.is_inf(sq)
+                #assert not ops.is_nan(sq)
+                #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
+                return sq.sum(-1)
+    else:
+        """
+        X1 is of shape (n, d, k) or (n, d)
+        X2 is of shape (m, d, k) or (m, d)
+        return is of shape (n, m, d)
+        """
+        assert X1.ndimension() == X2.ndimension()
+        if X1.ndimension() == 2:
+            # (n, d)
+            return (X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2
+        else:
+            # (n, d, k)
+            assert X1.ndimension() == 3
+            if not collect:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
+            if do_mean:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
+
+

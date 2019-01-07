@@ -50,6 +50,7 @@
 --report_metric_train_std False
 --empirical_stat std
 --empirical_stat_val_fraction 0.1
+--empirical_diversity_only False
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 
@@ -67,3 +68,9 @@
 --predict_stddev False
 --predict_nll False
 --predict_mmd False
+
+--predict_ood False
+--ood_pred_emb_size 10
+--ood_pred_lr 0.001
+--ood_pred_epoch_iter 100
+--ood_pred_batch_size 1000

@@ -187,6 +187,21 @@ class PredictInfoModels(nn.Module):
         return idx
 
 
+class OodPredModel(nn.Module):
+
+    def __init__(self, input_size, output_size):
+        super(OodPredModel, self).__init__()
+        self.net = nn.Sequential(
+                nn.Linear(input_size, 100),
+                nn.ReLU(),
+                nn.Linear(100, output_size),
+                nn.ReLU(),
+                )
+
+    def forward(self, x):
+        return self.net(x)
+
+
         
 def get_model_nn(
     prior_mean,
@@ -243,6 +258,27 @@ def get_model_nn_ensemble(
     return model
 
 
+def langevin_sampling(
+        loss_fn, 
+        uniform_sample_fn,
+        eta,
+        beta,
+        num_iter,
+        ):
+    x = uniform_sample_fn().requires_grad_()
+
+    optim = torch.Adam([x], lr=params.langevin_lr)
+    loss_fn.eval()
+    for i in range(num_iter):
+        loss = eta * loss_fn(x) + torch.sqrt(2*eta*1/beta*xi)
+
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return x
+
+
 def unseen_data_loss(
     model_ensemble,
     means,
@@ -259,6 +295,9 @@ def unseen_data_loss(
         if unseen_reg == "maxvar":
             var_mean = means_o.var(dim=0).mean()
             loss -= gamma*var_mean
+        elif unseen_reg == "maxvargeometric":
+            var_mean = torch.max(means_o.var(dim=0).mean(), means_o.new_tensor(0.99))
+            loss -= gamma/(1-var_mean)
         elif unseen_reg == "maxstd":
             std_mean = means_o.std(dim=0).mean()
             loss -= gamma*std_mean
