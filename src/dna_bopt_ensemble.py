@@ -180,6 +180,8 @@ for filename in filenames:
             predict_info_models=predict_info_models if params.predict_mi else None,
             )
 
+        cur_rmse = logging[1]['val']['rmse']
+
         if not params.log_all_train_iter:
             logging[0] = None
         torch.save({
@@ -327,6 +329,7 @@ for filename in filenames:
                                 ack_batch_size,
                                 skip_idx_cur,
                                 dbopt.train_ensemble,
+                                cur_rmse,
                                 )
                     elif "_ucb" in params.ack_fun:
                         cur_ack_idx = bopt.get_noninfo_ack(
@@ -480,6 +483,8 @@ for filename in filenames:
                         data_split_rng=data_split_rng,
                         predict_info_models=predict_info_models if params.predict_mi else None,
                         )
+
+                    cur_rmse = logging[1]['val']['rmse']
 
                     # ucb beta selection
                     if params.ucb_step >= 0.04:

@@ -25,7 +25,7 @@ from deep_ensemble_sid import (
     RandomNN,
 )
 
-def sample_uniform(out_size):
+def dna_sample_uniform(out_size):
     z = np.zeros((8*out_size,4))
     z[range(8*out_size),np.random.randint(4,size=8*out_size)] = 1
     out_data = torch.from_numpy(z).view((-1,32)).float().cuda()
@@ -259,18 +259,16 @@ def get_model_nn_ensemble(
 
 
 def langevin_sampling(
-        loss_fn, 
-        uniform_sample_fn,
-        eta,
-        beta,
-        num_iter,
+        x0,
+        params,
+        loss_fn, # this shld be the maxvar loss
         ):
-    x = uniform_sample_fn().requires_grad_()
+    x = x0.requires_grad_()
 
     optim = torch.Adam([x], lr=params.langevin_lr)
-    loss_fn.eval()
-    for i in range(num_iter):
-        loss = eta * loss_fn(x) + torch.sqrt(2*eta*1/beta*xi)
+    for i in range(params.langevin_num_iter):
+        loss = params.langevin_eta * loss_fn(x) + torch.sqrt(2*params.langevin_eta*1/params.langevin_beta*xi)
+        loss = loss.sum()
 
         optim.zero_grad()
         loss.backward()
@@ -282,14 +280,17 @@ def langevin_sampling(
 def unseen_data_loss(
     model_ensemble,
     means,
-    sample_input,
     bN,
     unseen_reg,
     gamma,
+    langevin_sampling=False,
+    uniform_sampler=None,
 ):
     loss = 0
     if unseen_reg != "normal":
-        out_data = sample_input(bN)
+        assert uniform_sampler is not None
+        out_data = uniform_sampler(bN)
+
         means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
         if unseen_reg == "maxvar":
@@ -623,11 +624,25 @@ def train_ensemble(
 
     time_since_last_best_epoch = 0
     logging = None
+
+    def loss_fn(
+        params,
+        model_ensemble,
+        bY,
+    ):
+        nll = model_ensemble.compute_negative_log_likelihood(
+                bY,
+                means, 
+                variances, 
+                return_mse=False)
+
+
     for epoch_iter in progress:
         if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
             break
         time_since_last_best_epoch += 1
-        model_ensemble.train()
+        if not params.langevin_sampling:
+            model_ensemble.train()
         for bi in range(num_batches):
             bs = batches[bi]
             be = batches[bi+1]
@@ -644,7 +659,7 @@ def train_ensemble(
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            nll = NNEnsemble.compute_negative_log_likelihood(
+            nll = model_ensemble.compute_negative_log_likelihood(
                     bY,
                     means, 
                     variances, 
@@ -675,10 +690,10 @@ def train_ensemble(
             loss += unseen_data_loss(
                     model_ensemble,
                     means,
-                    sample_uniform,
                     ood_data_batch_factor,
                     unseen_reg,
                     gamma,
+                    uniform_sampler=dna_sample_uniform,
                     )
 
             mean_across_data = means.mean(dim=1)

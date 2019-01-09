@@ -51,6 +51,10 @@
 --empirical_stat std
 --empirical_diversity_only False
 --empirical_stat_val_fraction 0.2
+--ucb_ekb_weighting 0.5
+--empirical_diversity_only False
+--ekb_use_median True
+--langevin_sampling False
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 

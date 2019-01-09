@@ -2021,6 +2021,7 @@ def get_empirical_kriging_believer_ack(
     ack_batch_size,
     skip_idx,
     train_fn,
+    cur_rmse,
 ):
     skip_idx = list(skip_idx)
     train_X, train_Y, X, Y = data
@@ -2059,6 +2060,7 @@ def get_empirical_kriging_believer_ack(
                 ack_idx_to_condense,
                 skip_idx,
                 ack_batch_size,
+                cur_rmse,
                 idx_to_monitor=None,
                 er_values=ucb_measure,
                 seen_batch_size=params.re_train_batch_size,
@@ -2942,6 +2944,7 @@ def get_empirical_condensation_ack3(
     idx_to_condense,
     seen_idx,
     ack_batch_size,
+    cur_rmse,
     idx_to_monitor=None,
     er_values=None,
     stat_fn = lambda preds, info : preds.std(dim=0),
@@ -2997,34 +3000,42 @@ def get_empirical_condensation_ack3(
         with torch.no_grad():
             corr += [means[:, :num_to_monitor].std(dim=0)]
             pred_matrix += [means[:, :num_to_monitor]]
+    ucb_measure = bY[:num_to_monitor] + params.ucb * preds[:, idx_to_condense].std(dim=0)
 
     pred_matrix = torch.cat(pred_matrix, dim=0)
     pred_corr_matrix = ops.corrcoef(pred_matrix.transpose(0, 1))
+
     pred_corr = pred_corr_matrix.mean(dim=1)
 
     corr = torch.stack(corr, dim=0)
     assert corr.shape[1] == num_to_monitor
     corr_matrix = ops.corrcoef(corr.transpose(0, 1))
-    corr = corr_matrix.mean(dim=1)
-
-    ucb_measure = bY[:num_to_monitor] + params.ucb * preds[:, idx_to_condense].std(dim=0)
-    if params.empirical_diversity_only:
-        stat_change_sort, stat_change_sort_idx = torch.sort(ucb_measure, descending=True)
+    if params.ekb_use_median:
+        corr = (corr_matrix * 0*ucb_measure.unsqueeze(0)).median(dim=1)[0]
     else:
-        stat_change_sort, stat_change_sort_idx = torch.sort(pred_corr + ucb_measure, descending=True)
+        corr = corr_matrix.mean(dim=1)
+
+    if params.empirical_diversity_only:
+        stat_to_sort = ucb_measure
+    else:
+        stat_to_sort = params.ucb_ekb_weighting*cur_rmse*corr + ucb_measure
+    stat_change_sort, stat_change_sort_idx = torch.sort(stat_to_sort, descending=True)
     print('stat_change_sort[:10]:', stat_change_sort[:10])
     stat_change_sort_idx = [k.item() for k in stat_change_sort_idx]
 
     #cur_ack_batch = [idx_to_condense[stat_change_sort_idx[i].item()] for i in range(ack_batch_size)]
     cur_ack_batch = []
+    cur_sort_idx = stat_change_sort_idx
     for i in range(len(stat_change_sort_idx)):
         if i == 0:
-            cur_ack_batch += [stat_change_sort_idx[i]]
+            cur_ack_batch += [stat_change_sort_idx[0]]
         else:
             #m = corr_matrix[stat_change_sort_idx[i], cur_ack_batch].max()
-            #if m >= 0.8:
+            #if m >= 0.9:
             #    continue
-            cur_ack_batch += [stat_change_sort_idx[i]]
+            cur_ack_batch += [cur_sort_idx[i]]
+            #cur_stat_to_sort = [1000]*(i+1) + [stat_to_sort[idx]-0.1*corr_matrix[idx, cur_ack_batch].mean() for idx in stat_change_sort_idx[i+1:]]
+            #_, cur_sort_idx = torch.sort(stat_to_sort.new_tensor(cur_stat_to_sort), descending=True)
         if len(cur_ack_batch) == ack_batch_size:
             break
     cur_ack_batch = [idx_to_condense[k] for k in cur_ack_batch]

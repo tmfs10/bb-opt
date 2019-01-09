@@ -141,6 +141,9 @@ def add_parse_args_nongrad(parser):
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')
     parser.add_argument('--diversity_coeff', type=float)
+    parser.add_argument('--ucb_ekb_weighting', type=float)
+    parser.add_argument('--langevin_sampling', type=str2bool)
+    parser.add_argument('--ekb_use_median', type=str2bool)
 
     parser.add_argument('--mves_greedy', type=str2bool, 
             help="use only first HSIC ordering, not sequential")
