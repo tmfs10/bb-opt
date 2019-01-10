@@ -260,17 +260,16 @@ def get_model_nn_ensemble(
 
 def langevin_sampling(
         params,
-        x0,
+        x,
         loss_fn, # this shld be the maxvar loss
         xi_dist,
         ):
-    x = x0
-
     for i in range(params.langevin_num_iter):
         x.requires_grad = True
         loss = loss_fn(x)
         loss = loss.sum()
         loss.backward()
+        #print(loss.item())
 
         xi = xi_dist.sample(sample_shape=torch.Size([x.shape[0]])).to(params.device).detach()
         x.requires_grad = False
@@ -669,12 +668,16 @@ def train_ensemble(
                     model_ensemble.eval()
                     num_features = out_data.shape[1]
                     xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
+                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                    #print('std before:', means_o.std(dim=0).mean().item())
                     out_data = langevin_sampling(
                             params,
                             out_data,
                             loss_fn_for_langevin,
                             xi_dist,
                             )
+                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                    #print('std after:', means_o.std(dim=0).mean().item())
                     model_ensemble.train()
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                 else:
@@ -706,6 +709,7 @@ def train_ensemble(
 
                 loss += old_stats['hsic']
 
+            optim.zero_grad()
             loss.backward()
             optim.step()
 

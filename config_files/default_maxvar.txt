@@ -57,9 +57,9 @@
 --final_train_choose_type val,nll,ind
 
 --langevin_sampling False
---langevin_num_iter 40
---langevin_lr 0.0001
---langevin_beta 100.0
+--langevin_num_iter 20
+--langevin_lr 10
+--langevin_beta 100000.0
 
 --ack_fun none_ucb
 --num_diversity 1
