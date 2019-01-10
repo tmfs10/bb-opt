@@ -5,7 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.stats import ttest_ind, combine_pvalues
+from scipy.stats import ttest_ind, ttest_rel, combine_pvalues
 
 
 def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False):
@@ -13,6 +13,7 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
             'logging',
             'ack_idx',
             'ack_labels',
+            'ack_rel_opt_value',
             'best_hsic',
             'ir_batch_cur',
             'ir_batch_cur_idx',
@@ -136,6 +137,7 @@ def prop_test(
     exp,
     ack_iter,
     pval_threshold=0.05,
+    paired_test=False,
 ):
     assert len(exp) == 2
     count = 0
@@ -159,7 +161,13 @@ def prop_test(
         if len(stat[0]) == 0 or len(stat[1]) == 0:
             break
 
-        ret = ttest_ind(stat[0], stat[1], equal_var=False)
+        if paired_test:
+            if len(stat[0]) != len(stat[1]):
+                continue
+            assert len(stat[0]) == len(stat[1]), "%s == %s" % (len(stat[0]), len(stat[1]))
+            ret = ttest_rel(stat[0], stat[1])
+        else:
+            ret = ttest_ind(stat[0], stat[1], equal_var=False)
         score = ret[0]
         pval = ret[1]
         if pval <= pval_threshold:

@@ -54,9 +54,13 @@
 --ucb_ekb_weighting 0.5
 --empirical_diversity_only False
 --ekb_use_median True
---langevin_sampling False
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
+
+--langevin_sampling False
+--langevin_num_iter 20
+--langevin_lr 0.01
+--langevin_beta 1.0
 
 --ack_fun none_ucb
 --num_diversity 1

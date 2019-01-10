@@ -259,113 +259,76 @@ def get_model_nn_ensemble(
 
 
 def langevin_sampling(
-        x0,
         params,
+        x0,
         loss_fn, # this shld be the maxvar loss
+        xi_dist,
         ):
-    x = x0.requires_grad_()
+    x = x0
 
-    optim = torch.Adam([x], lr=params.langevin_lr)
     for i in range(params.langevin_num_iter):
-        loss = params.langevin_eta * loss_fn(x) + torch.sqrt(2*params.langevin_eta*1/params.langevin_beta*xi)
+        x.requires_grad = True
+        loss = loss_fn(x)
         loss = loss.sum()
-
-        optim.zero_grad()
         loss.backward()
-        optim.step()
+
+        xi = xi_dist.sample(sample_shape=torch.Size([x.shape[0]])).to(params.device).detach()
+        x.requires_grad = False
+        x += -params.langevin_lr*x.grad + math.sqrt(2*params.langevin_lr*1./params.langevin_beta)*xi
+        x.grad.zero_()
 
     return x
 
 
 def unseen_data_loss(
-    model_ensemble,
-    means,
-    bN,
+    means_o,
+    variances_o,
     unseen_reg,
     gamma,
-    langevin_sampling=False,
-    uniform_sampler=None,
+    means=None,
 ):
     loss = 0
-    if unseen_reg != "normal":
-        assert uniform_sampler is not None
-        out_data = uniform_sampler(bN)
-
-        means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-
-        if unseen_reg == "maxvar":
-            var_mean = means_o.var(dim=0).mean()
-            loss -= gamma*var_mean
-        elif unseen_reg == "maxvargeometric":
-            var_mean = torch.max(means_o.var(dim=0).mean(), means_o.new_tensor(0.99))
-            loss -= gamma/(1-var_mean)
-        elif unseen_reg == "maxstd":
-            std_mean = means_o.std(dim=0).mean()
-            loss -= gamma*std_mean
-        elif unseen_reg == "maxstd_std":
-            std_std = means_o.std(dim=0).std()
-            loss -= gamma*(std_std)
-        elif unseen_reg == "maxstd_mean_std":
-            std_mean = means_o.std(dim=0).mean()
-            std_std = means_o.std(dim=0).std()
-            loss -= gamma*0.5*(std_mean + std_std)
-        elif unseen_reg == "maxinvar":
-            invar = means.var(dim=0).mean()
-            loss -= gamma*invar
-        elif unseen_reg == "maxinoutvar":
-            var_mean = means_o.var(dim=0).mean()
-            loss -= gamma/2*var_mean
-            invar = means.var(dim=0).mean()
-            loss -= gamma/2*invar
-        elif unseen_reg == "maxinstd":
-            instd = means.std(dim=0).mean()
-            loss -= gamma*instd
-        elif unseen_reg == "maxinoutstd":
-            std_mean = means_o.std(dim=0).mean()
-            instd = means.std(dim=0).mean()
-            loss -= gamma*0.5*(instd+std_mean)
-        elif unseen_reg == "maxout_minin":
-            var = means_o.var(dim=0).mean()
-            loss -= gamma*var
-            invar = means.var(dim=0).mean()
-            loss += gamma*invar
-        elif unseen_reg == "maxout_minin_std":
-            std = means_o.std(dim=0).mean()
-            loss -= gamma*std
-            instd = means.std(dim=0).mean()
-            loss += gamma*instd
-        elif unseen_reg == "maxdpp":
-            assert False, unseen_reg + " not implemented"
-            M = means_o
-            mean = M.mean(dim=0, keepdim=True)
-            std = M.std(dim=0, keepdim=True)
-            M -= mean
-            M /= std
-            n = means_o.shape[1]
-            covar = torch.mm(M.transpose(0, 1), M)/(n-1)
-            dpp = torch.logdet(covar)
-            print('covar:', covar.mean().item(), dpp.item(), torch.diag(covar).mean().item())
-            #loss -= gamma*dpp
-        elif unseen_reg == "mincorr":
-            corr = ops.corrcoef(means_o.transpose(0, 1))
-            corr_mean = torch.tril(corr, diagonal=-1).mean()
-            loss += gamma*corr_mean
-        elif unseen_reg == "maxhsic":
-            M = means_o
-            mean = M.mean(dim=0, keepdim=True)
-            std = M.std(dim=0, keepdim=True)
-            M = M-mean
-            M = M/std
-            kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
-            kernels = kernel_fn(M, M)  # shape (n=num_samples, n, 1)
-            total_hsic = hsic.total_hsic(kernels.repeat([1, 1, 2])).view(-1)
-            #print('hsic:', total_hsic.item())
-            loss -= gamma*total_hsic[0]
-        elif unseen_reg == "defmean":
-            nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
-            loss += gamma*nll
-        else:
-            assert False, unseen_reg + " not implemented"
+    assert unseen_reg != "normal"
+    if unseen_reg == "maxvar":
+        var_mean = means_o.var(dim=0).mean()
+        loss -= gamma*var_mean
+    elif unseen_reg == "maxvargeometric":
+        var_mean = torch.max(means_o.var(dim=0).mean(), means_o.new_tensor(0.99))
+        loss -= gamma/(1-var_mean)
+    elif unseen_reg == "maxstd":
+        std_mean = means_o.std(dim=0).mean()
+        loss -= gamma*std_mean
+    elif unseen_reg == "maxstd_std":
+        std_std = means_o.std(dim=0).std()
+        loss -= gamma*(std_std)
+    elif unseen_reg == "maxstd_mean_std":
+        std_mean = means_o.std(dim=0).mean()
+        std_std = means_o.std(dim=0).std()
+        loss -= gamma*0.5*(std_mean + std_std)
+    elif unseen_reg == "maxinvar":
+        assert means is not None
+        invar = means.var(dim=0).mean()
+        loss -= gamma*invar
+    elif unseen_reg == "maxinoutvar":
+        assert means is not None
+        var_mean = means_o.var(dim=0).mean()
+        loss -= gamma/2*var_mean
+        invar = means.var(dim=0).mean()
+        loss -= gamma/2*invar
+    elif unseen_reg == "maxinstd":
+        assert means is not None
+        instd = means.std(dim=0).mean()
+        loss -= gamma*instd
+    elif unseen_reg == "maxinoutstd":
+        assert means is not None
+        std_mean = means_o.std(dim=0).mean()
+        instd = means.std(dim=0).mean()
+        loss -= gamma*0.5*(instd+std_mean)
+    elif unseen_reg == "defmean":
+        nll = NNEnsemble.compute_negative_log_likelihood(default_mean, means_o, variances_o)
+        loss += gamma*nll
+    else:
+        assert False, unseen_reg + " not implemented"
 
     return loss
 
@@ -625,24 +588,37 @@ def train_ensemble(
     time_since_last_best_epoch = 0
     logging = None
 
-    def loss_fn(
-        params,
-        model_ensemble,
-        bY,
-    ):
-        nll = model_ensemble.compute_negative_log_likelihood(
-                bY,
-                means, 
-                variances, 
-                return_mse=False)
+    def loss_fn_for_langevin(X):
+        unseen_reg_langevin_mapping = {
+                "maxvar" : "maxvar",
+                "maxinoutvar" : "maxvar",
+                "maxvargeometric" : "maxvargeometric",
+                "maxstd" : "maxstd",
+                "maxinoutstd" : "maxstd",
+                "maxstd_std" : "maxstd_std",
+                "maxstd_mean_std" : "maxstd_mean_std",
+                }
+
+        means_o, variances_o = model_ensemble(X)
+
+        assert unseen_reg in unseen_reg_langevin_mapping
+        var_sum = means_o.var(dim=0).sum()
+        loss = var_sum
+        #loss = -unseen_data_loss(
+        #        means_o,
+        #        variances_o,
+        #        unseen_reg_langevin_mapping[unseen_reg],
+        #        gamma,
+        #        means=None,
+        #        )
+        return loss
 
 
     for epoch_iter in progress:
         if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
             break
         time_since_last_best_epoch += 1
-        if not params.langevin_sampling:
-            model_ensemble.train()
+        model_ensemble.train()
         for bi in range(num_batches):
             bs = batches[bi]
             be = batches[bi+1]
@@ -653,7 +629,7 @@ def train_ensemble(
             bX = train_X[bs:be]
             bY = train_Y[bs:be]
 
-            ood_data_batch_factor = int(math.ceil(bN*params.ood_data_batch_factor))
+            ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
 
             means, variances = model_ensemble(bX)
 
@@ -687,14 +663,30 @@ def train_ensemble(
             rmse = torch.sqrt(torch.mean((means-bY)**2)).item()
             train_rmses += [rmse]
 
-            loss += unseen_data_loss(
-                    model_ensemble,
-                    means,
-                    ood_data_batch_factor,
-                    unseen_reg,
-                    gamma,
-                    uniform_sampler=dna_sample_uniform,
-                    )
+            if unseen_reg != "normal":
+                out_data = dna_sample_uniform(ood_data_batch_size)
+                if params.langevin_sampling and gamma > 0:
+                    model_ensemble.eval()
+                    num_features = out_data.shape[1]
+                    xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
+                    out_data = langevin_sampling(
+                            params,
+                            out_data,
+                            loss_fn_for_langevin,
+                            xi_dist,
+                            )
+                    model_ensemble.train()
+                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                else:
+                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+
+                loss += unseen_data_loss(
+                        means_o,
+                        variances_o,
+                        unseen_reg,
+                        gamma,
+                        means=means,
+                        )
 
             mean_across_data = means.mean(dim=1)
             mean_diff = mean_across_data[:-1]-mean_across_data[1:]
@@ -974,6 +966,7 @@ def hyper_param_train(
 
     assert best_epoch_iter is not None
     assert best_gamma is not None
+    print('best gamma:', best_gamma)
 
     if params.combine_train_val:
         assert best_epoch_iter >= 0
@@ -993,6 +986,7 @@ def hyper_param_train(
                 predict_info_models=predict_info_models,
                 )
     elif params.hyper_search_choose_type != params.final_train_choose_type:
+        assert False, "for paper we aren't doing this option"
         optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
         logging, data_split_rng2, _, _ = train_ensemble(
                 params,
@@ -1012,6 +1006,7 @@ def hyper_param_train(
                 ood_val_frac=params.ood_val_frac,
                 )
     else:
+        assert False, "for paper we aren't doing this option"
         assert best_model is not None
         model = best_model
 
