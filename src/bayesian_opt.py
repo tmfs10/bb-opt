@@ -2179,9 +2179,9 @@ def get_kriging_believer_ack(
                     train_Y.std(),
                     exp=torch.exp)
 
-        #fake_ack_idx = ack_idx
+        fake_ack_idx = ack_idx
         #fake_ack_idx += [ucb_sort_idx[random.randint(1, num_candidates-1)].item()]
-        fake_ack_idx += [std_sort_idx[0].item()]
+        #fake_ack_idx += [std_sort_idx[0].item()]
         bX = torch.cat([train_X, X[fake_ack_idx]], dim=0)
         bY = torch.cat([bY, er[fake_ack_idx]], dim=0)
 
