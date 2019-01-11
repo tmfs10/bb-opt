@@ -17,6 +17,7 @@ from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.bo_model import BOModel
+from bb_opt.src.networks.wide_resnet import Wide_ResNet
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -44,7 +45,8 @@ class NN(torch.nn.Module):
         hidden = self.non_linearity(self.hidden(x))
         output = self.output(hidden)
         mean =torch.sigmoid(output[:,0])
-        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        #variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        variance =torch.sigmoid(output[:,1])*0.01+self.min_variance
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
@@ -73,7 +75,6 @@ class NN2(torch.nn.Module):
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
-
 
 class RandomNN(torch.nn.Module):
     """
@@ -226,6 +227,18 @@ class NNEnsemble(BOModel, torch.nn.Module):
         variance = (variances + means ** 2).mean(dim=0) - mean ** 2
         return mean, variance
 
+    def compute_ind_negative_log_likelihood(
+        labels, means, variances, return_mse: bool = False
+    ):  
+        mse = (labels - means) ** 2
+        negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
+        negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
+
+        if return_mse:
+            mse = mse.mean(dim=-1).sum()
+            return negative_log_likelihood, mse
+        return negative_log_likelihood
+
     @staticmethod
     def compute_negative_log_likelihood(
         labels, means, variances, return_mse: bool = False
@@ -268,6 +281,26 @@ class NNEnsemble(BOModel, torch.nn.Module):
         return negative_log_likelihood
 
     @classmethod
+    def get_model_resnet(
+        cls,
+        n_inputs: int,
+        batch_size: int = 200,
+        n_models: int = 5,
+        depth: int = 16,
+        widen_factor: int=8,
+        dropout: float=0.3,
+        device=None,
+        extra_random: bool = False,
+    ):
+        device = device or "cpu"
+
+        model_kwargs = {"depth": depth, "widen_factor": widen_factor,"dropout_rate":dropout}#args.depth, args.widen_factor, args.dropout, num_classes
+        model = cls(   
+                    n_models, Wide_ResNet, model_kwargs, adversarial_epsilon=None
+                ).to(device)
+        return model
+
+    @classmethod
     def get_model(
         cls,
         n_inputs: int,
@@ -277,11 +310,11 @@ class NNEnsemble(BOModel, torch.nn.Module):
         adversarial_epsilon: Optional = None,
         device=None,
         nonlinearity_names: Sequence[str] = None,
-        extra_random: bool = True,
+        extra_random: bool = False,
         single_layer:bool = True
     ):
         device = device or "cpu"
-
+	
         if not extra_random:
             model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden}
             if single_layer:
@@ -485,6 +518,28 @@ class NNEnsemble(BOModel, torch.nn.Module):
 
         save_checkpoint(fname, self, optimizer)
 
+    def save_model2(self, fname: str, optimizer: Optional = None) -> None:
+        """
+        WARNING - saving/loading an ensemble using this function assumes that each model
+        in the ensemble has the same number of hidden units and that the ensemble is
+        constructable by `NNEnsemble.get_model`.
+
+        :param fname: path to .pth file to which to save weights
+        A .pkl file with the same base name/path will be used to save the
+        nonlinearity names and a few other variables.
+        """
+
+        kwargs = {
+            # all have to take the same input shape
+            "n_models": self.n_models,
+            # assumption: all have same hidden size; true in the models I use (so far)
+        }
+
+        with open(fname.replace(".pth", ".pkl"), "wb") as f:
+            pickle.dump(kwargs, f)
+
+        save_checkpoint(fname, self, optimizer)
+
     @classmethod
     def load_model(
         cls: Type[_NNEnsemble],
@@ -523,6 +578,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
             adversarial_epsilon,
             device,
             nonlinearity_names,
+            single_layer=True
         )
 
         try:
