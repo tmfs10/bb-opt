@@ -1,4 +1,5 @@
 import os
+import random
 import copy
 import gc
 import sys
@@ -2054,6 +2055,7 @@ def get_empirical_kriging_believer_ack(
                 X,
                 Y,
                 pred_means,
+                pred_vars,
                 model,
                 params.re_train_lr,
                 params.re_train_l2,
@@ -2117,6 +2119,7 @@ def get_kriging_believer_ack(
     skip_idx = list(skip_idx)
     train_X, train_Y, X, Y = data
     ack_idx = []
+    fake_ack_idx = []
 
     model = copy.deepcopy(model)
     optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
@@ -2126,9 +2129,11 @@ def get_kriging_believer_ack(
             er = pred_means.mean(dim=0).view(-1)
             std = pred_means.std(dim=0).view(-1)
             ucb_measure = er + params.ucb*std
-            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
-            max_idx = torch.argmax(ucb_measure).item()
+            ucb_measure[skip_idx + ack_idx + fake_ack_idx] = ucb_measure.min()
+            ucb_sort_idx = torch.sort(ucb_measure, descending=True)[1]
+            max_idx = ucb_sort_idx[0].item()
             ack_idx += [max_idx]
+            num_candidates = X.shape[0] - (len(skip_idx) + len(ack_idx))
 
         if len(ack_idx) >= ack_batch_size:
             break
@@ -2146,8 +2151,10 @@ def get_kriging_believer_ack(
                     train_Y.std(),
                     exp=torch.exp)
 
-        bX = torch.cat([train_X, X[ack_idx]], dim=0)
-        bY = torch.cat([bY, er[ack_idx]], dim=0)
+        #fake_ack_idx = ack_idx
+        fake_ack_idx += [ucb_sort_idx[random.randint(1, num_candidates-1)].item()]
+        bX = torch.cat([train_X, X[fake_ack_idx]], dim=0)
+        bY = torch.cat([bY, er[fake_ack_idx]], dim=0)
 
         print('batch_iter', batch_iter)
         num_iter = 20
@@ -2937,8 +2944,9 @@ def get_empirical_condensation_ack3(
     params,
     X,
     Y,
-    preds,
-    model,
+    pred_means,
+    pred_vars,
+    orig_model,
     lr,
     l2,
     idx_to_condense,
@@ -2947,7 +2955,7 @@ def get_empirical_condensation_ack3(
     cur_rmse,
     idx_to_monitor=None,
     er_values=None,
-    stat_fn = lambda preds, info : preds.std(dim=0),
+    stat_fn = lambda pred_means, info : pred_means.std(dim=0),
     stat_fn_info = None,
     predict_info_model=None,
     seen_batch_size=0,
@@ -2955,10 +2963,8 @@ def get_empirical_condensation_ack3(
 ):
     assert len(set(idx_to_condense).intersection(seen_idx)) == 0
 
-    model = copy.deepcopy(model)
     seen_idx = list(seen_idx)
-    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-    stat = stat_fn(preds[:, idx_to_monitor], stat_fn_info)
+    stat = stat_fn(pred_means[:, idx_to_monitor], stat_fn_info)
 
     bX = X[idx_to_condense + seen_idx]
 
@@ -2966,7 +2972,6 @@ def get_empirical_condensation_ack3(
         bX = bX.unsqueeze(dim=0)
 
     bY = Y[seen_idx] 
-
     if params.sigmoid_coeff > 0:
         bY = utils.sigmoid_standardization(
                 bY,
@@ -2979,28 +2984,45 @@ def get_empirical_condensation_ack3(
                 bY.mean(),
                 bY.std(),
                 exp=torch.exp)
-    bY = torch.cat([preds[:, idx_to_condense].mean(dim=0), bY], dim=0)
 
     corr = []
     num_to_monitor = len(idx_to_condense)
-    num_iter = 20
     pred_matrix = []
-    for i in range(num_iter):
-        means, variances = model(bX)
-        nll = model.compute_negative_log_likelihood(
-            bY,
-            means,
-            variances,
-            return_mse=False,
-        )
-        optim.zero_grad()
-        nll.backward()
-        optim.step()
+
+    with torch.no_grad():
+        old_std = torch.sqrt(pred_vars).mean().item()
+        cur_rmse = max(cur_rmse-old_std, 0.)
+        old_idx_to_condense_std = pred_means[:, idx_to_condense].std(dim=0)
+        old_idx_to_condense_means = pred_means[:, idx_to_condense].mean(dim=0)
+        old_rmse = torch.sqrt(((pred_means[:, seen_idx].mean(dim=0)-bY)**2).mean())
+    for ack_point_iter in range(num_to_monitor):
+        ack_point = idx_to_condense[ack_point_iter]
+        num_iter = 4
+        model = copy.deepcopy(orig_model)
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+
+        bX2 = X[[ack_point] + seen_idx]
+        bY2 = torch.cat([pred_means[:, ack_point].mean(dim=0).unsqueeze(0), bY], dim=0)
+        for i in range(num_iter):
+            means, variances = model(bX2)
+            nll = model.compute_negative_log_likelihood(
+                bY2,
+                means,
+                variances,
+                return_mse=False,
+            )
+            optim.zero_grad()
+            nll.backward()
+            optim.step()
 
         with torch.no_grad():
-            corr += [means[:, :num_to_monitor].std(dim=0)]
-            pred_matrix += [means[:, :num_to_monitor]]
-    ucb_measure = bY[:num_to_monitor] + params.ucb * preds[:, idx_to_condense].std(dim=0)
+            means, variances = model(bX)
+            #corr += [old_idx_to_condense_std-means[:, :num_to_monitor]:.std(dim=0)]
+            #corr += [-old_idx_to_condense_std.mean()+means[:, :num_to_monitor].std(dim=0).mean()]
+            new_rmse = torch.sqrt(((means[:, num_to_monitor:].mean(dim=0)-bY)**2).mean())
+            corr += [torch.abs(old_rmse-new_rmse)]
+            pred_matrix += [means]
+    ucb_measure = old_idx_to_condense_means + params.ucb * old_idx_to_condense_std
 
     pred_matrix = torch.cat(pred_matrix, dim=0)
     pred_corr_matrix = ops.corrcoef(pred_matrix.transpose(0, 1))
@@ -3008,18 +3030,27 @@ def get_empirical_condensation_ack3(
     pred_corr = pred_corr_matrix.mean(dim=1)
 
     corr = torch.stack(corr, dim=0)
-    assert corr.shape[1] == num_to_monitor
-    corr_matrix = ops.corrcoef(corr.transpose(0, 1))
+    assert corr.shape[0] == num_to_monitor
+    #corr_matrix = ops.corrcoef(corr.transpose(0, 1))
+
+    """
     if params.ekb_use_median:
-        corr = (corr_matrix * 0*ucb_measure.unsqueeze(0)).median(dim=1)[0]
+        #corr = corr_matrix.median(dim=1)[0]
+        corr = corr.median(dim=1)[0]
+        assert corr.shape[0] == num_to_monitor
     else:
-        corr = corr_matrix.mean(dim=1)
+        #corr = corr_matrix.mean(dim=1)
+        corr = corr.mean(dim=1)
+        assert corr.shape[0] == num_to_monitor
+    """
 
     if params.empirical_diversity_only:
         stat_to_sort = ucb_measure
     else:
-        stat_to_sort = params.ucb_ekb_weighting*cur_rmse*corr + ucb_measure
-    stat_change_sort, stat_change_sort_idx = torch.sort(stat_to_sort, descending=True)
+        #corr = (corr-corr.mean())/corr.std()
+        #stat_to_sort = params.ucb_ekb_weighting*cur_rmse*corr + ucb_measure
+        stat_to_sort = corr
+    stat_change_sort, stat_change_sort_idx = torch.sort(stat_to_sort, descending=False)
     print('stat_change_sort[:10]:', stat_change_sort[:10])
     stat_change_sort_idx = [k.item() for k in stat_change_sort_idx]
 

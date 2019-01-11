@@ -58,7 +58,7 @@
 
 --langevin_sampling False
 --langevin_num_iter 20
---langevin_lr 10
+--langevin_lr 30
 --langevin_beta 100000.0
 
 --ack_fun none_ucb

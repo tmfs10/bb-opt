@@ -77,8 +77,8 @@ for filename in filenames:
     if not os.path.exists(filedir):
         continue
     print('doing file:', filedir)
-    inputs = np.load(filedir+"inputs.npy")
-    labels = np.load(filedir+"labels.npy")
+    inputs = np.load(filedir+"inputs.npy").astype(np.float32)
+    labels = np.load(filedir+"labels.npy").astype(np.float32)
 
     if params.take_log:
         labels = np.log(labels)
