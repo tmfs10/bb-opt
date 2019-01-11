@@ -184,6 +184,39 @@ def plot_calibration(
     ax.set_xlabel("CDF Prob Value")
     ax.legend()
 
+def plot_calibration2(
+    preds,
+    labels,
+    axis,
+    plabel,
+    gaussian_approx: bool = False,
+):
+    conf_levels = np.arange(0.01, 1.01, 0.01)
+
+    if gaussian_approx:
+        pred_means = preds.mean(0)
+        pred_stds = preds.std(0)
+
+    observed_conf_levels = []
+    for conf_level in conf_levels:
+        if gaussian_approx:
+            lower_bound, upper_bound = get_confidence_interval_gaussian(
+                pred_means, pred_stds, conf_level=conf_level
+            )
+        else:
+            lower_bound, upper_bound = get_confidence_interval_ecdf(preds, conf_level)
+
+        observed_conf_levels.append(
+            ((lower_bound <= labels) & (labels <= upper_bound)).mean()
+        )
+
+    axix.scatter(conf_levels, observed_conf_levels, s=5)
+    axix.plot(conf_levels, observed_conf_levels, label=plabel)
+
+    ax.set_xlabel("Expected Confidence Level")
+    ax.set_ylabel("Observed Confidence Level")
+    ax.set_title("Calibration Plot")
+    ax.legend()
 
 def plot_means_stds(pred_means, pred_stds):
     fig, axes = plt.subplots(ncols=2, figsize=(8, 3))
@@ -516,3 +549,50 @@ def diagnostic_plots(
         plot_nn_dist_mse_std(
             train_hidden_reprs, hidden_reprs, pred_means, pred_stds, labels, "l2"
         )
+
+def diagnostic_plots2(
+    inputs: np.ndarray,
+    preds: np.ndarray,
+    labels: np.ndarray,
+    cred_level: float,
+    guide: Optional = None,
+    gaussian_approx: bool = False,
+    plot_list: Sequence[str] = (),
+    n_subsample: int = 0,
+    input_dist_metric: str = "euclidean",
+):
+    """
+    Make several plots to analyze the uncertainty estimates from a model.
+
+    Many references are made to conf levels in this file - these should all actually be
+    credibility levels because the intervals are credible intervals, not confidence intervals.
+
+    :param inputs: shape n_inputs x n_features
+    :param train_inputs: shape n_train_inputs x n_features; used to calculate the distance
+      between `inputs` and `train_inputs` to see how this relates to the uncertainty
+    :param preds: shape n_samples x n_inputs
+    :param labels: shape n_inputs
+    :param cred_level: the credibility level for the interval to plot (e.g. a 95% credible
+      interval; enter 0.95). The credible interval will be centered on the mean.
+    :param guide: guide for BNN; if given, additional plots are made using distances in the
+      representation space instead of the input space (the expected represetation is used)
+    :param gaussian_approx: whether to approximate the marginal distributions as Gaussian to
+      compute the credible intervals (otherwise the empirical CDFs are used)
+    :param plot_list: list of plots to include (not yet supported)
+    :param n_subsample: number of points to use for `plot_preds_with_conf_intervals` (0 means all)
+    :param input_dist_metric: distance metric to use on the input space when computing
+      distances between `train_inputs` and `inputs`
+    """
+
+    pred_means = preds.mean(0)
+    pred_stds = preds.std(0)
+
+    plot_calibration(
+        preds,
+        labels,
+        calibrate=False,
+        plot_cdf_pdf=True,
+        gaussian_approx=gaussian_approx,
+    )
+    plot_std_vs_mse(pred_means, pred_stds, labels)
+
