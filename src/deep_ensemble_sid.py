@@ -261,6 +261,17 @@ class NNEnsemble(torch.nn.Module):
 
         return self.combine_means_variances(means, variances)
 
+
+    def bagging_forward(self, x, num_to_bag=4):
+        nn_idx = np.random.choice(len(self.models), size=4, replace=False)
+        models = [self.models[i] for i in nn_idx]
+
+        means, variances = list(zip(*[models[i](x) for i in range(len(models))]))
+        means, variances = torch.stack(means), torch.stack(variances)
+
+        return means, variances
+
+
     def predict(self, inputs: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
             pred_means, pred_vars = self(inputs)

@@ -321,6 +321,14 @@ for filename in filenames:
                                 skip_idx_cur,
                                 dbopt.train_ensemble,
                                 )
+                    elif params.ack_fun == "bagging_er":
+                        cur_ack_idx = bopt.get_bagging_er(
+                                params,
+                                cur_model,
+                                [train_X_cur, train_Y_cur, X, Y],
+                                ack_batch_size,
+                                skip_idx_cur,
+                                )
                     elif params.ack_fun == "empirical_kb":
                         cur_ack_idx = bopt.get_empirical_kriging_believer_ack(
                                 params,

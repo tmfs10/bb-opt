@@ -2108,6 +2108,29 @@ def get_empirical_kriging_believer_ack(
     return ack_idx
 
 
+def get_bagging_er(
+    params,
+    model,
+    data,
+    ack_batch_size,
+    skip_idx,
+):
+    train_X, train_Y, X, Y = data
+    skip_idx = list(skip_idx)
+    cur_ack_idx = []
+    for ack_batch_iter in range(ack_batch_size):
+        pred_means, _ = model.bagging_forward(X, num_to_bag=4)
+        er = pred_means.mean(dim=0).view(-1)
+        std = pred_means.std(dim=0).view(-1)
+        ucb_measure = er + params.ucb*std
+        ucb_measure[skip_idx + cur_ack_idx] = ucb_measure.min()
+
+        max_idx = torch.argmax(ucb_measure)[0].item()
+        cur_ack_idx += [max_idx]
+
+    return cur_ack_idx
+
+
 def get_kriging_believer_ack(
     params,
     model,
@@ -2129,7 +2152,12 @@ def get_kriging_believer_ack(
             er = pred_means.mean(dim=0).view(-1)
             std = pred_means.std(dim=0).view(-1)
             ucb_measure = er + params.ucb*std
-            ucb_measure[skip_idx + ack_idx + fake_ack_idx] = ucb_measure.min()
+            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+
+            temp = list(set(ack_idx + fake_ack_idx))
+            std[skip_idx + fake_ack_idx] = std.min()
+            std_sort_idx = torch.sort(std, descending=True)[1]
+
             ucb_sort_idx = torch.sort(ucb_measure, descending=True)[1]
             max_idx = ucb_sort_idx[0].item()
             ack_idx += [max_idx]
@@ -2152,7 +2180,8 @@ def get_kriging_believer_ack(
                     exp=torch.exp)
 
         #fake_ack_idx = ack_idx
-        fake_ack_idx += [ucb_sort_idx[random.randint(1, num_candidates-1)].item()]
+        #fake_ack_idx += [ucb_sort_idx[random.randint(1, num_candidates-1)].item()]
+        fake_ack_idx += [std_sort_idx[0].item()]
         bX = torch.cat([train_X, X[fake_ack_idx]], dim=0)
         bY = torch.cat([bY, er[fake_ack_idx]], dim=0)
 
@@ -2995,6 +3024,7 @@ def get_empirical_condensation_ack3(
         old_idx_to_condense_std = pred_means[:, idx_to_condense].std(dim=0)
         old_idx_to_condense_means = pred_means[:, idx_to_condense].mean(dim=0)
         old_rmse = torch.sqrt(((pred_means[:, seen_idx].mean(dim=0)-bY)**2).mean())
+
     for ack_point_iter in range(num_to_monitor):
         ack_point = idx_to_condense[ack_point_iter]
         num_iter = 4
@@ -3003,6 +3033,7 @@ def get_empirical_condensation_ack3(
 
         bX2 = X[[ack_point] + seen_idx]
         bY2 = torch.cat([pred_means[:, ack_point].mean(dim=0).unsqueeze(0), bY], dim=0)
+        temp = []
         for i in range(num_iter):
             means, variances = model(bX2)
             nll = model.compute_negative_log_likelihood(
@@ -3015,19 +3046,27 @@ def get_empirical_condensation_ack3(
             nll.backward()
             optim.step()
 
+            with torch.no_grad():
+                means, _ = model(X)
+                temp  += [torch.max(means, dim=1)[0].std()]
+
         with torch.no_grad():
-            means, variances = model(bX)
+            #means, variances = model(bX)
             #corr += [old_idx_to_condense_std-means[:, :num_to_monitor]:.std(dim=0)]
             #corr += [-old_idx_to_condense_std.mean()+means[:, :num_to_monitor].std(dim=0).mean()]
-            new_rmse = torch.sqrt(((means[:, num_to_monitor:].mean(dim=0)-bY)**2).mean())
-            corr += [torch.abs(old_rmse-new_rmse)]
-            pred_matrix += [means]
+            #new_rmse = torch.sqrt(((means[:, num_to_monitor:].mean(dim=0)-bY)**2).mean())
+            #corr += [torch.abs(old_rmse-new_rmse)]
+            #pred_matrix += [means]
+            #means, _ = model(X)
+            #max_vals_std = torch.max(means, dim=1)[0].std()
+            #corr += [max_vals_std]
+            corr += [torch.mean(torch.tensor(temp, device=params.device))]
     ucb_measure = old_idx_to_condense_means + params.ucb * old_idx_to_condense_std
 
-    pred_matrix = torch.cat(pred_matrix, dim=0)
-    pred_corr_matrix = ops.corrcoef(pred_matrix.transpose(0, 1))
+    #pred_matrix = torch.cat(pred_matrix, dim=0)
+    #pred_corr_matrix = ops.corrcoef(pred_matrix.transpose(0, 1))
 
-    pred_corr = pred_corr_matrix.mean(dim=1)
+    #pred_corr = pred_corr_matrix.mean(dim=1)
 
     corr = torch.stack(corr, dim=0)
     assert corr.shape[0] == num_to_monitor
@@ -3047,10 +3086,10 @@ def get_empirical_condensation_ack3(
     if params.empirical_diversity_only:
         stat_to_sort = ucb_measure
     else:
-        #corr = (corr-corr.mean())/corr.std()
-        #stat_to_sort = params.ucb_ekb_weighting*cur_rmse*corr + ucb_measure
-        stat_to_sort = corr
-    stat_change_sort, stat_change_sort_idx = torch.sort(stat_to_sort, descending=False)
+        corr = (corr-corr.mean())/(corr.std()+0.0001)
+        stat_to_sort = -params.ucb_ekb_weighting*cur_rmse*corr + ucb_measure
+        #stat_to_sort = corr + ucb_measure
+    stat_change_sort, stat_change_sort_idx = torch.sort(stat_to_sort, descending=True)
     print('stat_change_sort[:10]:', stat_change_sort[:10])
     stat_change_sort_idx = [k.item() for k in stat_change_sort_idx]
 
