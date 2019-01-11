@@ -119,11 +119,84 @@ def random_points(bounds: np.ndarray, ndim: int, n_points: int) -> np.ndarray:
     )
     return points
 
+
+<<<<<<< HEAD
+def get_path(*path_segments):
+    return os.path.realpath(os.path.join(*[str(segment) for segment in path_segments]))
+
+
+def logp(smiles_mol, add_hs=False):
+    m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
+    return Descriptors.MolLogP(m, add_hs)
+
+
+def qed(smiles_mol):
+    m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
+    return QED.qed(m)
+
+
+def sas(smiles_mol):
+    m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return -100
+    return sascorer.calculateScore(m)
+
+
+def all_scores(smiles_mol, add_hs=False):
+    m = Chem.MolFromSmiles(smiles_mol)
+    if m is None:
+        return [-100, -100, -100]
+    return [Descriptors.MolLogP(m, add_hs), QED.qed(m), sascorer.calculateScore(m)]
+
+
+def train_val_test_split(n, split, shuffle=True):
+    if type(n) == int:
+        idx = np.arange(n)
+    else:
+        idx = n
+
+    if shuffle:
+        np.random.shuffle(idx)
+
+    if split[0] < 1:
+        assert sum(split) <= 1.
+        train_end = int(n * split[0])
+        val_end = train_end + int(n * split[1])
+    else:
+        train_end = split[0]
+        val_end = train_end + split[1]
+
+    return idx[:train_end], idx[train_end:val_end], idx[val_end:]
+
+
+def save_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
+    os.makedirs(os.path.dirname(fname), exist_ok=True)
+
+    checkpoint = {"model_state": model.state_dict()}
+    if optimizer:
+        checkpoint["optimizer_state"] = optimizer.state_dict()
+
+    torch.save(checkpoint, fname)
+
+
+def load_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
+    checkpoint = torch.load(fname,map_location='cpu')
+    model.load_state_dict(checkpoint["model_state"])
+    model.eval()
+    if optimizer:
+        optimizer.load_state_dict(checkpoint["optimizer_state"])
+=======
 get_path = non_matplotlib_utils.get_path
 logp = non_matplotlib_utils.logp
 qed = non_matplotlib_utils.qed
 sas = non_matplotlib_utils.sas
 all_scores = non_matplotlib_utils.all_scores
+>>>>>>> fd1c8f0a8b88c4ece83c1aa9eaca6f078ee9ef25
+
 train_val_test_split = non_matplotlib_utils.train_val_test_split
 save_checkpoint = non_matplotlib_utils.save_checkpoint
 load_checkpoint = non_matplotlib_utils.load_checkpoint
