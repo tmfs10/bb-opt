@@ -11,11 +11,13 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
+from os import makedirs
+from os.path import dirname
 from torch.nn import Linear, ReLU, Softplus
 from torch.utils.data import TensorDataset, DataLoader
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
-from bb_opt.src.utils import save_checkpoint, load_checkpoint
+from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.bo_model import BOModel
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
@@ -130,6 +132,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
             ]
         )
         self.adversarial_epsilon = adversarial_epsilon
+        self.optimizer = None
 
     def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True):
         if y is not None and self.adversarial_epsilon is not None:
@@ -159,12 +162,13 @@ class NNEnsemble(BOModel, torch.nn.Module):
 
         return self.combine_means_variances(means, variances)
 
-    def predict(self, inputs: torch.Tensor) -> torch.Tensor:
+    def predict(self, inputs: Union[np.ndarray, torch.Tensor]) -> np.ndarray:
+        inputs = self._to_tensor(inputs)
+
         with torch.no_grad():
             pred_means, pred_vars = self(inputs)
 
-        pred_means = pred_means.cpu()
-        return pred_means
+        return pred_means.cpu().numpy()
 
     @staticmethod
     def combine_means_variances(
@@ -216,7 +220,6 @@ class NNEnsemble(BOModel, torch.nn.Module):
     def get_model(
         cls,
         n_inputs: int,
-        batch_size: int = 200,
         n_models: int = 5,
         n_hidden: int = 100,
         adversarial_epsilon: Optional = None,
@@ -231,6 +234,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
             model = cls(
                 n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon
             ).to(device)
+            model.device = device
             return model
 
         def gelu(x):
@@ -294,6 +298,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
         model = cls(
             n_models, RandomNN, model_kwargs(), adversarial_epsilon=adversarial_epsilon
         ).to(device)
+        model.device = device
         return model
 
     def train_model(
@@ -301,19 +306,29 @@ class NNEnsemble(BOModel, torch.nn.Module):
         inputs,
         labels,
         n_epochs,
-        batch_size,
-        optimizer_kwargs: Optional[Dict] = None,
+        batch_size: int = 128,
+        optimizer_func: Optional[Callable] = None,
     ):
-        optimizer_kwargs = optimizer_kwargs or {}
+        """
+        :param optimizer_func: function which takes model.parameters() as input and
+          returns an optimizer for them. If None, Adam is used.
+        """
+        inputs = self._to_tensor(inputs)
+        labels = self._to_tensor(labels)
+
         data = TensorDataset(inputs, labels)
         loader = DataLoader(data, batch_size=batch_size, shuffle=True)
-        optimizer = torch.optim.Adam(self.parameters(), **optimizer_kwargs)
+
+        if optimizer_func:
+            self.optimizer = optimizer_func(self.parameters())
+        else:
+            self.optimizer = self.optimizer or torch.optim.Adam(self.parameters())
 
         self.train()
         for epoch in range(n_epochs):
             for batch in loader:
                 inputs, labels = batch
-                optimizer.zero_grad()
+                self.optimizer.zero_grad()
 
                 means, variances = self(inputs)
 
@@ -321,18 +336,18 @@ class NNEnsemble(BOModel, torch.nn.Module):
                     labels, means, variances
                 )
                 negative_log_likelihood.backward()
-                optimizer.step()
+                self.optimizer.step()
         self.eval()
 
-    def save_model(self, fname: str, optimizer: Optional = None) -> None:
+    def save_model(self, fname: str) -> None:
         """
         WARNING - saving/loading an ensemble using this function assumes that each model
         in the ensemble has the same number of hidden units and that the ensemble is
         constructable by `NNEnsemble.get_model`.
 
-        :param fname: path to .pth file to which to save weights
-        A .pkl file with the same base name/path will be used to save the
-        nonlinearity names and a few other variables.
+        :param fname: base path to location where model will be saved.
+          Weights are saved to `{fname}.pth`
+          Required keyword arguments (nonlinearity names, etc.) will be saved to `{fname}.pth`.
         """
         nonlinearity_names = []
         for m in self.models:
@@ -352,10 +367,12 @@ class NNEnsemble(BOModel, torch.nn.Module):
             "nonlinearity_names": nonlinearity_names,
         }
 
-        with open(fname.replace(".pth", ".pkl"), "wb") as f:
+        makedirs(dirname(fname), exist_ok=True)
+
+        with open(fname + ".pkl", "wb") as f:
             pickle.dump(kwargs, f)
 
-        save_checkpoint(fname, self, optimizer)
+        save_checkpoint(fname + ".pth", self, self.optimizer)
 
     @classmethod
     def load_model(
@@ -369,17 +386,17 @@ class NNEnsemble(BOModel, torch.nn.Module):
         in the ensemble has the same number of hidden units and that the ensemble is
         constructable by `NNEnsemble.get_model`.
 
-        :param fname: path to .pth file with weights to load
-        There must also be a .pkl file with the same base name/path with
-        a list of the activation function names to use.
+        :param fname: base path to model save files
+          Weights will be loaded from `{fname}.pth`.
+          Keyword arguments will be loaded from `{fname}.pkl`.
         :param device: device onto which to load the model
         :optimizer_func: a function which takes in model parameters and returns an optimizer
-        If None, Adam is used (with lr=0.01).
+        If None, Adam is used.
         :returns: (model, optimizer) if optimizer state was saved otherwise model
         """
         batch_size = 1  # this isn't used
 
-        with open(fname.replace(".pth", ".pkl"), "rb") as f:
+        with open(fname + ".pkl", "rb") as f:
             kwargs = pickle.load(f)
             n_models = kwargs["n_models"]
             n_inputs = kwargs["n_inputs"]
@@ -389,7 +406,6 @@ class NNEnsemble(BOModel, torch.nn.Module):
 
         model = cls.get_model(
             n_inputs,
-            batch_size,
             n_models,
             n_hidden,
             adversarial_epsilon,
@@ -401,10 +417,16 @@ class NNEnsemble(BOModel, torch.nn.Module):
             optimizer = (
                 optimizer_func(model.parameters())
                 if optimizer_func
-                else torch.optim.Adam(model.parameters(), lr=0.01)
+                else torch.optim.Adam(model.parameters())
             )
-            load_checkpoint(fname, model, optimizer)
+            load_checkpoint(fname + ".pth", model, optimizer)
             return model, optimizer
         except KeyError:
-            load_checkpoint(fname, model)
+            load_checkpoint(fname + ".pth", model)
             return model
+
+    def reset(self):
+        for model in self.models:
+            for layer in model.children():
+                if isinstance(layer, torch.nn.Linear):
+                    layer.reset_parameters()

@@ -1,0 +1,87 @@
+
+--seed 1
+--model_init_seed 1
+--data_split_seed 1
+--device cuda
+--clean True
+--log_all_train_iter False
+--reset_model_every_iter True
+--ack_model_init_mode finetune
+--ack_change_stat_logging False
+--ack_hsic_stat_logging False
+--empirical_ack_change_stat_logging True
+
+--exclude_top 0.1
+--init_train_examples 200
+--init_train_num_epochs 200
+--init_train_lr 0.01
+--init_train_batch_size 128
+--re_train_num_epochs 200
+--re_train_lr 0.01
+--re_train_batch_size 128
+--val_frac 0.1
+--ood_val_frac 0.1
+--num_train_val_splits 1
+--combine_train_val True
+--gamma_cutoff False
+
+--num_hidden 100
+--sigmoid_coeff 1.0
+--separate_mean_var False
+--output_dist_fn Normal
+--init_train_l2 0.01
+--re_train_l2 0.01
+--early_stopping 10
+--take_log True
+
+--unseen_reg normal
+--gammas 0.0 1.0 5.0 10.0 20.0 50.0
+--ood_data_batch_factor 1.0
+
+--data_dir ../data/paper_data2
+--filename_file ../data/tatsu_pbm/test_files
+--output_dir ../experiments/ensemble3/o
+--num_test_tfs 10
+
+--ack_batch_size 100
+--num_acks 10
+
+--single_gaussian_test_nll False
+--report_metric_train_std True
+--empirical_stat std
+--empirical_diversity_only False
+--empirical_stat_val_fraction 0.2
+--ucb_ekb_weighting 0.5
+--empirical_diversity_only False
+--ekb_use_median True
+--hyper_search_choose_type val,nll,ind
+--final_train_choose_type val,nll,ind
+
+--langevin_sampling False
+--langevin_num_iter 20
+--langevin_lr 0.01
+--langevin_beta 1.0
+
+--ack_fun none_ucb
+--num_diversity 1
+--diversity_coeff 0.3
+--ucb 0.0
+--ucb_step 0.0
+--hsic_kernel_fn mixrbf_kernels
+--normalize_hsic True
+
+--num_models 4
+--adv_epsilon 0.1
+
+--predict_mi True
+--predict_stddev True
+--predict_nll False
+--predict_mmd False
+--num_predict_sample_points 400
+--ack_emb_kernel_dim 100
+
+--predict_ood False
+--ood_pred_emb_size 10
+--ood_pred_lr 0.01
+--ood_pred_epoch_iter 20
+--ood_pred_batch_size 1000

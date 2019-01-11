@@ -1,12 +1,14 @@
 import pickle
 import numpy as np
+from os import makedirs
+from os.path import dirname
 from typing import TypeVar, Type, Optional, Callable, Union, Tuple, Any, Dict, List
 import torch
 from torch import nn
 import pyro
 from pyro.distributions import Normal, TorchDistribution
 from bb_opt.src.bo_model import BOModel
-from bb_opt.src.utils import get_early_stopping
+from bb_opt.src.non_matplotlib_utils import get_early_stopping
 
 _BNN = TypeVar("BNN", bound="BNN")
 
@@ -50,7 +52,9 @@ def make_bnn_model(
         bnn = pyro.random_module("bnn", model, priors())
         nn_sample = bnn()
         nn_sample.train()  # train mode on
-        with pyro.iarange("batch_idx", len(inputs), batch_size, use_cuda=use_cuda) as i:
+        with pyro.iarange(
+            "batch_idx", len(inputs), min(len(inputs), batch_size), use_cuda=use_cuda
+        ) as i:
             pred = nn_sample(inputs[i]).squeeze()
             pyro.sample(
                 "obs", Normal(pred, torch.ones_like(pred)), obs=labels[i].squeeze()
@@ -85,6 +89,8 @@ class BNN(BOModel):
         prior_mean: float = 0.0,
         prior_std: float = 1.0,
     ):
+        super().__init__()
+
         self.model = model
         self.guide = guide
         self.n_inputs = n_inputs
@@ -107,18 +113,20 @@ class BNN(BOModel):
         prior_std: float = 1.0,
         device="cpu",
     ) -> _BNN:
-        model = nn.Sequential(
+        base_model = nn.Sequential(
             nn.Linear(n_inputs, n_hidden),
             getattr(nn, non_linearity)(),
             nn.Linear(n_hidden, 1),
         ).to(device)
 
-        priors = lambda: normal_priors(model, prior_mean, prior_std)
-        variational_dists = lambda: normal_variationals(model, prior_mean, prior_std)
+        priors = lambda: normal_priors(base_model, prior_mean, prior_std)
+        variational_dists = lambda: normal_variationals(
+            base_model, prior_mean, prior_std
+        )
 
-        bnn_model = make_bnn_model(model, priors, batch_size=batch_size)
-        guide = make_guide(model, variational_dists)
-        return cls(
+        bnn_model = make_bnn_model(base_model, priors, batch_size=batch_size)
+        guide = make_guide(base_model, variational_dists)
+        model = cls(
             bnn_model,
             guide,
             n_inputs,
@@ -128,15 +136,20 @@ class BNN(BOModel):
             prior_mean,
             prior_std,
         )
+        model.device = device
+        return model
 
     def train_model(
         self,
-        inputs: torch.Tensor,
-        labels: torch.Tensor,
+        inputs: Union[np.ndarray, torch.Tensor],
+        labels: Union[np.ndarray, torch.Tensor],
         n_epochs: int,
         optimizer: Optional = None,
         loss: Optional = None,
     ) -> List[float]:
+        inputs = self._to_tensor(inputs)
+        labels = self._to_tensor(labels)
+
         loss = loss or pyro.infer.Trace_ELBO()
         optimizer = optimizer or self.optimizer or pyro.optim.Adam({})
         self.optimizer = optimizer
@@ -186,22 +199,32 @@ class BNN(BOModel):
             pass
         return losses
 
-    def predict(self, inputs: torch.Tensor, n_samples: int) -> torch.Tensor:
+    def predict(
+        self, inputs: Union[np.ndarray, torch.Tensor], n_samples: int
+    ) -> np.ndarray:
+        """
+        :returns: (shape: n_samples x n_inputs)
+        """
         preds = []
+        inputs = self._to_tensor(inputs)
 
         with torch.no_grad():
             for _ in range(n_samples):
                 nn_sample = self.guide()
                 nn_sample.eval()
                 preds.append(nn_sample(inputs).cpu().squeeze())
-        return torch.stack(preds)
+        return torch.stack(preds).numpy()
 
     def save_model(self, fname: str, optimizer: Optional = None) -> None:
         """
         :param fname: base path of location to save model. The weights (parameters) will
           be saved at `{fname}.params`; the optimizer parameters, if given, at
-          `{fname}.opt`; and the kwargs for `get_model` at `{fname}.pkl`
+          `{fname}.opt`; and the kwargs for `get_model` at `{fname}.pkl`.
+        :param optimizer: optimizer whose parameters should be saved as well. If not given,
+          self.optimizer is used, if it exists (e.g. after doing any training)
         """
+        makedirs(dirname(fname), exist_ok=True)
+
         pyro.get_param_store().save(f"{fname}.params")
 
         optimizer = optimizer or self.optimizer
@@ -223,22 +246,32 @@ class BNN(BOModel):
 
     @classmethod
     def load_model(
-        cls: Type[_BNN],
-        fname: str,
-        device: str = "cpu",
-        optimizer_func: Optional[Callable] = None,
-    ) -> Union[_BNN, Tuple[_BNN, Any]]:
+        cls: Type[_BNN], fname: str, device="cpu", optimizer: Optional = None
+    ) -> _BNN:
+        """
+        :param fname: base path to saved model. The weights (parameters) will
+          be loaded from `{fname}.params`; the optimizer parameters, if saved, from
+          `{fname}.opt`; and the kwargs for `get_model` from `{fname}.pkl`.
+        :param optimizer: optimizer to load parameters into. If not given, Adam is used
+          with default arguments. If an optimizer is loaded, it's set as an attribute
+          of the model.
+        """
 
         with open(f"{fname}.pkl", "rb") as f:
             kwargs = pickle.load(f)
+            kwargs["device"] = device
 
         model = cls.get_model(**kwargs)
-
-        optimizer = (
-            optimizer_func() if optimizer_func else pyro.optim.Adam({"lr": 0.01})
-        )
-
         pyro.get_param_store().load(f"{fname}.params")
-        optimizer.load(f"{fname}.opt")
 
-        return model, optimizer
+        try:
+            optimizer = optimizer or pyro.optim.Adam({})
+            optimizer.load(f"{fname}.opt")
+            model.optimizer = optimizer
+        except FileNotFoundError:
+            pass
+
+        return model
+
+    def reset(self):
+        pyro.clear_param_store()

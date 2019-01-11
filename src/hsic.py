@@ -27,21 +27,28 @@ def sqdist(X1, X2=None, do_mean=False, collect=True):
                 #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
                 return sq.sum(-1)
     else:
+        """
+        X1 is of shape (n, d, k) or (n, d)
+        X2 is of shape (m, d, k) or (m, d)
+        return is of shape (n, m, d)
+        """
         assert X1.ndimension() == X2.ndimension()
         if X1.ndimension() == 2:
-            return (X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2
+            # (n, d)
+            return (X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2
         else:
             # (n, d, k)
             assert X1.ndimension() == 3
             if not collect:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2) # (n, n, d, k)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
             if do_mean:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).mean(-1)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
             else:
-                return ((X1.unsqueeze(0) - X2.unsqueeze(1)) ** 2).sum(-1)
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
 
 
 def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
+    # input is (n, n, d), output is also (n, n, d)
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
     #assert (dist_matrix.view(-1) <= 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
@@ -56,6 +63,9 @@ def mixrbf_kernels(dist_matrix, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None):
 
 def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     # input is (n, n, d), output is also (n, n, d)
+    if dist_matrix.ndimension() == 4:
+        return mixrq_kernels2(dist_matrix, alphas, weights)
+
     assert dist_matrix.ndimension() == 3, str(dist_matrix.shape)
     #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
     dist_matrix = dist_matrix.unsqueeze(0)
@@ -71,25 +81,62 @@ def mixrq_kernels(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
     return torch.einsum("w,wijd->ijd", (weights, torch.exp(-alphas * logs)))
 
 
-def two_vec_mixrbf_kernels(X1, X2, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
-    if X1.ndimension() == 1:
-        X1 = X1.unsqueeze(-1).unsqueeze(-1)
-    elif X1.ndimension() == 2:
-        X1 = X1.unsqueeze(1)
+def mixrq_kernels2(dist_matrix, alphas=[.2, .5, 1, 2, 5], weights=None):
+    # input is (m, n, n, d), output is also (m, n, n, d)
+    assert dist_matrix.ndimension() == 4, str(dist_matrix.shape)
+    #assert (dist_matrix.contiguous().view(-1) < 0).sum() == 0
+    dist_matrix = dist_matrix.unsqueeze(1)
+    weights = weights or 1.0 / len(alphas)
+    weights = weights * dist_matrix.new_ones(len(alphas))
+    alphas = dist_matrix.new_tensor(alphas).view(1, -1, 1, 1, 1)
 
-    if X2.ndimension() == 1:
-        X2 = X2.unsqueeze(-1).unsqueeze(-1)
-    elif X2.ndimension() == 2:
-        X2 = X2.unsqueeze(1)
+    logs = torch.log1p(dist_matrix / (2 * alphas))
+    #     assert torch.isfinite(logs).all()
+    #assert not ops.is_inf(logs)
+    #assert not ops.is_nan(logs)
+    #assert (logs.contiguous().view(-1) < 0).sum() == 0
+    return torch.einsum("w,mwijd->mijd", (weights, torch.exp(-alphas * logs)))
 
-    assert X1.ndimension() == 3
-    assert X2.ndimension() == 3
 
-    dist_matrix = sqdist(X1, X2, do_mean)
-    return mixrbf_kernels(dist_matrix, bws, weights)
+def two_vec_mixrbf_kernels(X1, X2=None, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
+    # input is of shape (n,) or (n, k)
+    # output is of shape (n, n, 1)
+    if X2 is None:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
+
+        assert X1.ndimension() == 3
+
+        dist_matrix = sqdist(X1, do_mean=do_mean)
+        assert dist_matrix.shape[0] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[1] == X1.shape[0], str(dist_matrix.shape) + ", " + str(X1.shape)
+        assert dist_matrix.shape[2] == 1, str(dist_matrix.shape)
+
+        # (n, n, 1)
+        return mixrbf_kernels(dist_matrix, bws, weights)
+    else:
+        if X1.ndimension() == 1:
+            X1 = X1.unsqueeze(-1).unsqueeze(-1)
+        elif X1.ndimension() == 2:
+            X1 = X1.unsqueeze(1)
+
+        if X2.ndimension() == 1:
+            X2 = X2.unsqueeze(-1).unsqueeze(-1)
+        elif X2.ndimension() == 2:
+            X2 = X2.unsqueeze(1)
+
+        assert X1.ndimension() == 3
+        assert X2.ndimension() == 3
+
+        dist_matrix = sqdist(X1, X2, do_mean)
+        return mixrbf_kernels(dist_matrix, bws, weights)
 
 
 def two_vec_mixrq_kernels(X1, X2=None, bws=[.01, .1, .2, 1, 5, 10, 100], weights=None, do_mean=False):
+    # input is of shape (n,) or (n, k)
+    # output is of shape (n, n, 1)
     if X2 is None:
         if X1.ndimension() == 1:
             X1 = X1.unsqueeze(-1).unsqueeze(-1)
@@ -248,6 +295,8 @@ def total_hsic_parallel(kernels):
     """
     kernels should be shape (m, n, n, d) to test for total
     independence among d variables with n paired samples for m sets.
+
+    output is of shape (m,)
     """
     assert kernels.ndimension() == 4
     shp = kernels.shape
@@ -259,7 +308,7 @@ def total_hsic_parallel(kernels):
 
     log_n = torch.log(n)
     log_2 = torch.log(kernels.new_tensor(2))
-    log_kernels = kernels.log_()
+    log_kernels = kernels.log()
     log_sum_b = log_kernels.logsumexp(dim=2)
 
     l1 = log_kernels.sum(dim=3).logsumexp(dim=2).logsumexp(dim=1) - 2 * log_n
@@ -314,7 +363,7 @@ def precompute_batch_hsic_stats(
 
     batch_kernels = [kernel(pred) for pred in preds]
     batch_kernels = torch.cat(batch_kernels, dim=-1)
-    batch_kernels.log_()
+    batch_kernels.log()
     batch_kernels = batch_kernels.unsqueeze(-1)
 
     batch_sum_b = batch_kernels.logsumexp(dim=1)
@@ -336,13 +385,13 @@ def compute_point_hsics(
     if not isinstance(preds, Sequence):
         preds = [preds]
 
-    log_n = preds[0].new_tensor(len(batch_sum_b)).log_()
+    log_n = preds[0].new_tensor(len(batch_sum_b)).log()
     d = preds[0].new_tensor(batch_sum_b.shape[1] + 1)
-    log_2 = preds[0].new_tensor(2).log_()
+    log_2 = preds[0].new_tensor(2).log()
 
     point_kernels = [kernel(pred[:, next_points]) for pred in preds]
     point_kernels = torch.cat(point_kernels, dim=-1)
-    point_kernels.log_()
+    point_kernels.log()
     point_kernels = point_kernels.unsqueeze(2)
 
     point_sum_b = point_kernels.logsumexp(dim=1)
@@ -362,11 +411,12 @@ def compute_point_hsics(
 
 def total_hsic_with_batch(
     rv_samples: torch.Tensor,
-    batch_samples: Optional[torch.Tensor],
     new_points: torch.Tensor,
     kernel,
+    batch_samples: Optional[torch.Tensor] = None,
     acquirable_idx: Optional[Sequence[int]] = None,
     n_points_parallel: int = 50,
+    normalize: bool = False,
 ) -> torch.Tensor:
     """
     Compute HSIC between all RVs in `rv_samples` and the batch with each point in `new_points`.
@@ -380,16 +430,31 @@ def total_hsic_with_batch(
     :param n_points_parallel: number of RVs to evaluate HSIC of in parallel
     :returns: tensor of length n_variables2 with dHSIC between each RV in rv_samples2 and the RVs in rv_samples1
     """
+
     acquirable_idx = acquirable_idx or list(range(new_points.shape[1]))
+    acquirable_idx = np.array(acquirable_idx)
     all_hsics = rv_samples.new_empty(len(acquirable_idx))
 
     rv_kernel = kernel(sqdist(rv_samples))
 
+    if normalize:
+        hsic_rv1 = total_hsic(rv_kernel)
+
+    rv_kernel = rv_kernel.expand(n_points_parallel, -1, -1, -1)
+
     if batch_samples is not None:
         batch_sqdists = sqdist(batch_samples)
+        batch_sqdists = batch_sqdists.expand(n_points_parallel, -1, -1, -1)
 
-    for i, point_idx in enumerate(acquirable_idx):
-        point_sqdist = sqdist(new_points[:, point_idx : point_idx + 1])
+    hsic_idx = 0
+    for point_idx in np.array_split(acquirable_idx, len(acquirable_idx) / (n_points_parallel - 1)):
+        point_sqdist = sqdist(new_points[:, point_idx])
+        point_sqdist = point_sqdist.transpose(2, 0).unsqueeze(-1)
+
+        # this should only happen for the last group of points
+        if batch_samples is not None and len(batch_sqdists) != len(point_sqdist):
+            batch_sqdists = batch_sqdists[0].expand(len(point_sqdist), -1, -1, -1)
+
         sqdists = (
             torch.cat((batch_sqdists, point_sqdist), dim=-1)
             if batch_samples is not None
@@ -397,6 +462,168 @@ def total_hsic_with_batch(
         )
         point_kernel = kernel(sqdists)
         point_kernel = point_kernel.mean(dim=-1).unsqueeze(-1)
-        all_hsics[i] = total_hsic(torch.cat((rv_kernel, point_kernel), dim=-1))
+
+        if normalize:
+            hsic_rv2 = total_hsic_parallel(point_kernel)
+
+        # this should only happen for the last group of points
+        if len(rv_kernel) != len(point_kernel):
+            rv_kernel = rv_kernel[0].expand(len(point_kernel), -1, -1, -1)
+
+        hsic_rv12 = total_hsic_parallel(torch.cat((rv_kernel, point_kernel), dim=-1))
+
+        if normalize:
+            hsic = hsic_rv12 / torch.sqrt(hsic_rv1 * hsic_rv2)
+        else:
+            hsic = hsic_rv12
+
+        n_points = len(point_idx)
+        all_hsics[hsic_idx:hsic_idx + n_points] = hsic
+        hsic_idx += n_points
+
+    assert (all_hsics >= 0).all()
 
     return all_hsics
+
+def center_kernel(K):
+    """Center a kernel matrix of shape (n, n, ...).
+    If there are trailing dimensions, assumed to be a list of kernels and
+    centers each one separately.
+    """
+    # (I - 1/n 1 1^T) K (I - 1/n 1 1^T)
+    #  = K - 1/n 1 1^T K - 1/n K 1 1^T + 1/n^2 1 1^T K 1 1^T
+    row_means = K.mean(dim=0, keepdim=True)
+    col_means = row_means.transpose(0, 1)
+    grand_mean = row_means.mean(dim=1, keepdim=True)
+    return K - row_means - col_means + grand_mean
+
+# Not n-way unlike total_hsic !!!!
+def hsic_xy(
+    kernel_x, 
+    kernel_y, 
+    normalized,
+    biased=False, 
+    center_x=False, 
+     eps=ops._eps
+):
+    """Independence estimator.
+    By default, uses the unbiased estimator.
+    If normalized, returns HSIC(X, Y) / sqrt(HSIC(X, X) HSIC(Y, Y)). Uses
+    eps if the denominator is too close to zero.
+    If biased=True, center_x determines which kernel will be centered; might
+    result in slightly simpler gradients for the kernel which is not centered.
+    Ignored if biased=False.
+    """
+    n = kernel_x.shape[0]
+
+    if biased:
+        if normalized:
+            kernel_x = center_kernel(kernel_x)
+            kernel_y = center_kernel(kernel_y)
+        elif center_x:
+            kernel_x = center_kernel(kernel_x)
+        else:
+            kernel_y = center_kernel(kernel_y)
+
+        tr_xy = torch.einsum('ij,ij->', (kernel_x, kernel_y))
+
+        if normalized:
+            tr_xx = torch.max(torch.einsum('ij,ij->', (kernel_x, kernel_x)), kernel_x.new_tensor(eps))
+            tr_yy = torch.max(torch.einsum('ij,ij->', (kernel_y, kernel_y)), kernel_x.new_tensor(eps))
+            return tr_xy / torch.sqrt(tr_xx * tr_yy)
+        else:
+            return tr_xy / (n - 1)**2
+
+    # HSIC_1 from http://www.jmlr.org/papers/volume13/song12a/song12a.pdf
+    z = torch.zeros(n).type(kernel_x.type())
+    Kt = ops.set_diagonal(kernel_x, z)
+    Lt = ops.set_diagonal(kernel_y, z)
+
+    Kt_sums = torch.sum(Kt, dim=0)
+    Lt_sums = torch.sum(Lt, dim=0)
+
+    Kt_grand_sum = torch.sum(Kt_sums)
+    Lt_grand_sum = torch.sum(Lt_sums)
+
+    n1_n2 = (n - 1) * (n - 2)
+
+    main_xy = (
+        torch.einsum('ij,ij->', (Kt, Lt))
+        + Kt_grand_sum * Lt_grand_sum / n1_n2
+        - 2 / (n - 2) * torch.dot(Kt_sums, Lt_sums))
+
+    if normalized:
+        main_xx = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('ij,ij->', (Kt, Kt))
+            + Kt_grand_sum * Kt_grand_sum / n1_n2
+            - 2 / (n - 2) * torch.dot(Kt_sums, Kt_sums))
+        main_yy = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('ij,ij->', (Lt, Lt))
+            + Lt_grand_sum * Lt_grand_sum / n1_n2
+            - 2 / (n - 2) * torch.dot(Lt_sums, Lt_sums))
+        return main_xy / torch.sqrt(main_xx * main_yy)
+    else:
+        return main_xy / (n * (n - 3))
+
+def hsic_xy_parallel(kernel_x, kernel_y, biased=False, center_x=False, normalized=False,
+         eps=ops._eps):
+    m = kernel_x.shape[0]
+    n = kernel_x.shape[1]
+
+    if biased:
+        if normalized:
+            kernel_x = center_kernel(kernel_x)
+            kernel_y = center_kernel(kernel_y)
+        elif center_x:
+            kernel_x = center_kernel(kernel_x)
+        else:
+            kernel_y = center_kernel(kernel_y)
+
+        tr_xy = torch.einsum('kij,kij->', (kernel_x, kernel_y))
+
+        if normalized:
+            tr_xx = torch.max(torch.einsum('kij,kij->', (kernel_x, kernel_x)), kernel_x.new_tensor(eps))
+            tr_yy = torch.max(torch.einsum('kij,kij->', (kernel_y, kernel_y)), kernel_x.new_tensor(eps))
+            return tr_xy / torch.sqrt(tr_xx * tr_yy)
+        else:
+            return tr_xy / (n - 1)**2
+
+    # HSIC_1 from http://www.jmlr.org/papers/volume13/song12a/song12a.pdf
+    z = torch.zeros(n).type(kernel_x.type())
+    Kt = ops.set_diagonal(kernel_x, z)
+    Lt = ops.set_diagonal(kernel_y, z)
+
+    Kt_sums = torch.sum(Kt, dim=1)
+    Lt_sums = torch.sum(Lt, dim=1)
+
+    Kt_grand_sum = torch.sum(Kt_sums.view(m, -1), dim=-1)
+    Lt_grand_sum = torch.sum(Lt_sums.view(m, -1), dim=-1)
+
+    n1_n2 = (n - 1) * (n - 2)
+
+    def dot(X, Y):
+        Y = Y.transpose(0, 1)
+        prod = ((X-Y)**2).sum(dim=-1)
+        return prod
+
+    main_xy = (
+        torch.einsum('kij,kij->', (Kt, Lt))
+        + Kt_grand_sum * Lt_grand_sum / n1_n2
+        - 2 / (n - 2) * dot(Kt_sums, Lt_sums))
+
+    if normalized:
+        main_xx = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('kij,kij->', (Kt, Kt))
+            + Kt_grand_sum * Kt_grand_sum / n1_n2
+            - 2 / (n - 2) * dot(Kt_sums, Kt_sums))
+        main_yy = torch.max(
+            kernel_x.new_tensor(eps),
+            torch.einsum('kij,kij->', (Lt, Lt))
+            + Lt_grand_sum * Lt_grand_sum / n1_n2
+            - 2 / (n - 2) * dot(Lt_sums, Lt_sums))
+        return main_xy / torch.sqrt(main_xx * main_yy)
+    else:
+        return main_xy / (n * (n - 3))

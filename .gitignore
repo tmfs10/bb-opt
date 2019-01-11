@@ -35,8 +35,9 @@ configure.scan
 .DS_Store
 
 data
-output_files
+experiments
 slurm*
-config_*
 .ipynb_checkpoints
 .vscode
+.pylintrc
+models_nathan

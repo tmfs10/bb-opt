@@ -1,0 +1,11 @@
+
+--mves_compute_batch_size 3000
+--min_hsic_increase 0.05
+
+--mves_greedy False
+--compare_w_old False
+--pred_weighting 0
+--divide_by_std False
+--measure er_condense
+--num_models 50
+--hsic_kernel_fn mixrbf_kernels
