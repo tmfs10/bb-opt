@@ -1780,7 +1780,7 @@ def get_nll(
     preds,
     std,
     Y,
-    output_dist_fn,
+    output_noise_dist_fn,
     single_gaussian=True,
 ):
     assert len(preds.shape) == 2
@@ -1788,12 +1788,12 @@ def get_nll(
     assert preds.shape[1] == Y.shape[0]
     m = preds.shape[0]
     if single_gaussian:
-        output_dist = output_dist_fn(
+        output_dist = output_noise_dist_fn(
                 preds.mean(0),
                 std.mean(0))
         log_prob = -output_dist.log_prob(Y)
     else:
-        output_dist = output_dist_fn(
+        output_dist = output_noise_dist_fn(
                 preds.view(-1),
                 std.view(-1))
         log_prob = -output_dist.log_prob(Y.repeat([m]))
@@ -1801,17 +1801,93 @@ def get_nll(
 
 
 def get_pred_stats(
+    pred_means,
+    pred_std,
+    Y,
+    output_noise_dist_fn,
+    sigmoid_coeff,
+    train_Y=None,
+):
+    assert pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (pred_means.shape, Y.shape)
+    assert pred_means.shape == pred_std.shape,  "%s == %s" % (pred_means.shape, pred_std.shape)
+
+    baseline_rmse = None
+    if train_Y is not None:
+        if sigmoid_coeff > 0:
+            Y = utils.sigmoid_standardization(
+                    Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+            train_Y = utils.sigmoid_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+        else:
+            Y = utils.normal_standardization(
+                    Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+            train_Y = utils.normal_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+
+        baseline_rmse = torch.sqrt(torch.mean((Y-train_Y.mean())**2)).item()
+
+    log_prob = torch.mean(
+                get_nll(
+                    pred_means, 
+                    pred_std, 
+                    Y,
+                    output_noise_dist_fn,
+                    )
+                ).item()
+
+    pred_means_mean = pred_means.mean(dim=0)
+    mse = (pred_means_mean-Y)**2
+    rmse = torch.sqrt(torch.mean(mse)).item()
+    
+    pred_mean_std = pred_means.std(dim=0)
+    std = pred_mean_std.mean().item()
+
+    if pred_means_mean.shape[0] > 1:
+        kt_corr = kendalltau(pred_means_mean, Y)[0]
+        rmse_std_corr = float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_mean_std.cpu().numpy())[0])
+    else:
+        kt_corr = 0
+        rmse_std_corr =0 
+
+
+    ret = {
+            'log_prob' : log_prob,
+            'rmse' : rmse,
+            'kt_corr' : kt_corr,
+            'std' : std,
+            'rmse_std_corr' : rmse_std_corr,
+            'baseline_rmse' : baseline_rmse,
+            }
+
+    return ret
+
+
+def get_ind_top_ood_pred_stats(
         preds, 
         std, 
-        unscaled_Y, 
+        unscaled_Y,
         train_Y,
-        output_dist_fn, 
+        output_noise_dist_fn, 
         idx_to_exclude,
         sigmoid_coeff,
         single_gaussian=True,
+        num_to_eval=0,
 ):
-    assert preds.shape[1] == unscaled_Y.shape[0]
-    assert preds.shape == std.shape, "%s == %s" % (str(preds.shape), str(std.shape))
+    assert preds.shape[1] == unscaled_Y.shape[0], "%s[1] == %s[0]" % (preds.shape, unscaled_Y.shape)
+    assert preds.shape == std.shape, "%s == %s" % (preds.shape, std.shape)
+    assert unscaled_Y.shape[0] > 0
 
     if sigmoid_coeff > 0:
         Y = utils.sigmoid_standardization(
@@ -1828,7 +1904,10 @@ def get_pred_stats(
 
 
     test_idx = list({i for i in range(Y.shape[0])}.difference(idx_to_exclude))
+    if num_to_eval > 0:
+        test_idx = test_idx[:num_to_eval]
 
+    assert len(test_idx) > 0
     preds = preds[:, test_idx]
     std = std[:, test_idx]
     Y = Y[test_idx]
@@ -1838,12 +1917,20 @@ def get_pred_stats(
     rmse_list = []
     kt_corr_list = []
     std_list = []
-    rmse_std_corr = []
+    rmse_std_corr_list = []
     pred_corr = []
+
+    stats = {
+            'log_prob' : [],
+            'rmse' : [],
+            'kt_corr' : [],
+            'std' : [],
+            'rmse_std_corr' : []
+            }
 
     for frac in [1., 0.1, 0.01]:
         labels_sort_idx = torch.sort(unscaled_Y, descending=True)[1].cpu().numpy()
-        n = int(labels_sort_idx.shape[0] * frac)
+        n = max(int(labels_sort_idx.shape[0] * frac), 2)
         m = preds.shape[0]
         labels_sort_idx = labels_sort_idx[:n]
         labels2 = Y[labels_sort_idx]
@@ -1853,40 +1940,33 @@ def get_pred_stats(
         corr = np.corrcoef(preds[:, rand_idx].transpose(0, 1))
         pred_corr += [corr[np.tril_indices(corr.shape[0], k=-1)].mean()]
 
-        log_prob_list += [
-                torch.mean(
-                    get_nll(
-                        preds[:, labels_sort_idx], 
-                        std[:, labels_sort_idx], 
-                        labels2,
-                        output_dist_fn,
-                        )
-                    ).item()]
+        ret = get_pred_stats(
+                preds[:, labels_sort_idx],
+                std[:, labels_sort_idx],
+                labels2,
+                output_noise_dist_fn,
+                sigmoid_coeff,
+                )
 
-        pred_means = preds[:, labels_sort_idx].mean(dim=0)
-        mse = (pred_means-labels2)**2
-        rmse_list += [torch.sqrt(torch.mean(mse)).item()]
-        kt_corr_list += [kendalltau(pred_means, unscaled_Y[labels_sort_idx])[0]]
-        pred_std = preds[:, labels_sort_idx].std(dim=0)
-        std_list += [pred_std.mean().item()]
-        rmse_std_corr += [float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_std.cpu().numpy())[0])]
+        for stat in stats:
+            stats[stat] += [ret[stat]]
 
-    max_idx = labels_sort_idx[0]
-    log_prob_list += [torch.mean(-output_dist_fn(preds[:, max_idx], std[:, max_idx]).log_prob(Y[max_idx])).item()]
-    rmse_list += [torch.abs(preds[:, max_idx].mean(0)-Y[max_idx]).item()]
-    kt_corr_list += [0]
-    rmse_std_corr += [0]
     pred_corr += [0]
-    std_list += [preds[:, max_idx].std(0).item()]
+    max_idx = [labels_sort_idx[0]]
+    ret = get_pred_stats(
+            preds[:, max_idx],
+            std[:, max_idx],
+            Y[max_idx],
+            output_noise_dist_fn,
+            sigmoid_coeff,
+            )
+    for stat in stats:
+        stats[stat] += [ret[stat]]
 
-    print('log_prob_list:', log_prob_list)
-    print('rmse_list:', rmse_list)
-    print('kt_corr_list:', kt_corr_list)
-    print('std_list:', std_list)
-    print('rmse_std_corr:', rmse_std_corr)
-    print('pred_corr:', pred_corr)
+    for stat in stats:
+        print(stat, ":", stats[stat])
 
-    return log_prob_list, rmse_list, kt_corr_list, std_list, rmse_std_corr, pred_corr
+    return stats
 
 def compute_ir_regret_ensemble(
         model_ensemble,
@@ -2131,34 +2211,54 @@ def get_bagging_er(
     return cur_ack_idx
 
 
-def get_kriging_believer_ack(
+def get_nb_mcts_ack(
     params,
-    model,
+    orig_model,
     data,
     ack_batch_size,
     skip_idx,
     train_fn,
+):
+    pass
+
+
+def get_kriging_believer_ack(
+    params,
+    orig_model,
+    data,
+    ack_batch_size,
+    skip_idx,
+    train_fn,
+    parallel=False,
 ):
     skip_idx = list(skip_idx)
     train_X, train_Y, X, Y = data
     ack_idx = []
     fake_ack_idx = []
 
-    model = copy.deepcopy(model)
-    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
+    ucb_measure = None
+    if not parallel:
+        model = copy.deepcopy(orig_model)
+        optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
     for batch_iter in range(ack_batch_size):
+        if parallel:
+            model = copy.deepcopy(orig_model)
+            optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
         with torch.no_grad():
-            pred_means, pred_vars = model(X)
-            er = pred_means.mean(dim=0).view(-1)
-            std = pred_means.std(dim=0).view(-1)
-            ucb_measure = er + params.ucb*std
-            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+            if ucb_measure is None:
+                pred_means, pred_vars = model(X)
+                er = pred_means.mean(dim=0).view(-1)
+                std = pred_means.std(dim=0).view(-1)
+                std_measure = std
+                ucb_measure = er + params.ucb*std
+                ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+                ucb_sort_idx = torch.sort(ucb_measure, descending=True)[1]
 
             temp = list(set(ack_idx + fake_ack_idx))
-            std[skip_idx + fake_ack_idx] = std.min()
-            std_sort_idx = torch.sort(std, descending=True)[1]
+            std_measure[skip_idx + fake_ack_idx] = -2
+            std_measure_sort_idx = torch.sort(std_measure, descending=True)[1]
+            num_fake_ack_candidates = X.shape[0] - (len(skip_idx) + len(fake_ack_idx))
 
-            ucb_sort_idx = torch.sort(ucb_measure, descending=True)[1]
             max_idx = ucb_sort_idx[0].item()
             ack_idx += [max_idx]
             num_candidates = X.shape[0] - (len(skip_idx) + len(ack_idx))
@@ -2179,9 +2279,22 @@ def get_kriging_believer_ack(
                     train_Y.std(),
                     exp=torch.exp)
 
-        fake_ack_idx = ack_idx
+        #fake_ack_idx = ack_idx
         #fake_ack_idx += [ucb_sort_idx[random.randint(1, num_candidates-1)].item()]
-        #fake_ack_idx += [std_sort_idx[0].item()]
+        #fake_ack_idx += [std_measure_sort_idx[0].item()]
+
+        candidate_fake_ack_idx = std_measure_sort_idx[np.random.choice(num_fake_ack_candidates, size=10, replace=False)].cpu().numpy().tolist()
+        if len(fake_ack_idx) > 0:
+            corr_matrix = pred_means[:, fake_ack_idx + candidate_fake_ack_idx].transpose(0, 1)
+            corr_matrix = torch.abs(ops.corrcoef(corr_matrix))
+            corr = corr_matrix[len(fake_ack_idx):, :][:, :len(fake_ack_idx)].mean(dim=1)
+            #print(corr_matrix.shape, corr.shape, len(fake_ack_idx), len(candidate_fake_ack_idx))
+            corr_min_idx = torch.argmin(corr).item()
+            print('corr_mean, corr_min', torch.mean(corr).item(), corr[corr_min_idx].item(), corr_min_idx)
+            fake_ack_idx += [candidate_fake_ack_idx[corr_min_idx]]
+        else:
+            fake_ack_idx += [candidate_fake_ack_idx[0]]
+
         bX = torch.cat([train_X, X[fake_ack_idx]], dim=0)
         bY = torch.cat([bY, er[fake_ack_idx]], dim=0)
 
@@ -2198,6 +2311,15 @@ def get_kriging_believer_ack(
             optim.zero_grad()
             nll.backward()
             optim.step()
+
+        with torch.no_grad():
+            pred_means, pred_vars = model(X)
+            er = pred_means.mean(dim=0).view(-1)
+            std = pred_means.std(dim=0).view(-1)
+            std_measure = std
+            ucb_measure = er + params.ucb*std
+            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+            ucb_sort_idx = torch.sort(ucb_measure, descending=True)[1]
 
         """
         logging, _, _, _ = train_fn(
@@ -2459,7 +2581,7 @@ def pairwise_logging_pre_ack(
                 preds[:, rand_idx], 
                 preds_vars[:, rand_idx], 
                 Y[rand_idx],
-                params.output_dist_fn
+                params.output_noise_dist_fn
                 )
 
         return rand_idx, old_std, old_nll, corr_rand, hsic_rand, mi_rand, ack_batch_hsic, rand_batch_hsic
@@ -2490,7 +2612,7 @@ def pairwise_logging_post_ack(
                 preds, 
                 preds_vars, 
                 Y,
-                params.output_dist_fn
+                params.output_noise_dist_fn
                 )
 
         nll_diff = old_nll-new_nll

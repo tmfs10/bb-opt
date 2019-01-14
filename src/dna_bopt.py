@@ -16,6 +16,7 @@ import ops
 import pprint
 import bayesian_opt as bopt
 from scipy.stats import kendalltau, pearsonr
+from gpu_utils.utils import nvidia_smi
 
 import reparam_trainer as reparam
 from tqdm import tnrange, trange
@@ -29,6 +30,11 @@ def dna_sample_uniform(out_size):
     z = np.zeros((8*out_size,4))
     z[range(8*out_size),np.random.randint(4,size=8*out_size)] = 1
     out_data = torch.from_numpy(z).view((-1,32)).float().cuda()
+    return out_data
+
+def image_sample_uniform(out_size):
+    z = np.random.randint(256, size=(out_size,3,32,32))
+    out_data = torch.from_numpy(z).float().cuda()
     return out_data
 
 class Qz(nn.Module):
@@ -234,6 +240,36 @@ def get_model_nn(
     e_dist = tdist.Normal(mu_e + prior_mean, std_e*prior_std)
     
     return model, qz, e_dist
+
+
+def ensemble_forward(model, X, batch_size, jupyter=False):
+    N = X.shape[0]
+    num_batches = N//batch_size+1
+    batches = [i*batch_size  for i in range(num_batches)] + [N]
+
+    if jupyter:
+        progress = tnrange(num_batches)
+    else:
+        progress = trange(num_batches)
+
+    progress.set_description(f"ens_for")
+    out_means = []
+    out_vars = []
+    for bi in progress:
+        bs = batches[bi]
+        be = batches[bi+1]
+        bN = be-bs
+        if bN <= 0:
+            continue
+
+        out = model(X[bs:be])
+        out_means += [out[0].transpose(0, 1)]
+        out_vars += [out[1].transpose(0, 1)]
+
+    out_means = torch.cat(out_means, dim=0).transpose(0, 1)
+    out_vars = torch.cat(out_vars, dim=0).transpose(0, 1)
+
+    return out_means, out_vars
 
 
 def get_model_nn_ensemble(
@@ -501,91 +537,93 @@ def train_ensemble(
     data_split_rng=None,
     jupyter=False,
     ood_val_frac=0.0,
+    sample_uniform_fn=None,
 ):
-    do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
+    with torch.no_grad():
+        do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
-    adv_train = adv_epsilon > 1e-9
-    train_X, train_Y, X, Y = data
-    N = train_X.shape[0]
-    assert val_frac >= 0.01
-    assert val_frac <= 0.9
+        adv_train = adv_epsilon > 1e-9
+        train_X, train_Y, X, Y = data
+        N = train_X.shape[0]
+        assert val_frac >= 0.01
+        assert val_frac <= 0.9
 
-    if num_epoch_iters is not None:
-        assert num_epoch_iters > 0
-    elif "ood" in choose_type:
-        assert ood_val_frac > 1e-3
-        assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
-        sorted_idx = torch.sort(train_Y, descending=True)[1]
-        val_N = int(N * ood_val_frac)
-        idx = torch.arange(N)
-        train_idx = idx[sorted_idx[val_N:]]
-        val_idx = idx[sorted_idx[:val_N]]
-    elif "ind" in choose_type:
-        train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
-                N, 
-                [1-val_frac, val_frac],
-                rng=data_split_rng,
-                )
-    else:
-        assert "validation set distribution not found in choose_type=%s" % (choose_type,)
+        if num_epoch_iters is not None:
+            assert num_epoch_iters > 0
+        elif "ood" in choose_type:
+            assert ood_val_frac > 1e-3
+            assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
+            sorted_idx = torch.sort(train_Y, descending=True)[1]
+            val_N = int(N * ood_val_frac)
+            idx = torch.arange(N)
+            train_idx = idx[sorted_idx[val_N:]]
+            val_idx = idx[sorted_idx[:val_N]]
+        elif "ind" in choose_type:
+            train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
+                    N, 
+                    [1-val_frac, val_frac],
+                    rng=data_split_rng,
+                    )
+        else:
+            assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
-    if num_epoch_iters is None:
-        assert val_idx.shape[0] > 0
-        val_X = train_X[val_idx]
-        train_X = train_X[train_idx]
-        val_Y = train_Y[val_idx]
-        train_Y = train_Y[train_idx]
-        print("%d num_val" % (val_X.shape[0]))
-
-    if normalize_fn is not None:
-        mean = train_Y.mean()
-        std = train_Y.std()
-        train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
         if num_epoch_iters is None:
-            val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+            assert val_idx.shape[0] > 0
+            val_X = train_X[val_idx]
+            train_X = train_X[train_idx]
+            val_Y = train_Y[val_idx]
+            train_Y = train_Y[train_idx]
+            print("%d num_val" % (val_X.shape[0]))
 
-    train_mean = train_Y.mean()
-    train_std = train_Y.std()
-    train_normal = tdist.normal.Normal(train_mean, train_std)
-    train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).item()
-    if num_epoch_iters is None:
-        val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).item()
-        val_baseline_nll = -train_normal.log_prob(val_Y).mean().item()
+        if normalize_fn is not None:
+            mean = train_Y.mean()
+            std = train_Y.std()
+            train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
+            if num_epoch_iters is None:
+                val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
 
-    N = train_X.shape[0]
-    print("training:")
-    print("%d num_train" % (N))
-    print(str(batch_size) + " batch_size")
-    print(str(num_epochs) + " num_epochs")
-    print(str(gamma) + " gamma")
+        train_mean = train_Y.mean()
+        train_std = train_Y.std()
+        train_normal = tdist.normal.Normal(train_mean, train_std)
+        train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).detach().item()
+        if num_epoch_iters is None:
+            val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).item()
+            val_baseline_nll = -train_normal.log_prob(val_Y).mean().detach().item()
 
-    num_batches = N//batch_size+1
-    batches = [i*batch_size  for i in range(num_batches)] + [N]
+        N = train_X.shape[0]
+        print("training:")
+        print("%d num_train" % (N))
+        print(str(batch_size) + " batch_size")
+        print(str(num_epochs) + " num_epochs")
+        print(str(gamma) + " gamma")
 
-    kt_corrs = []
-    val_kt_corrs = []
-    train_nlls = []
-    val_nlls = [[], []]
-    val_rmses = []
-    train_rmses = []
-    train_std = []
-    val_std = []
-    best_val_indv_rmse = None
+        num_batches = N//batch_size+1
+        batches = [i*batch_size  for i in range(num_batches)] + [N]
 
-    if jupyter:
-        progress = tnrange(num_epochs)
-    else:
-        progress = trange(num_epochs)
+        kt_corrs = []
+        val_kt_corrs = []
+        train_nlls = []
+        val_nlls = [[], []]
+        val_rmses = []
+        train_rmses = []
+        train_std = []
+        val_std = []
+        best_val_indv_rmse = None
 
-    best_nll = float('inf')
-    best_epoch_iter = -1
-    best_kt_corr = -2.
-    best_measure = None
-    best_model = None
-    best_optim = None
+        if jupyter:
+            progress = tnrange(num_epochs)
+        else:
+            progress = trange(num_epochs)
 
-    time_since_last_best_epoch = 0
-    logging = None
+        best_nll = float('inf')
+        best_epoch_iter = -1
+        best_kt_corr = -2.
+        best_measure = None
+        best_model = None
+        best_optim = None
+
+        time_since_last_best_epoch = 0
+        logging = None
 
     def loss_fn_for_langevin(X):
         unseen_reg_langevin_mapping = {
@@ -613,6 +651,7 @@ def train_ensemble(
         return loss
 
 
+    #print('point a1:', nvidia_smi())
     for epoch_iter in progress:
         if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
             break
@@ -642,7 +681,7 @@ def train_ensemble(
 
             if adv_train:
                 assert False, 'Untested'
-                negative_log_likelihood = NNEnsemble.compute_negative_log_likelihood(
+                negative_log_likelihood = model_ensemble.compute_negative_log_likelihood(
                     y, 
                     means, 
                     variances, 
@@ -658,12 +697,13 @@ def train_ensemble(
             else:
                 loss = nll
 
-            train_nlls += [nll.item()]
-            rmse = torch.sqrt(torch.mean((means-bY)**2)).item()
+            train_nlls += [nll.detach().item()]
+            mse = torch.mean((means.mean(dim=0)-bY)**2)
+            rmse = torch.sqrt(mse).detach().item()
             train_rmses += [rmse]
 
             if unseen_reg != "normal":
-                out_data = dna_sample_uniform(ood_data_batch_size)
+                out_data = sample_uniform_fn(ood_data_batch_size)
                 if params.langevin_sampling and gamma > 0:
                     model_ensemble.eval()
                     num_features = out_data.shape[1]
@@ -727,12 +767,11 @@ def train_ensemble(
                             )
                     predictor_loss.backward()
                     predict_info_models.optim.step()
-                #sys.exit(1)
 
         model_ensemble.eval()
         with torch.no_grad():
             train_means, train_variances = model_ensemble(train_X)
-            train_std += [train_means.std(0).mean().item()]
+            train_std += [train_means.std(0).mean().detach().item()]
             train_mean_of_means = train_means.mean(dim=0)
             assert train_mean_of_means.shape == train_Y.shape, "%s == %s" % (train_mean_of_means.shape, val_Y.shape)
             kt_corr = kendalltau(train_mean_of_means, train_Y)[0]
@@ -740,17 +779,17 @@ def train_ensemble(
 
             if num_epoch_iters is None:
                 val_means, val_variances = model_ensemble(val_X)
-                indv_rmse = torch.sqrt(((val_means-val_Y)**2).mean(dim=1))
-                val_std += [val_means.std(0).mean().item()]
+                indv_rmse = torch.sqrt(((val_means-val_Y)**2).mean(dim=1)).detach()
+                val_std += [val_means.std(0).mean().detach().item()]
                 val_nll1, val_nll2 = NNEnsemble.report_metric(
                         val_Y,
                         val_means,
                         val_variances,
                         custom_std=train_Y.std() if params.report_metric_train_std else None,
                         return_mse=False)
-                val_nll1 = val_nll1.item()
-                val_nll2 = val_nll2.item()
-                rmse = torch.sqrt(torch.mean((val_means-val_Y)**2)).item()
+                val_nll1 = val_nll1.detach().item()
+                val_nll2 = val_nll2.detach().item()
+                rmse = torch.sqrt(torch.mean((val_means.mean(dim=0)-val_Y)**2)).detach().item()
                 val_nlls[0] += [val_nll1]
                 val_nlls[1] += [val_nll2]
                 val_rmses += [rmse]
@@ -887,6 +926,7 @@ def hyper_param_train(
     stage,
     data_split_rng,
     predict_info_models=None,
+    sample_uniform_fn=None,
 ):
     best_nll = float('inf')
     best_kt_corr = -2.
@@ -916,6 +956,7 @@ def hyper_param_train(
             if params.combine_train_val:
                 model_copy = copy.deepcopy(model)
             optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
+            #print('point 1:', nvidia_smi())
             logging, data_split_rng2, _, _ = train_ensemble(
                     params,
                     train_batch_size,
@@ -932,7 +973,10 @@ def hyper_param_train(
                     predict_info_models=predict_info_models,
                     data_split_rng=data_split_rng2,
                     ood_val_frac=params.ood_val_frac,
+                    sample_uniform_fn=sample_uniform_fn,
                     )
+            torch.cuda.empty_cache()
+            #print('point 2:', nvidia_smi())
             best_cur_epoch_iter += [logging[1]['best']['epoch_iter']]
             print('best_epoch:', logging[1]['best']['epoch_iter'])
         best_cur_epoch_iter = int(math.ceil(sum(best_cur_epoch_iter)/float(len(best_cur_epoch_iter))))
@@ -955,11 +999,13 @@ def hyper_param_train(
             if not found_best:
                 break
         if found_best:
-            best_model = model_copy
-            best_optim = optim
+            #best_model = model_copy
+            #best_optim = optim
             best_logging = logging
             best_gamma = gamma
             best_epoch_iter = best_cur_epoch_iter
+    del model_copy
+    del optim
 
     data_split_rng = data_split_rng2
     logging = best_logging
@@ -974,7 +1020,10 @@ def hyper_param_train(
 
     if params.combine_train_val:
         assert best_epoch_iter >= 0
+        print('combine_train_val')
+        #print('point 3:', nvidia_smi())
         optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        #print('point 4:', nvidia_smi())
         _, _, _, _ = train_ensemble(
                 params, 
                 train_batch_size,
@@ -988,7 +1037,10 @@ def hyper_param_train(
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 num_epoch_iters=best_epoch_iter+1,
                 predict_info_models=predict_info_models,
+                sample_uniform_fn=sample_uniform_fn,
                 )
+        #print('point 5:', nvidia_smi())
+        print('combine_train_val done')
     elif params.hyper_search_choose_type != params.final_train_choose_type:
         assert False, "for paper we aren't doing this option"
         optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
@@ -1008,11 +1060,13 @@ def hyper_param_train(
                 predict_info_models=predict_info_models,
                 data_split_rng=data_split_rng2,
                 ood_val_frac=params.ood_val_frac,
+                sample_uniform_fn=sample_uniform_fn,
                 )
     else:
         assert False, "for paper we aren't doing this option"
         assert best_model is not None
         model = best_model
+    torch.cuda.empty_cache()
 
     return model, logging, best_gamma, data_split_rng
 

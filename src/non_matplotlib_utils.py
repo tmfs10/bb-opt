@@ -10,6 +10,7 @@ import pyro
 import torch
 import sys
 import ops
+from scipy.io import loadmat
 
 def sigmoid(x, exp=np.exp):
   return 1.0 / (1.0 + exp(-x))
@@ -266,4 +267,20 @@ def sqdist(X1, X2=None, do_mean=False, collect=True):
             else:
                 return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
 
+
+def load_image(mat_path):
+    d = loadmat(mat_path)
+    return d["image"], d["gender"][0], d["age"][0], d["db"][0], d["img_size"][0, 0], d["min_score"][0, 0]
+
+
+def load_data_wiki_sid(
+    data_root: str,
+    dataset: str,
+):
+
+    data_dir = os.path.join(data_root, dataset+'_db.mat')
+    image, gender, labels, _, _, _ = load_image(data_dir)
+    inputs = np.moveaxis(image, -1, 1)
+
+    return inputs, labels, gender
 

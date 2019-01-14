@@ -18,6 +18,7 @@ import torch.distributions as tdist
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
+from bb_opt.src.networks.wide_resnet import Wide_ResNet
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -309,7 +310,7 @@ class NNEnsemble(torch.nn.Module):
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
 
         if return_mse:
-            mse = mse.mean(dim=-1).sum()
+            mse = mse.mean(dim=-1).mean()
             return negative_log_likelihood, mse
         return negative_log_likelihood
 
@@ -588,6 +589,32 @@ class NNEnsemble(torch.nn.Module):
             pickle.dump(kwargs, f)
 
         save_checkpoint(fname, self, optimizer)
+
+    @classmethod
+    def get_model_resnet(
+        cls,
+        n_inputs: int,
+        n_models: int = 5,
+        depth: int = 16,
+        widen_factor: int=8,
+        dropout: float=0.3,
+        device=None,
+        extra_random: bool = False,
+    ):
+        device = device or "cpu"
+
+        model_kwargs = {
+                "depth": depth,
+                "widen_factor": widen_factor,
+                "dropout_rate":dropout
+                } # args.depth, args.widen_factor, args.dropout, num_classes
+        model = cls(   
+                    n_models, 
+                    Wide_ResNet, 
+                    model_kwargs, 
+                    adversarial_epsilon=None
+                ).to(device)
+        return model
 
     @classmethod
     def load_model(

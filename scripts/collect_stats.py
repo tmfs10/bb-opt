@@ -8,25 +8,39 @@ import seaborn as sns
 from scipy.stats import ttest_ind, ttest_rel, combine_pvalues
 
 
-def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False):
-    stats_to_extract = [
-            'logging',
-            'ack_idx',
-            'ack_labels',
-            'ack_rel_opt_value',
-            'best_hsic',
-            'ir_batch_cur',
-            'ir_batch_cur_idx',
-            'idx_frac',
-            'test_log_prob',
-            'test_mse',
-            'test_kt_corr',
-            'test_std_list',
-            'test_mse_std_corr',
-            'test_pred_corr',
-            'corr_stats',
-            'best_gamma',
-            ]
+def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False, mode="al"):
+    if mode == "bayes_opt":
+        stats_to_extract = [
+                'logging',
+                'ack_idx',
+                'ack_labels',
+                'ack_rel_opt_value',
+                'best_hsic',
+                'ir_batch_cur',
+                'ir_batch_cur_idx',
+                'idx_frac',
+                'test_log_prob',
+                'test_mse',
+                'test_kt_corr',
+                'test_std_list',
+                'test_mse_std_corr',
+                'test_pred_corr',
+                'corr_stats',
+                'best_gamma',
+                ]
+    else:
+        assert mode == "al"
+        stats_to_extract = [
+                'logging',
+                'ack_idx',
+                'ack_labels',
+                'best_hsic',
+                'corr_stats',
+                'best_gamma',
+                'ind_top_ood_pred_stats',
+                'ood_pred_stats',
+                'test_pred_stats',
+                ]
 
     stats = []
     for i_sample in range(1, num_samples+1):
@@ -114,7 +128,7 @@ def plot_data_vs_ack_iter(
                 if len(stats[filename][batch_size]) < num_acks:
                     continue
                 cur_stats = stats[filename][batch_size]
-                cur_points = [data_extractor_fn(cur_stats[ack_iter]) for ack_iter in range(num_acks)]
+                cur_points = [data_extractor_fn(cur_stats[ack_iter], filename) for ack_iter in range(num_acks)]
                 cur_points = np.array(cur_points)
                 if mode == 'no_avg':
                     plt.plot(cur_points)

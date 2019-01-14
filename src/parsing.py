@@ -54,6 +54,8 @@ def verify_empirical_stat(stat):
     return stat
 
 def add_parse_args(parser):
+    parser.add_argument('--project', type=str)
+    parser.add_argument('--mode', type=str)
     parser.add_argument('--config_file', type=str, nargs='+')
     parser.add_argument('--seed', type=int, 
             help='random seed')
@@ -70,6 +72,10 @@ def add_parse_args(parser):
     parser.add_argument("--ack_change_stat_logging", type=str2bool)
     parser.add_argument("--ack_hsic_stat_logging", type=str2bool)
     parser.add_argument("--empirical_ack_change_stat_logging", type=str2bool)
+
+    parser.add_argument("--num_ood_to_eval", type=int)
+    parser.add_argument("--num_ind_to_eval", type=int)
+    parser.add_argument("--num_test_points", type=int)
 
     # train params
     parser.add_argument('--exclude_top', type=float01)
@@ -102,7 +108,7 @@ def add_parse_args(parser):
     parser.add_argument('--num_hidden', type=int)
     parser.add_argument('--sigmoid_coeff', type=float)
     parser.add_argument('--separate_mean_var', type=str2bool)
-    parser.add_argument('--output_dist_fn', type=str2dist)
+    parser.add_argument('--output_noise_dist_fn', type=str2dist)
     parser.add_argument('--init_train_l2', type=float)
     parser.add_argument('--re_train_l2', type=float)
 
@@ -162,6 +168,13 @@ def add_parse_args_nongrad(parser):
     parser.add_argument('--hsic_kernel_fn', type=str)
     parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
     parser.add_argument('--normalize_hsic', type=str2bool)
+
+
+def add_parse_imdbwiki_args(parser):
+    parser.add_argument('--resnet_depth', type=int)
+    parser.add_argument('--resnet_width_factor', type=int)
+    parser.add_argument('--resnet_dropout', type=float)
+    parser.add_argument('--train_gender', type=int) # 0 female, 1 male, 2 both
 
 
 def add_parse_args_grad(parser):

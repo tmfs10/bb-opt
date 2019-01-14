@@ -30,10 +30,21 @@ class wide_basic(nn.Module):
         self.conv2 = nn.Conv2d(planes, planes, kernel_size=3, stride=stride, padding=1, bias=True)
 
         self.shortcut = nn.Sequential()
+        self.conv3 = None
         if stride != 1 or in_planes != planes:
+            self.conv3 = nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride, bias=True)
             self.shortcut = nn.Sequential(
-                nn.Conv2d(in_planes, planes, kernel_size=1, stride=stride, bias=True),
+                self.conv3,
             )
+
+    def reset_parameters(self):
+        nets = [self.conv1,
+                self.conv2,
+                self.conv3
+                ]
+        for k in nets:
+            if k is not None:
+                k.reset_parameters()
 
     def forward(self, x):
         out = self.dropout(self.conv1(F.relu(self.bn1(x))))
@@ -72,6 +83,16 @@ class Wide_ResNet(nn.Module):
 
         return nn.Sequential(*layers)
 
+    def reset_parameters(self):
+        nets = [self.conv1,
+                self.layer1,
+                self.layer2,
+                self.layer3,
+                self.linear,
+                ]
+        for k in nets:
+            k.reset_parameters()
+
     def forward(self, x):
         out = self.conv1(x)
         out = self.layer1(out)
@@ -81,8 +102,8 @@ class Wide_ResNet(nn.Module):
         out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
         out = self.linear(out)
-        mean =torch.sigmoid(out[:,0])
-        variance =torch.sigmoid(out[:,1])*0.1+1e-5
+        mean = torch.sigmoid(out[:,0])
+        variance = torch.sigmoid(out[:,1])*0.1+1e-5
 
         return mean, variance
 
