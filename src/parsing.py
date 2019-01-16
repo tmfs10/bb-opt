@@ -54,6 +54,7 @@ def verify_empirical_stat(stat):
     return stat
 
 def add_parse_args(parser):
+    parser.add_argument('--gpu', type=int)
     parser.add_argument('--project', type=str)
     parser.add_argument('--mode', type=str)
     parser.add_argument('--config_file', type=str, nargs='+')
@@ -113,6 +114,8 @@ def add_parse_args(parser):
     parser.add_argument('--re_train_l2', type=float)
 
     parser.add_argument('--unseen_reg', type=strlower)
+    parser.add_argument('--indist_sampling', type=str2bool)
+    parser.add_argument('--fc_sampling', type=str2bool)
     parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
     parser.add_argument('--ood_data_batch_factor', type=float)

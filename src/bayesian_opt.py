@@ -2211,6 +2211,46 @@ def get_bagging_er(
     return cur_ack_idx
 
 
+def fake_ack_value(
+    params,
+    orig_model,
+    data,
+    skip_idx,
+    ack_idx,
+    ack_batch_size,
+    train_fn,
+):
+    skip_idx = list(skip_idx)
+    bX, bY, X, Y = data
+
+    model = copy.deepcopy(orig_model)
+    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
+
+    num_iter = 20
+    for i in range(num_iter):
+        means, variances = model(bX)
+        nll = model.compute_negative_log_likelihood(
+            bY,
+            means,
+            variances,
+            return_mse=False,
+        )
+        optim.zero_grad()
+        nll.backward()
+        optim.step()
+
+    with torch.no_grad():
+        pred_means, pred_vars = model(X)
+        er = pred_means.mean(dim=0).view(-1)
+        std = pred_means.std(dim=0).view(-1)
+        ucb_measure = er + (params.ucb * std)
+        ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+        ucb_sort, ucb_sort_idx = torch.sort(ucb_measure, descending=True)
+
+    #return ucb_sort[:ack_batch_size-len(ack_idx)].detach().cpu().numpy().tolist()
+    return ucb_sort[0].item()
+
+
 def get_nb_mcts_ack(
     params,
     orig_model,
@@ -2219,7 +2259,84 @@ def get_nb_mcts_ack(
     skip_idx,
     train_fn,
 ):
-    pass
+    skip_idx = list(skip_idx)
+    train_X, train_Y, X, Y = data
+    ack_idx = []
+    fake_ack_idx = []
+
+    ucb_measure = None
+    model = copy.deepcopy(orig_model)
+    optim = torch.optim.Adam(list(model.parameters()), lr=params.re_train_lr, weight_decay=params.re_train_l2)
+    for batch_iter in range(ack_batch_size):
+        with torch.no_grad():
+            pred_means, pred_vars = model(X)
+            er = pred_means.mean(dim=0).view(-1)
+            std = pred_means.std(dim=0).view(-1)
+            ucb_measure = er + params.ucb*std
+            ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
+            ucb_sort, ucb_sort_idx = torch.sort(ucb_measure, descending=True)
+
+        if len(ack_idx) >= ack_batch_size:
+            break
+
+        if params.sigmoid_coeff > 0:
+            bY = utils.sigmoid_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+        else:
+            bY = utils.normal_standardization(
+                    train_Y,
+                    train_Y.mean(),
+                    train_Y.std(),
+                    exp=torch.exp)
+
+        print('batch_iter', batch_iter)
+
+        candidate_fake_ack_idx = ucb_sort_idx[:10]
+
+        std_mean = std.mean().item()
+
+        fake_ack_scores = []
+        for fake_ack_iter in range(len(candidate_fake_ack_idx)):
+            candidate_idx = candidate_fake_ack_idx[fake_ack_iter].item()
+            score = fake_ack_value(
+                    params,
+                    model,
+                    [
+                        torch.cat([train_X, X[ack_idx + [candidate_idx]]], dim=0),
+                        torch.cat([train_Y, er[ack_idx + [candidate_idx]]], dim=0),
+                        X,
+                        Y,
+                    ],
+                    skip_idx,
+                    ack_idx + [candidate_idx],
+                    ack_batch_size,
+                    train_fn
+                    )
+            fake_ack_scores += [ucb_sort[fake_ack_iter].item() + score]
+        idx = torch.sort(torch.tensor(fake_ack_scores, device=params.device), descending=True)[1]
+        ack_idx += [candidate_fake_ack_idx[idx[0].item()].item()]
+
+        bX = torch.cat([train_X, X[ack_idx]], dim=0)
+        bY = torch.cat([bY, er[ack_idx]], dim=0)
+
+        num_iter = 20
+        for i in range(num_iter):
+            means, variances = model(bX)
+            nll = model.compute_negative_log_likelihood(
+                bY,
+                means,
+                variances,
+                return_mse=False,
+            )
+            optim.zero_grad()
+            nll.backward()
+            optim.step()
+
+    return ack_idx
+
 
 
 def get_kriging_believer_ack(

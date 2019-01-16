@@ -129,6 +129,7 @@ def plot_data_vs_ack_iter(
                     continue
                 cur_stats = stats[filename][batch_size]
                 cur_points = [data_extractor_fn(cur_stats[ack_iter], filename) for ack_iter in range(num_acks)]
+                #cur_points = cur_points + [cur_points[-1]]*(num_acks-len(cur_stats))
                 cur_points = np.array(cur_points)
                 if mode == 'no_avg':
                     plt.plot(cur_points)

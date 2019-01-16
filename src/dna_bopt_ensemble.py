@@ -1,7 +1,24 @@
 
 import sys
+from gpu_utils.utils import gpu_init, nvidia_smi
+import parsing
+import argparse
 sys.path.append('/cluster/sj1')
 sys.path.append('/cluster/sj1/bb_opt/src')
+
+parser = argparse.ArgumentParser()
+parsing.add_parse_args(parser)
+parsing.add_parse_args_nongrad(parser)
+parsing.add_parse_args_ensemble(parser)
+parsing.add_parse_args_wrongness(parser)
+parsing.add_parse_imdbwiki_args(parser)
+
+params = parsing.parse_args(parser)
+
+if params.gpu == -1:
+    gpu_id = gpu_init(best_gpu_metric="mem")
+else:
+    gpu_id = gpu_init(gpu_id=params.gpu)
 
 import os
 import torch
@@ -15,31 +32,18 @@ from scipy.stats import kendalltau, pearsonr
 import dna_bopt as dbopt
 import bayesian_opt as bopt
 import active_learning as al
-from gpu_utils.utils import gpu_init
 import pandas as pd
 import copy
 import non_matplotlib_utils as utils
 import datetime
-import parsing
-import argparse
 import ops
-from deep_ensemble_sid import NNEnsemble
-
-parser = argparse.ArgumentParser()
-parsing.add_parse_args(parser)
-parsing.add_parse_args_nongrad(parser)
-parsing.add_parse_args_ensemble(parser)
-parsing.add_parse_args_wrongness(parser)
-parsing.add_parse_imdbwiki_args(parser)
-
-params = parsing.parse_args(parser)
+from deep_ensemble_sid import NNEnsemble, ResnetEnsemble
 
 print('PARAMS:')
 for k, v in vars(params).items():
     print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
 
-gpu_id = gpu_init(best_gpu_metric="mem")
 print(f"Running on GPU {gpu_id}")
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 params.device = device
@@ -59,8 +63,7 @@ if not os.path.exists(params.output_dir):
 
 task_name = []
 if params.project == 'dna_binding':
-    filenames = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
-    task_name += [filename]
+    task_name = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
     sample_uniform_fn = dbopt.dna_sample_uniform
 elif params.project in ['imdb', 'wiki']:
     task_name += [params.project]
@@ -84,16 +87,22 @@ for task_iter in range(len(task_name)):
     ops.set_rng_state(cur_rng)
     ###
 
+    ood_inputs = None
+    ood_labels = None
     if params.project == 'dna_binding':
         inputs = np.load(params.data_dir + "/" + task_name[task_iter] + "/inputs.npy").astype(np.float32)
         labels = np.load(params.data_dir + "/" + task_name[task_iter] + "/labels.npy").astype(np.float32)
         if params.take_log:
             labels = np.log(labels)
+
+        X = torch.tensor(inputs, device=device)
+        Y = torch.tensor(labels, device=device)
     elif params.project in ['imdb', 'wiki']:
         inputs, labels, gender = utils.load_data_wiki_sid(
                 params.data_dir,
                 params.project,
                 )
+        inputs = inputs.astype(np.float32)/255.
         male_gender = (gender == 1)
         female_gender = (gender == 0)
         
@@ -170,14 +179,25 @@ for task_iter in range(len(task_name)):
                 separate_mean_var=params.separate_mean_var,
                 )
     elif params.project in ["wiki", "imdb"]:
-        init_model = NNEnsemble.get_model_resnet(
-                inputs.shape[1], 
-                params.num_models, 
-                params.resnet_depth,
-                params.resnet_width_factor,
-                params.resnet_dropout,
-                device=params.device,
-                )
+        if params.fc_sampling:
+            init_model = ResnetEnsemble(
+                    params,
+                    params.num_models, 
+                    inputs.shape[1], 
+                    depth=params.resnet_depth,
+                    widen_factor=params.resnet_width_factor,
+                    n_hidden=params.num_hidden,
+                    dropout_factor=params.resnet_dropout,
+                    ).to(params.device)
+        else:
+            init_model = NNEnsemble.get_model_resnet(
+                    inputs.shape[1], 
+                    params.num_models, 
+                    params.resnet_depth,
+                    params.resnet_width_factor,
+                    params.resnet_dropout,
+                    device=params.device,
+                    )
 
     ensemble_init_rng = ops.get_rng_state()
     ops.set_rng_state(cur_rng)
@@ -199,7 +219,11 @@ for task_iter in range(len(task_name)):
     loaded = False
 
     with torch.no_grad():
-        preds, preds_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+        init_model.eval()
+        if params.mode == "bayes_opt":
+            preds, preds_vars = init_model(X) # (num_candidate_points, num_samples)
+        else:
+            preds, preds_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
         ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
                 preds,
                 torch.sqrt(preds_vars),
@@ -228,7 +252,10 @@ for task_iter in range(len(task_name)):
         assert ood_inputs.shape[0] == ood_labels.shape[0]
 
         with torch.no_grad():
-            ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+            if params.mode == "bayes_opt":
+                ood_preds_means, ood_preds_vars = init_model(ood_X) # (num_candidate_points, num_samples)
+            else:
+                ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
             ood_pred_stats = bopt.get_pred_stats(
                     ood_preds_means,
                     torch.sqrt(ood_preds_vars),
@@ -247,16 +274,48 @@ for task_iter in range(len(task_name)):
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
+        if params.project in ['imdb', 'wiki']:
+            assert not (params.indist_sampling and params.fc_sampling)
+            if params.indist_sampling:
+                def sample_uniform_fn(batch_size):
+                    idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
+                    random.shuffle(idx)
+                    return X[idx[:batch_size]]
+            elif params.fc_sampling:
+                def sample_uniform_fn(batch_size):
+                    init_model.eval()
+                    idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
+                    random.shuffle(idx)
+                    out = init_model.conv_forward(X[idx[:batch_size]])
+                    return out
 
-        init_model, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
-            params,
-            init_model,
-            [train_X_init, train_Y_cur, X, Y],
-            stage="init",
-            data_split_rng=data_split_rng,
-            predict_info_models=predict_info_models if params.predict_mi else None,
-            sample_uniform_fn=sample_uniform_fn,
-            )
+        if params.project in ['imdb', 'wiki'] and params.fc_sampling:
+            logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
+                params,
+                init_model,
+                [train_X_init, train_Y_cur, X, Y],
+                "init",
+                params.gammas,
+                params.unseen_reg,
+                data_split_rng=data_split_rng,
+                predict_info_models=predict_info_models if params.predict_mi else None,
+                sample_uniform_fn=sample_uniform_fn,
+                )
+        else:
+            logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                params,
+                init_model,
+                [train_X_init, train_Y_cur, X, Y],
+                "init",
+                params.gammas,
+                params.unseen_reg,
+                data_split_rng=data_split_rng,
+                predict_info_models=predict_info_models if params.predict_mi else None,
+                sample_uniform_fn=sample_uniform_fn,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                )
+        torch.cuda.empty_cache()
+        #print('point 6:', nvidia_smi())
 
         cur_rmse = logging[1]['val']['rmse']
 
@@ -297,7 +356,8 @@ for task_iter in range(len(task_name)):
 
             cur_model = copy.deepcopy(init_model)
 
-            skip_idx_cur = set(train_idx.tolist())
+            skip_idx_cur = set(train_idx.tolist() + test_idx.tolist())
+            train_idx_cur = set(train_idx.tolist())
             ack_all_cur = set()
 
             if os.path.exists(batch_output_dir + "/" + str(params.num_acks-1) + ".pth") and not params.clean:
@@ -314,7 +374,11 @@ for task_iter in range(len(task_name)):
                     # test stats computation
                     print('doing ack_iter', ack_iter)
                     with torch.no_grad():
-                        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+                        cur_model.eval()
+                        if params.mode == "bayes_opt":
+                            pre_ack_pred_means, pre_ack_pred_vars = cur_model(X) # (num_candidate_points, num_samples)
+                        else:
+                            pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
                         pre_ack_pred_means = pre_ack_pred_means.detach()
                         pre_ack_pred_vars = pre_ack_pred_vars.detach()
                         assert pre_ack_pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_pred_means.shape), str(Y.shape))
@@ -349,7 +413,10 @@ for task_iter in range(len(task_name)):
                         if ood_inputs is not None:
                             assert ood_labels is not None
                             assert ood_inputs.shape[0] == ood_labels.shape[0]
-                            ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+                            if params.mode == "bayes_opt":
+                                ood_preds_means, preds_vars = cur_model(ood_X) # (num_candidate_points, num_samples)
+                            else:
+                                ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
                             ood_pred_stats = bopt.get_pred_stats(
                                     ood_preds_means,
                                     torch.sqrt(ood_preds_vars),
@@ -448,6 +515,15 @@ for task_iter in range(len(task_name)):
                                     dbopt.train_ensemble,
                                     cur_rmse,
                                     )
+                        elif params.ack_fun == "nb_mcts":
+                            cur_ack_idx = bopt.get_nb_mcts_ack(
+                                    params,
+                                    cur_model,
+                                    [train_X_cur, train_Y_cur, X, Y],
+                                    ack_batch_size,
+                                    skip_idx_cur,
+                                    dbopt.train_ensemble,
+                                    )
                         elif "_ucb" in params.ack_fun:
                             cur_ack_idx = bopt.get_noninfo_ack(
                                     params,
@@ -515,6 +591,7 @@ for task_iter in range(len(task_name)):
                     assert type(cur_ack_idx) == list
                     ack_all_cur.update(cur_ack_idx)
                     skip_idx_cur.update(cur_ack_idx)
+                    train_idx_cur.update(cur_ack_idx)
                     expected_num_points = (ack_iter+1)*ack_batch_size
                     idx_at_each_iter += [cur_ack_idx]
 
@@ -589,35 +666,68 @@ for task_iter in range(len(task_name)):
                     #print('er_labels', labels[cur_ack_idx])
                     #print('ack_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
 
-                    assert len(skip_idx_cur) == int(params.init_train_examples) + expected_num_points, str(len(skip_idx_cur)) + " == " + str(int(params.init_train_examples) + expected_num_points)
+                    assert len(skip_idx_cur) == int(params.init_train_examples + len(test_idx)) + expected_num_points, str(len(skip_idx_cur)) + " == " + str(int(params.init_train_examples + len(test_idx)) + expected_num_points)
 
-                    new_idx = list(skip_idx_cur)
+                    new_idx = list(train_idx_cur)
                     random.shuffle(new_idx)
                     new_idx = torch.LongTensor(new_idx)
 
-                    train_X_cur = X.new_tensor(X[new_idx])
-                    train_Y_cur = Y.new_tensor(Y[new_idx])
+                    train_X_cur = X.new_tensor(X[new_idx]).detach()
+                    train_Y_cur = Y.new_tensor(Y[new_idx]).detach()
 
                     print("train_X_cur.shape", train_X_cur.shape)
                     
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
 
-                    cur_model, ensemble_init_rng = dbopt.reinit_model(
+                    ensemble_init_rng = dbopt.reinit_model(
                         params,
                         init_model,
                         cur_model,
                         ensemble_init_rng
                         )
-                    cur_model, logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
-                        params,
-                        cur_model,
-                        [train_X_cur, train_Y_cur, X, Y],
-                        stage="re",
-                        data_split_rng=data_split_rng,
-                        predict_info_models=predict_info_models if params.predict_mi else None,
-                        sample_uniform_fn=sample_uniform_fn,
-                        )
+                    if params.project in ['imdb', 'wiki']:
+                        assert not (params.indist_sampling and params.fc_sampling)
+                        if params.indist_sampling:
+                            def sample_uniform_fn(batch_size):
+                                idx = list(set(range(X.shape[0])).difference(skip_idx_cur))
+                                random.shuffle(idx)
+                                return X[idx[:batch_size]]
+                        elif params.fc_sampling:
+                            def sample_uniform_fn(batch_size):
+                                cur_model.eval()
+                                idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
+                                random.shuffle(idx)
+                                out = cur_model.conv_forward(X[idx[:batch_size]])
+                                return out
+
+                    if params.project in ['imdb', 'wiki'] and params.fc_sampling:
+                        logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
+                            params,
+                            cur_model,
+                            [train_X_cur, train_Y_cur, X, Y],
+                            "re",
+                            params.gammas,
+                            params.unseen_reg,
+                            data_split_rng=data_split_rng,
+                            predict_info_models=predict_info_models if params.predict_mi else None,
+                            sample_uniform_fn=sample_uniform_fn,
+                            )
+                    else:
+                        logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                            params,
+                            cur_model,
+                            [train_X_cur, train_Y_cur, X, Y],
+                            "re",
+                            params.gammas,
+                            params.unseen_reg,
+                            data_split_rng=data_split_rng,
+                            predict_info_models=predict_info_models if params.predict_mi else None,
+                            sample_uniform_fn=sample_uniform_fn,
+                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            )
+                    torch.cuda.empty_cache()
+                    #print('point 7:', nvidia_smi())
 
                     cur_rmse = logging[1]['val']['rmse']
 

@@ -18,7 +18,7 @@ import torch.distributions as tdist
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
-from bb_opt.src.networks.wide_resnet import Wide_ResNet
+from bb_opt.src.networks.wide_resnet_sid import Wide_ResNet
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -30,10 +30,6 @@ def sample_uniform(out_size):
     return out_data
 
 class NN(torch.nn.Module):
-    """
-    Single-layer MLP that predicts a Gaussian for each point.
-    """
-
     def __init__(self, 
             n_inputs: int, 
             n_hidden: int, 
@@ -45,36 +41,44 @@ class NN(torch.nn.Module):
         if separate_mean_var:
             self.hidden = [Linear(n_inputs, n_hidden), Linear(n_inputs, n_hidden)]
             self.output = [Linear(n_hidden, 1), Linear(n_hidden, 1)]
+            self.hidden = nn.ModuleList(self.hidden)
         else:
-            self.hidden = [Linear(n_inputs, n_hidden)]
-            self.output = [Linear(n_hidden, 2)]
-        self.hidden = nn.ModuleList(self.hidden)
+            if n_hidden > 0:
+                self.hidden = [Linear(n_inputs, n_hidden)]
+                self.output = [Linear(n_hidden, 2)]
+                self.hidden = nn.ModuleList(self.hidden)
+            else:
+                self.output = [Linear(n_inputs, 2)]
         self.output = nn.ModuleList(self.output)
 
         self.non_linearity = ReLU()
         self.softplus = Softplus()
         self.min_variance = min_variance
         self.sigmoid_coeff = sigmoid_coeff
+        self.n_hidden = n_hidden
 
     def forward(self, x):
         hidden = []
         output = []
         for i in range(len(self.output)):
-            hidden += [self.non_linearity(self.hidden[i](x))]
-            output += [self.output[i](hidden[-1])]
+            if self.n_hidden > 0:
+                hidden += [self.non_linearity(self.hidden[i](x))]
+                output += [self.output[i](hidden[-1])]
+            else:
+                output += [self.output[i](x)]
 
         if len(output) == 1:
             if self.sigmoid_coeff > 0:
                 mean = torch.sigmoid(output[0][:, 0])*self.sigmoid_coeff
             else:
                 mean = output[:, 0]
-            variance = torch.sigmoid(output[0][:, 1])+self.min_variance
+            variance = torch.sigmoid(output[0][:, 1])*0.1+self.min_variance
         else:
             if self.sigmoid_coeff > 0:
                 mean = torch.sigmoid(output[0])*self.sigmoid_coeff
             else:
                 mean = output[0]
-            variance = torch.sigmoid(output[1])+self.min_variance
+            variance = torch.sigmoid(output[1])*0.1+self.min_variance
 
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean.view(-1), variance.view(-1)
@@ -86,10 +90,6 @@ class NN(torch.nn.Module):
             o.reset_parameters()
 
 class NN2(torch.nn.Module):
-    """
-    Single-layer MLP that predicts a Gaussian for each point.
-    """
-
     def __init__(self, 
 			n_inputs: int, 
 			n_hidden: int, 
@@ -185,14 +185,6 @@ def uniform_weights(module, min_val: float = -5.0, max_val: float = 5.0):
 
 
 class NNEnsemble(torch.nn.Module):
-    """
-    Ensemble of `NN`s, trained individually but whose predictions can be combined.
-    Adversarial training will be used if `adversarial_epsilon` is not `None`.
-
-    Note that if training your model takes a lot of GPU resources, it would be
-    better to train the individual models on separate GPUs in parallel and then
-    save them and load the weights into an ensemble afterwards for evaluation.
-    """
 
     def __init__(
         self,
@@ -338,13 +330,13 @@ class NNEnsemble(torch.nn.Module):
         # 1.83 = 2*pi
 
         d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
-        negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean()
+        negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean().detach()
 
         if custom_std is None:
             d = tdist.Normal(m, torch.sqrt(v))
         else:
             d = tdist.Normal(m, custom_std)
-        negative_log_likelihood2 = -d.log_prob(labels).mean()
+        negative_log_likelihood2 = -d.log_prob(labels).mean().detach()
 
         #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.834)
         #nll1 = nll1.mean(dim=-1).mean()
@@ -380,7 +372,7 @@ class NNEnsemble(torch.nn.Module):
         adversarial_epsilon: Optional = None,
         device=None,
         nonlinearity_names: Sequence[str] = None,
-        extra_random: bool = True,
+        extra_random: bool = False,
         single_layer:bool = True,
         sigmoid_coeff : float = 1.,
         separate_mean_var = False,
@@ -400,16 +392,7 @@ class NNEnsemble(torch.nn.Module):
             return model
 
         def gelu(x):
-            return (
-                0.5
-                * x
-                * (
-                    1
-                    + torch.tanh(
-                        torch.sqrt(2 / x.new_tensor(np.pi)) * (x + 0.044715 * x ** 3)
-                    )
-                )
-            )
+            return 0.5 * x * ( 1 + torch.tanh( torch.sqrt(2 / x.new_tensor(np.pi)) * (x + 0.044715 * x ** 3)))
 
         def swish(x):
             return x * torch.sigmoid(x)
@@ -667,3 +650,81 @@ class NNEnsemble(torch.nn.Module):
         except KeyError:
             load_checkpoint(fname, model)
             return model
+
+
+class ResnetEnsemble(torch.nn.Module):
+    def __init__(self,
+        params,
+        n_models,
+        n_inputs,
+        depth=16,
+        widen_factor=8,
+        n_hidden=100,
+        dropout_factor=0.0,
+    ):
+        super().__init__()
+        assert params.fc_sampling
+
+        self.conv_model = Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True)
+        self.fc_layers = NNEnsemble.get_model(
+                self.conv_model.nStages[3],
+                n_models,
+                n_hidden,
+                device=params.device,
+                extra_random=False,
+                )
+
+        print('num resnet params:', sum(p.numel() for p in self.conv_model.parameters()))
+        print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers.parameters()))
+
+    def freeze_conv(self):
+        self.conv_model.eval()
+        for param in self.conv_model.parameters():
+            param.requires_grad = False
+
+    def unfreeze_conv(self):
+        for param in self.conv_model.parameters():
+            param.requires_grad = True
+
+    def forward(self, x):
+        fc_input = self.conv_model(x)
+        out = self.fc_layers.forward(fc_input)
+        return out
+
+    def conv_forward(self, x):
+        return self.conv_model(x)
+
+    def fc_forward(self, fc_input):
+        out = self.fc_layers.forward(fc_input)
+        return out
+
+    def reset_parameters(self):
+        self.conv_model.reset_parameters()
+        self.fc_layers.reset_parameters()
+
+    @staticmethod
+    def combine_means_variances(means, variances):
+        return NNEnsemble.combine_means_variances(means, variances)
+
+    @staticmethod
+    def compute_negative_log_likelihood(
+        labels, means, variances, return_mse: bool = False
+    ):
+        return NNEnsemble.compute_negative_log_likelihood(
+                labels,
+                means,
+                variances,
+                return_mse
+                )
+
+    @staticmethod
+    def report_metric(labels, means, variances, custom_std=None, return_mse=False):
+        return NNEnsemble.fc_layers(
+                labels,
+                means,
+                variances,
+                custom_std,
+                return_mse
+                )
+
+

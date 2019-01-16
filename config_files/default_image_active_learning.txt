@@ -1,4 +1,5 @@
 
+--gpu -1
 --project wiki
 --mode active_learning
 --seed 1
@@ -18,16 +19,16 @@
 
 --exclude_top 0.0
 --init_train_examples 1000
---init_train_num_epochs 80
---re_train_num_epochs 40
---init_train_batch_size 32
+--init_train_num_epochs 30
+--re_train_num_epochs 30
+--init_train_batch_size 100
+--re_train_batch_size 100
 
 --init_train_lr 1e-3
 --re_train_lr 1e-3
 --init_train_l2 1e-3
 --re_train_l2 1e-3
 
---re_train_batch_size 20
 --val_frac 0.1
 --ood_val_frac 0.1
 --num_train_val_splits 1
@@ -36,7 +37,8 @@
 
 --resnet_depth 4
 --resnet_width_factor 4
---resnet_dropout 0.3
+--resnet_dropout 0.0
+--num_hidden 10
 
 --sigmoid_coeff 1.0
 --separate_mean_var False
@@ -47,6 +49,8 @@
 --unseen_reg normal
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
+--indist_sampling False
+--fc_sampling True
 
 --data_dir ../data/
 --output_dir ../experiments/imdbwiki/ensemble1/o
