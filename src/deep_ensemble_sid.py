@@ -276,19 +276,6 @@ class NNEnsemble(torch.nn.Module):
     def combine_means_variances(
         means: torch.Tensor, variances: torch.Tensor
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        r"""
-        Combine individual means/variances of Gaussian mixture into the mixture mean/variance.
-
-        Note that we assume equal weighting between mixture components.
-        The mean of the mixture is just the average of the individual Gaussians means:
-        $$\mu^* = \frac 1 M \sum_{i=1}^M \mu_i$$
-        The variance is
-        $${\sigma^*}^2 = \frac 1 M \sum_{i=1}^M (\sigma^2_i + \mu_i^2) - {\mu^*}^2$$
-
-        :param means: n_models x n_inputs
-        :param variances: n_models x n_inputs
-        :returns: (mean, variance) where each is of shape n_inputs
-        """
         mean = means.mean(dim=0)
         variance = (variances + means ** 2).mean(dim=0) - mean ** 2
         return mean, variance
@@ -663,7 +650,7 @@ class ResnetEnsemble(torch.nn.Module):
         dropout_factor=0.0,
     ):
         super().__init__()
-        assert params.fc_sampling
+        assert params.ensemble_type == "fc", params.ensemble_type
 
         self.conv_model = Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True)
         self.fc_layers = NNEnsemble.get_model(
@@ -676,6 +663,9 @@ class ResnetEnsemble(torch.nn.Module):
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model.parameters()))
         print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers.parameters()))
+
+    def fc_input_size(self):
+        return self.conv_model.nStages[3]
 
     def freeze_conv(self):
         self.conv_model.eval()
@@ -691,8 +681,23 @@ class ResnetEnsemble(torch.nn.Module):
         out = self.fc_layers.forward(fc_input)
         return out
 
-    def conv_forward(self, x):
-        return self.conv_model(x)
+    def conv_forward(self, x, batch_size=0):
+        if batch_size > 0:
+            N = x.shape[0]
+            num_batches = N//batch_size+1
+            batches = [i*batch_size  for i in range(num_batches)] + [N]
+            out = []
+            for bi in range(num_batches):
+                bs = batches[bi]
+                be = batches[bi+1]
+                bN = be-bs
+                if bN <= 0:
+                    continue
+                out += [self.conv_model(x[bs:be])]
+            out = torch.cat(out, dim=0)
+            return out
+        else:
+            return self.conv_model(x)
 
     def fc_forward(self, fc_input):
         out = self.fc_layers.forward(fc_input)

@@ -1776,6 +1776,12 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
     return pdts_idx
 
 
+def combine_means_variances(means, variances):
+    mean = means.mean(dim=0)
+    variance = (variances + means ** 2).mean(dim=0) - mean ** 2
+    return mean, variance
+
+
 def get_nll(
     preds,
     std,
@@ -1788,9 +1794,11 @@ def get_nll(
     assert preds.shape[1] == Y.shape[0]
     m = preds.shape[0]
     if single_gaussian:
+        mean, variance = combine_means_variances(preds, std**2)
         output_dist = output_noise_dist_fn(
-                preds.mean(0),
-                std.mean(0))
+                mean,
+                torch.sqrt(variance),
+                )
         log_prob = -output_dist.log_prob(Y)
     else:
         output_dist = output_noise_dist_fn(
@@ -1808,68 +1816,78 @@ def get_pred_stats(
     sigmoid_coeff,
     train_Y=None,
 ):
-    assert pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (pred_means.shape, Y.shape)
-    assert pred_means.shape == pred_std.shape,  "%s == %s" % (pred_means.shape, pred_std.shape)
+    with torch.no_grad():
+        assert pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (pred_means.shape, Y.shape)
+        assert pred_means.shape == pred_std.shape,  "%s == %s" % (pred_means.shape, pred_std.shape)
 
-    baseline_rmse = None
-    if train_Y is not None:
-        if sigmoid_coeff > 0:
-            Y = utils.sigmoid_standardization(
-                    Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
-            train_Y = utils.sigmoid_standardization(
-                    train_Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
+        baseline_rmse = None
+        if train_Y is not None:
+            if sigmoid_coeff > 0:
+                Y = utils.sigmoid_standardization(
+                        Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+                train_Y = utils.sigmoid_standardization(
+                        train_Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+            else:
+                Y = utils.normal_standardization(
+                        Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+                train_Y = utils.normal_standardization(
+                        train_Y,
+                        train_Y.mean(),
+                        train_Y.std(),
+                        exp=torch.exp)
+
+            baseline_rmse = torch.sqrt(torch.mean((Y-train_Y.mean())**2)).item()
+
+        log_prob = torch.mean(
+                    get_nll(
+                        pred_means, 
+                        pred_std, 
+                        Y,
+                        output_noise_dist_fn,
+                        )
+                    ).item()
+
+        combined_mean, combined_variances = combine_means_variances(pred_means, pred_std**2)
+        se = (combined_mean-Y)**2
+        rse = torch.sqrt(se)
+        rmse = torch.sqrt(torch.mean(se)).item()
+        
+        pred_mean_std = pred_means.std(dim=0)
+        std = pred_mean_std.mean().item()
+
+        if combined_mean.shape[0] > 1:
+            kt_corr = kendalltau(combined_mean, Y)[0]
+            rmse_std_corr = float(pearsonr(rse.cpu().numpy(), pred_mean_std.cpu().numpy())[0])
         else:
-            Y = utils.normal_standardization(
-                    Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
-            train_Y = utils.normal_standardization(
-                    train_Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
-
-        baseline_rmse = torch.sqrt(torch.mean((Y-train_Y.mean())**2)).item()
-
-    log_prob = torch.mean(
-                get_nll(
-                    pred_means, 
-                    pred_std, 
-                    Y,
-                    output_noise_dist_fn,
-                    )
-                ).item()
-
-    pred_means_mean = pred_means.mean(dim=0)
-    mse = (pred_means_mean-Y)**2
-    rmse = torch.sqrt(torch.mean(mse)).item()
-    
-    pred_mean_std = pred_means.std(dim=0)
-    std = pred_mean_std.mean().item()
-
-    if pred_means_mean.shape[0] > 1:
-        kt_corr = kendalltau(pred_means_mean, Y)[0]
-        rmse_std_corr = float(pearsonr(torch.sqrt(mse).cpu().numpy(), pred_mean_std.cpu().numpy())[0])
-    else:
-        kt_corr = 0
-        rmse_std_corr =0 
+            kt_corr = 0
+            rmse_std_corr =0 
 
 
-    ret = {
-            'log_prob' : log_prob,
-            'rmse' : rmse,
-            'kt_corr' : kt_corr,
-            'std' : std,
-            'rmse_std_corr' : rmse_std_corr,
-            'baseline_rmse' : baseline_rmse,
-            }
+        combined_std = torch.sqrt(combined_variances)
+        aleatoric_std_rmse_corr = float(pearsonr(combined_std.cpu().numpy(), rse.cpu().numpy())[0])
+        ae_std_corr = float(pearsonr(combined_std.cpu().numpy(), pred_mean_std.cpu().numpy())[0])
+
+
+        ret = {
+                'log_prob' : log_prob,
+                'rmse' : rmse,
+                'kt_corr' : kt_corr,
+                'std' : std,
+                'rmse_std_corr' : rmse_std_corr,
+                'baseline_rmse' : baseline_rmse,
+                'aleatoric_std_rmse_corr' : aleatoric_std_rmse_corr,
+                'ae_std_corr' : ae_std_corr,
+                'pred_std' : combined_std.mean().item(),
+                }
 
     return ret
 
@@ -1920,14 +1938,7 @@ def get_ind_top_ood_pred_stats(
     rmse_std_corr_list = []
     pred_corr = []
 
-    stats = {
-            'log_prob' : [],
-            'rmse' : [],
-            'kt_corr' : [],
-            'std' : [],
-            'rmse_std_corr' : []
-            }
-
+    stats = {}
     for frac in [1., 0.1, 0.01]:
         labels_sort_idx = torch.sort(unscaled_Y, descending=True)[1].cpu().numpy()
         n = max(int(labels_sort_idx.shape[0] * frac), 2)
@@ -1949,6 +1960,8 @@ def get_ind_top_ood_pred_stats(
                 )
 
         for stat in stats:
+            if stat not in stats:
+                stats[stat] = []
             stats[stat] += [ret[stat]]
 
     pred_corr += [0]

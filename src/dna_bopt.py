@@ -526,6 +526,44 @@ def reinit_model(
     return reset_rng_state
 
 
+def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
+    def loss_fn(X):
+        unseen_reg_langevin_mapping = {
+                "maxvar" : "maxvar",
+                "maxinoutvar" : "maxvar",
+                "maxvargeometric" : "maxvargeometric",
+                "maxstd" : "maxstd",
+                "maxinoutstd" : "maxstd",
+                "maxstd_std" : "maxstd_std",
+                "maxstd_mean_std" : "maxstd_mean_std",
+                }
+
+        means_o, variances_o = model_ensemble(X)
+
+        assert unseen_reg in unseen_reg_langevin_mapping
+        var_sum = means_o.var(dim=0).sum()
+        loss = var_sum
+        #loss = -unseen_data_loss(
+        #        means_o,
+        #        variances_o,
+        #        unseen_reg_langevin_mapping[unseen_reg],
+        #        gamma,
+        #        means=None,
+        #        )
+
+        if density_x is not None:
+            assert density_x.shape[1:] == X.shape[1:], "%s[1:] == %s[1:]" % (density_x.shape, X.shape)
+            assert len(density_x.shape) >= 2
+            if len(density_x.shape) > 2:
+                density_x = density_x.view(density_x.shape[0], -1)
+                X = X.view(X.shape[0], -1)
+            similarity = torch.exp(-sqdist(density_x.unsqueeze(1), X.unsqueeze(1)).mean())
+            loss += dist
+        return loss
+    return loss_fn
+
+
+
 def train_ensemble(
     params,
     batch_size,
@@ -635,32 +673,6 @@ def train_ensemble(
         time_since_last_best_epoch = 0
         logging = None
 
-    def loss_fn_for_langevin(X):
-        unseen_reg_langevin_mapping = {
-                "maxvar" : "maxvar",
-                "maxinoutvar" : "maxvar",
-                "maxvargeometric" : "maxvargeometric",
-                "maxstd" : "maxstd",
-                "maxinoutstd" : "maxstd",
-                "maxstd_std" : "maxstd_std",
-                "maxstd_mean_std" : "maxstd_mean_std",
-                }
-
-        means_o, variances_o = model_ensemble(X)
-
-        assert unseen_reg in unseen_reg_langevin_mapping
-        var_sum = means_o.var(dim=0).sum()
-        loss = var_sum
-        #loss = -unseen_data_loss(
-        #        means_o,
-        #        variances_o,
-        #        unseen_reg_langevin_mapping[unseen_reg],
-        #        gamma,
-        #        means=None,
-        #        )
-        return loss
-
-
     #print('point a0:', nvidia_smi())
     for epoch_iter in progress:
         if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
@@ -722,7 +734,7 @@ def train_ensemble(
                 #train_rmses += [rmse]
             """
 
-            if unseen_reg != "normal":
+            if unseen_reg != "normal" and gamma > 0.0:
                 out_data = sample_uniform_fn(ood_data_batch_size)
                 if params.langevin_sampling and gamma > 0:
                     model_ensemble.eval()
@@ -732,7 +744,7 @@ def train_ensemble(
                     out_data = langevin_sampling(
                             params,
                             out_data,
-                            loss_fn_for_langevin,
+                            langevin_mod_loss(model_ensemble, unseen_reg),
                             xi_dist,
                             )
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
@@ -983,7 +995,8 @@ def image_hyper_param_train(
         assert sample_uniform_fn is not None
         model.freeze_conv()
         train_X, train_Y, X, Y = data
-        train_X_emb = model.conv_forward(train_X)
+        with torch.no_grad():
+            train_X_emb = model.conv_forward(train_X, batch_size=params.re_train_batch_size)
         logging, best_gamma, data_split_rng = hyper_param_train(
             params,
             model.fc_layers,
@@ -1026,25 +1039,23 @@ def hyper_param_train(
     l2 = getattr(params, stage + "_train_l2")
 
     train_X, train_Y, X, Y = data
-    do_model_hparam_search = len(params.gammas) > 1
-    do_ood_val = do_model_hparam_search and params.ood_val_frac > 1e-3
     best_epoch_iter = None
-    with torch.no_grad():
-        model_state_dict = copy.deepcopy(model.state_dict())
     for gamma in gammas:
+        with torch.no_grad():
+            model_copy = copy.deepcopy(model)
         if predict_info_models is not None:
             predict_info_models.init_opt(params, train_idx, X.shape[0])
-        data_split_rng2 = data_split_rng
+        data_split_rng2 = copy.deepcopy(data_split_rng)
         best_cur_epoch_iter = []
         for split_iter in range(params.num_train_val_splits):
-            optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+            optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
             #print('point 1:', nvidia_smi())
             logging, data_split_rng2 = train_ensemble(
                     params,
                     train_batch_size,
                     train_epochs, 
                     [train_X, train_Y, X, Y],
-                    model,
+                    model_copy,
                     optim,
                     choose_type=params.hyper_search_choose_type,
                     unseen_reg=unseen_reg,
@@ -1061,8 +1072,6 @@ def hyper_param_train(
             #print('point 2:', nvidia_smi())
             best_cur_epoch_iter += [logging[1]['best']['epoch_iter']]
             #print('best_epoch:', logging[1]['best']['epoch_iter'])
-        with torch.no_grad():
-            model.load_state_dict(model_state_dict)
 
         with torch.no_grad():
             best_cur_epoch_iter = int(math.ceil(sum(best_cur_epoch_iter)/float(len(best_cur_epoch_iter))))

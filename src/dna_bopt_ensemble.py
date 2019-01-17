@@ -179,7 +179,7 @@ for task_iter in range(len(task_name)):
                 separate_mean_var=params.separate_mean_var,
                 )
     elif params.project in ["wiki", "imdb"]:
-        if params.fc_sampling:
+        if params.ensemble_type == "fc":
             init_model = ResnetEnsemble(
                     params,
                     params.num_models, 
@@ -189,7 +189,7 @@ for task_iter in range(len(task_name)):
                     n_hidden=params.num_hidden,
                     dropout_factor=params.resnet_dropout,
                     ).to(params.device)
-        else:
+        elif params.ensemble == "all":
             init_model = NNEnsemble.get_model_resnet(
                     inputs.shape[1], 
                     params.num_models, 
@@ -198,6 +198,8 @@ for task_iter in range(len(task_name)):
                     params.resnet_dropout,
                     device=params.device,
                     )
+        else:
+            assert False, params.ensemble_type + " not implemented"
 
     ensemble_init_rng = ops.get_rng_state()
     ops.set_rng_state(cur_rng)
@@ -218,54 +220,6 @@ for task_iter in range(len(task_name)):
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
 
-    with torch.no_grad():
-        init_model.eval()
-        if params.mode == "bayes_opt":
-            preds, preds_vars = init_model(X) # (num_candidate_points, num_samples)
-        else:
-            preds, preds_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
-        ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
-                preds,
-                torch.sqrt(preds_vars),
-                Y,
-                train_Y_cur,
-                params.output_noise_dist_fn, 
-                set(),
-                params.sigmoid_coeff,
-                single_gaussian=params.single_gaussian_test_nll,
-                num_to_eval=params.num_ind_to_eval,
-                )
-
-        test_pred_stats = bopt.get_pred_stats(
-                preds[:, test_idx],
-                torch.sqrt(preds_vars[:, test_idx]),
-                Y[test_idx],
-                params.output_noise_dist_fn, 
-                params.sigmoid_coeff,
-                train_Y=train_Y_cur,
-                )
-        print('test_pred_stats:', pprint.pformat(test_pred_stats))
-
-    ood_pred_stats = None
-    if ood_inputs is not None:
-        assert ood_labels is not None
-        assert ood_inputs.shape[0] == ood_labels.shape[0]
-
-        with torch.no_grad():
-            if params.mode == "bayes_opt":
-                ood_preds_means, ood_preds_vars = init_model(ood_X) # (num_candidate_points, num_samples)
-            else:
-                ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
-            ood_pred_stats = bopt.get_pred_stats(
-                    ood_preds_means,
-                    torch.sqrt(ood_preds_vars),
-                    ood_Y,
-                    params.output_noise_dist_fn, 
-                    params.sigmoid_coeff,
-                    train_Y=train_Y_cur,
-                    )
-            print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
-
     if os.path.isfile(init_model_path) and not params.clean:
         loaded = True
         checkpoint = torch.load(init_model_path)
@@ -275,21 +229,43 @@ for task_iter in range(len(task_name)):
             train_idx = checkpoint["train_idx"].numpy()
     else:
         if params.project in ['imdb', 'wiki']:
-            assert not (params.indist_sampling and params.fc_sampling)
-            if params.indist_sampling:
+            if params.sampling_dist == "ood":
                 def sample_uniform_fn(batch_size):
-                    idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
+                    idx = [i for i in range(ood_X.shape[0])]
                     random.shuffle(idx)
-                    return X[idx[:batch_size]]
-            elif params.fc_sampling:
-                def sample_uniform_fn(batch_size):
-                    init_model.eval()
-                    idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
-                    random.shuffle(idx)
-                    out = init_model.conv_forward(X[idx[:batch_size]])
+                    out = ood_X[idx[:batch_size]]
+                    if params.ensemble_type == "fc":
+                        with torch.no_grad():
+                            init_model.eval()
+                            out = init_model.conv_forward(out)
                     return out
+            elif params.sampling_dist == "unseen_ind":
+                def sample_uniform_fn(batch_size):
+                    idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
+                    random.shuffle(idx)
+                    out = X[idx[:batch_size]]
+                    if params.ensemble_type == "fc":
+                        with torch.no_grad():
+                            init_model.eval()
+                            out = init_model.conv_forward(out)
+                    return out
+            elif params.sampling_dist == "uniform_input" and params.ensemble_type == "fc":
+                def sample_uniform_fn(batch_size):
+                    with torch.no_grad():
+                        init_model.eval()
+                        out = dbopt.image_sample_uniform(batch_size)
+                        out = init_model.conv_forward(out)
+                    return out
+            elif params.sampling_dist == "uniform_fc_input":
+                def sample_uniform_fn(batch_size):
+                    fc_input_size = init_model.fc_input_size()
+                    dist = tdist.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0))
+                    out = dist.sample(sample_shape=(torch.Size([batch_size, fc_input_size])))
+                    return out.to(params.device)
+            else:
+                assert False, params.sampling_dist + " not implemented"
 
-        if params.project in ['imdb', 'wiki'] and params.fc_sampling:
+        if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
             logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
                 params,
                 init_model,
@@ -319,8 +295,51 @@ for task_iter in range(len(task_name)):
 
         cur_rmse = logging[1]['val']['rmse']
 
+    with torch.no_grad():
+        init_model.eval()
+        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+        ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
+                pre_ack_pred_means,
+                torch.sqrt(pre_ack_pred_vars),
+                Y,
+                train_Y_cur,
+                params.output_noise_dist_fn, 
+                set(),
+                params.sigmoid_coeff,
+                single_gaussian=params.single_gaussian_test_nll,
+                num_to_eval=params.num_ind_to_eval,
+                )
+
+        test_pred_stats = bopt.get_pred_stats(
+                pre_ack_pred_means[:, test_idx],
+                torch.sqrt(pre_ack_pred_vars[:, test_idx]),
+                Y[test_idx],
+                params.output_noise_dist_fn, 
+                params.sigmoid_coeff,
+                train_Y=train_Y_cur,
+                )
+        print('test_pred_stats:', pprint.pformat(test_pred_stats))
+
+    ood_pred_stats = None
+    if ood_inputs is not None:
+        assert ood_labels is not None
+        assert ood_inputs.shape[0] == ood_labels.shape[0]
+
+        with torch.no_grad():
+            ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+            ood_pred_stats = bopt.get_pred_stats(
+                    ood_preds_means,
+                    torch.sqrt(ood_preds_vars),
+                    ood_Y,
+                    params.output_noise_dist_fn, 
+                    params.sigmoid_coeff,
+                    train_Y=train_Y_cur,
+                    )
+            print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
+
         if not params.log_all_train_iter:
             logging[0] = None
+
         torch.save({
             'model_state_dict': init_model.state_dict(), 
             'logging': logging,
@@ -364,69 +383,26 @@ for task_iter in range(len(task_name)):
                 print('already done batch', ack_batch_size)
                 continue
 
+            torch.save({
+                'model_state_dict': init_model.state_dict(), 
+                'logging': logging,
+                'best_gamma': best_gamma,
+                'train_idx': torch.from_numpy(train_idx),
+                'global_params': vars(params),
+                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
+                'ood_pred_stats': ood_pred_stats,
+                'test_pred_stats': test_pred_stats,
+                }, batch_output_dir + "/0.pth")
+
             with open(batch_output_dir + "/stats.txt", 'w', buffering=1) as f:
                 ack_iter_info = {
                         'ucb_beta': params.ucb,
                         }
                 for ack_iter in range(params.num_acks):
-                    batch_ack_output_file = batch_output_dir + "/" + str(ack_iter) + ".pth"
+                    batch_ack_output_file = batch_output_dir + "/" + str(ack_iter+1) + ".pth"
 
                     # test stats computation
                     print('doing ack_iter', ack_iter)
-                    with torch.no_grad():
-                        cur_model.eval()
-                        if params.mode == "bayes_opt":
-                            pre_ack_pred_means, pre_ack_pred_vars = cur_model(X) # (num_candidate_points, num_samples)
-                        else:
-                            pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
-                        pre_ack_pred_means = pre_ack_pred_means.detach()
-                        pre_ack_pred_vars = pre_ack_pred_vars.detach()
-                        assert pre_ack_pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_pred_means.shape), str(Y.shape))
-
-                        #preds_for_cur = torch.max(preds - train_Y_cur.max(), torch.tensor(0.).to(params.device))
-                        #assert preds_for_cur.shape == preds.shape, str(preds_for_cur.shape)
-
-                        ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
-                                pre_ack_pred_means,
-                                torch.sqrt(pre_ack_pred_vars),
-                                Y,
-                                train_Y_cur,
-                                params.output_noise_dist_fn, 
-                                skip_idx_cur,
-                                params.sigmoid_coeff,
-                                single_gaussian=params.single_gaussian_test_nll,
-                                num_to_eval=params.num_ind_to_eval,
-                                )
-
-
-                        test_pred_stats = bopt.get_pred_stats(
-                                pre_ack_pred_means[:, test_idx],
-                                torch.sqrt(pre_ack_pred_vars[:, test_idx]),
-                                Y[test_idx],
-                                params.output_noise_dist_fn, 
-                                params.sigmoid_coeff,
-                                train_Y=train_Y_cur,
-                                )
-                        print('test_pred_stats:', pprint.pformat(test_pred_stats))
-
-                        ood_pred_stats = None
-                        if ood_inputs is not None:
-                            assert ood_labels is not None
-                            assert ood_inputs.shape[0] == ood_labels.shape[0]
-                            if params.mode == "bayes_opt":
-                                ood_preds_means, preds_vars = cur_model(ood_X) # (num_candidate_points, num_samples)
-                            else:
-                                ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
-                            ood_pred_stats = bopt.get_pred_stats(
-                                    ood_preds_means,
-                                    torch.sqrt(ood_preds_vars),
-                                    ood_Y,
-                                    params.output_noise_dist_fn, 
-                                    params.sigmoid_coeff,
-                                    train_Y=train_Y_cur,
-                                    )
-                            print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
-
                     print('task_name:', task_name[task_iter], '; measure:', params.ack_fun, '; output folder', params.output_dir)
 
                     if params.mode == "bayes_opt":
@@ -687,21 +663,45 @@ for task_iter in range(len(task_name)):
                         ensemble_init_rng
                         )
                     if params.project in ['imdb', 'wiki']:
-                        assert not (params.indist_sampling and params.fc_sampling)
-                        if params.indist_sampling:
+                        if params.sampling_dist == "ood":
+                            def sample_uniform_fn(batch_size):
+                                idx = [i for i in range(ood_X.shape[0])]
+                                random.shuffle(idx)
+                                out = ood_X[idx[:batch_size]]
+                                if params.ensemble_type == "fc":
+                                    with torch.no_grad():
+                                        init_model.eval()
+                                        out = init_model.conv_forward(out)
+                                return out
+                        elif params.sampling_dist == "unseen_ind":
                             def sample_uniform_fn(batch_size):
                                 idx = list(set(range(X.shape[0])).difference(skip_idx_cur))
                                 random.shuffle(idx)
-                                return X[idx[:batch_size]]
-                        elif params.fc_sampling:
-                            def sample_uniform_fn(batch_size):
-                                cur_model.eval()
-                                idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
-                                random.shuffle(idx)
-                                out = cur_model.conv_forward(X[idx[:batch_size]])
+                                out = X[idx[:batch_size]]
+                                if params.ensemble_type == "fc":
+                                    with torch.no_grad():
+                                        cur_model.eval()
+                                        out = cur_model.conv_forward(out)
                                 return out
+                        elif params.sampling_dist == "uniform_input" and params.ensemble_type == "fc":
+                            def sample_uniform_fn(batch_size):
+                                with torch.no_grad():
+                                    cur_model.eval()
+                                    out = dbopt.image_sample_uniform(batch_size)
+                                    out = cur_model.conv_forward(out)
+                                return out
+                        elif params.sampling_dist == "uniform_fc_input":
+                            def sample_uniform_fn(batch_size):
+                                with torch.no_grad():
+                                    fc_input_size = cur_model.fc_input_size()
+                                    dist = tdist.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0))
+                                    out = dist.sample(sample_shape=(torch.Size([batch_size, fc_input_size])))
+                                    return out
+                                return out
+                        else:
+                            assert False, params.sampling_dist + " not implemented"
 
-                    if params.project in ['imdb', 'wiki'] and params.fc_sampling:
+                    if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
                         logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
                             params,
                             cur_model,
@@ -730,6 +730,54 @@ for task_iter in range(len(task_name)):
                     #print('point 7:', nvidia_smi())
 
                     cur_rmse = logging[1]['val']['rmse']
+
+                    with torch.no_grad():
+                        cur_model.eval()
+                        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+                        pre_ack_pred_means = pre_ack_pred_means.detach()
+                        pre_ack_pred_vars = pre_ack_pred_vars.detach()
+                        assert pre_ack_pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_pred_means.shape), str(Y.shape))
+
+                        #preds_for_cur = torch.max(preds - train_Y_cur.max(), torch.tensor(0.).to(params.device))
+                        #assert preds_for_cur.shape == preds.shape, str(preds_for_cur.shape)
+
+                        ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
+                                pre_ack_pred_means,
+                                torch.sqrt(pre_ack_pred_vars),
+                                Y,
+                                train_Y_cur,
+                                params.output_noise_dist_fn, 
+                                skip_idx_cur,
+                                params.sigmoid_coeff,
+                                single_gaussian=params.single_gaussian_test_nll,
+                                num_to_eval=params.num_ind_to_eval,
+                                )
+
+
+                        test_pred_stats = bopt.get_pred_stats(
+                                pre_ack_pred_means[:, test_idx],
+                                torch.sqrt(pre_ack_pred_vars[:, test_idx]),
+                                Y[test_idx],
+                                params.output_noise_dist_fn, 
+                                params.sigmoid_coeff,
+                                train_Y=train_Y_cur,
+                                )
+                        print('test_pred_stats:', pprint.pformat(test_pred_stats))
+
+                        ood_pred_stats = None
+                        if ood_inputs is not None:
+                            assert ood_labels is not None
+                            assert ood_inputs.shape[0] == ood_labels.shape[0]
+                            ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+                            ood_pred_stats = bopt.get_pred_stats(
+                                    ood_preds_means,
+                                    torch.sqrt(ood_preds_vars),
+                                    ood_Y,
+                                    params.output_noise_dist_fn, 
+                                    params.sigmoid_coeff,
+                                    train_Y=train_Y_cur,
+                                    )
+                            print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
 
                     # ucb beta selection
                     if params.ucb_step >= 0.04 and params.mode == "bayes_opt":
