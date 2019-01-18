@@ -52,15 +52,15 @@ class BOModel(ABC):
     ) -> Union[_BOM, Tuple[_BOM, Any]]:
         pass
 
-    @abstractmethod
-    def reset(self):
+#    @abstractmethod
+#    def reset(self):
         """
         Reset all parameters to random initialization values.
 
         This allows, e.g., doing Bayesian optimization with full retraining
         without needing a new instance for each iteration.
         """
-        pass
+#        pass
 
     def _to_tensor(self, array: Union[np.ndarray, torch.Tensor]):
         if not isinstance(array, torch.Tensor):

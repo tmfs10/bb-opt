@@ -227,6 +227,8 @@ class NNEnsemble(BOModel, torch.nn.Module):
         variance = (variances + means ** 2).mean(dim=0) - mean ** 2
         return mean, variance
 
+#    def reset()
+
     def compute_ind_negative_log_likelihood(
         labels, means, variances, return_mse: bool = False
     ):  

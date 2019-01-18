@@ -8,6 +8,7 @@ from os.path import exists,join
 import sys,argparse
 #import pyro
 sys.path.append('/cluster/geliu/bayesian/')
+sys.path.append('/cluster/geliu/bayesian/bb_opt/src/')
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -108,6 +109,12 @@ if __name__ == "__main__":
 				loss=negative_log_likelihood
 			elif args.loss_type=="invar":
 				var=(means.var(dim=0).mean())
+				loss=negative_log_likelihood-args.hyper*var
+				train_newloss.append(var.item())
+			elif args.loss_type=="2var":
+				out_data = sample_uniform(out_size)
+				means_o, variances_o = model(out_data)
+				var=(0.5*means_o.var(dim=0).mean())+(0.5*means.var(dim=0).mean())
 				loss=negative_log_likelihood-args.hyper*var
 				train_newloss.append(var.item())
 			loss.backward()
