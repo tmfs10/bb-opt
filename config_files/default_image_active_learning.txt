@@ -15,7 +15,7 @@
 --num_test_points 2000
 
 --ack_batch_size 50
---num_acks 20
+--num_acks 60
 
 --exclude_top 0.0
 --init_train_examples 1000
@@ -50,7 +50,8 @@
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
 --ensemble_type fc
---sampling_dist uniform_fc_input
+--sampling_dist uniform_input
+--report_zero_gamma False
 
 --data_dir ../data/
 --output_dir ../experiments/imdbwiki/ensemble1/o
@@ -65,7 +66,7 @@
 --langevin_lr 30
 --langevin_beta 100000.0
 
---ack_fun max_std
+--ack_fun max_var_ratio
 --num_diversity 1
 
 --num_models 4

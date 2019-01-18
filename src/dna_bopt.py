@@ -303,11 +303,11 @@ def get_model_nn_ensemble(
 
 
 def langevin_sampling(
-        params,
-        x,
-        loss_fn, # this shld be the maxvar loss
-        xi_dist,
-        ):
+    params,
+    x,
+    loss_fn, # this shld be the maxvar loss
+    xi_dist,
+):
     for i in range(params.langevin_num_iter):
         x.requires_grad = True
         loss = loss_fn(x)
@@ -976,6 +976,7 @@ def image_hyper_param_train(
     data_split_rng,
     predict_info_models=None,
     sample_uniform_fn=None,
+    report_zero_gamma=True,
 ):
     normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
     logging, best_gamma, data_split_rng = hyper_param_train(
@@ -991,27 +992,51 @@ def image_hyper_param_train(
             normalize_fn=normalize_fn,
             )
 
+    zero_gamma_model = None
     if unseen_reg != "normal":
         assert sample_uniform_fn is not None
         model.freeze_conv()
         train_X, train_Y, X, Y = data
         with torch.no_grad():
             train_X_emb = model.conv_forward(train_X, batch_size=params.re_train_batch_size)
-        logging, best_gamma, data_split_rng = hyper_param_train(
-            params,
-            model.fc_layers,
-            [train_X_emb, train_Y, X, Y],
-            stage,
-            gammas,
-            unseen_reg,
-            data_split_rng,
-            None,
-            sample_uniform_fn,
-            normalize_fn=normalize_fn,
-            )
+
+        if report_zero_gamma:
+            logging, best_gamma, data_split_rng, zero_gamma_fc_layer = hyper_param_train(
+                params,
+                model.fc_layers,
+                [train_X_emb, train_Y, X, Y],
+                stage,
+                gammas,
+                unseen_reg,
+                data_split_rng,
+                None,
+                sample_uniform_fn,
+                normalize_fn=normalize_fn,
+                report_zero_gamma_model=report_zero_gamma,
+                )
+            if zero_gamma_fc_layer is None:
+                zero_gamma_fc_layer = model.fc_layers
+            def zero_gamma_model(x):
+                with torch.no_grad():
+                    x_emb = model.conv_forward(x, batch_size=params.re_train_batch_size)
+                    return zero_gamma_fc_layer(x_emb)
+        else:
+            logging, best_gamma, data_split_rng = hyper_param_train(
+                params,
+                model.fc_layers,
+                [train_X_emb, train_Y, X, Y],
+                stage,
+                gammas,
+                unseen_reg,
+                data_split_rng,
+                None,
+                sample_uniform_fn,
+                normalize_fn=normalize_fn,
+                report_zero_gamma_model=report_zero_gamma,
+                )
         model.unfreeze_conv()
 
-    return logging, best_gamma, data_split_rng
+    return logging, best_gamma, data_split_rng, zero_gamma_model
 
 def hyper_param_train(
     params,
@@ -1024,6 +1049,7 @@ def hyper_param_train(
     predict_info_models=None,
     sample_uniform_fn=None,
     normalize_fn=None,
+    report_zero_gamma_model=False,
 ):
     best_nll = float('inf')
     best_kt_corr = -2.
@@ -1037,6 +1063,13 @@ def hyper_param_train(
     train_epochs = getattr(params, stage + "_train_num_epochs")
     lr = getattr(params, stage + "_train_lr")
     l2 = getattr(params, stage + "_train_l2")
+
+    zero_gamma_best_epoch_iter = None
+    zero_gamma_model = None
+    zero_gamma_added = False
+    if report_zero_gamma_model and 0.0 not in gammas:
+        gammas = [0.0] + gammas
+        zero_gamma_added = True
 
     train_X, train_Y, X, Y = data
     best_epoch_iter = None
@@ -1075,30 +1108,34 @@ def hyper_param_train(
 
         with torch.no_grad():
             best_cur_epoch_iter = int(math.ceil(sum(best_cur_epoch_iter)/float(len(best_cur_epoch_iter))))
+            if gamma == 0.0:
+                zero_gamma_best_epoch_iter = best_cur_epoch_iter
+                if zero_gamma_added:
+                    continue
+
             found_best = False
             val_nll_cur = logging[1]['best']['nll']
-            #val_kt_corr_cur = logging[1]['best']['kt_corr'] 
-            #val_best_measure = logging[1]['best']['measure']
+            val_kt_corr_cur = logging[1]['best']['kt_corr'] 
+            val_best_measure = logging[1]['best']['measure']
 
             if "nll" in params.hyper_search_choose_type and val_nll_cur < best_nll:
                 best_nll = val_nll_cur
                 found_best = True
-            #elif "kt_corr" in params.hyper_search_choose_type and val_kt_corr_cur > best_kt_corr:
-            #    best_kt_corr = val_kt_corr_cur
-            #    found_best = True
-            #elif ("classify" in params.hyper_search_choose_type or "bopt" in params.hyper_search_choose_type) and (best_measure is None or val_best_measure > best_measure):
-            #    best_measure = val_best_measure
-            #    found_best = True
+            elif "kt_corr" in params.hyper_search_choose_type and val_kt_corr_cur > best_kt_corr:
+                best_kt_corr = val_kt_corr_cur
+                found_best = True
+            elif ("classify" in params.hyper_search_choose_type or "bopt" in params.hyper_search_choose_type) and (best_measure is None or val_best_measure > best_measure):
+                best_measure = val_best_measure
+                found_best = True
 
             if params.gamma_cutoff:
                 if not found_best:
                     break
             if found_best:
-                #best_model = model_copy
-                #best_optim = optim
                 best_logging = logging
                 best_gamma = gamma
                 best_epoch_iter = best_cur_epoch_iter
+
     del optim
     torch.cuda.empty_cache()
     #print('point 3:', nvidia_smi())
@@ -1115,6 +1152,10 @@ def hyper_param_train(
     print('best gamma:', best_gamma)
 
     if params.combine_train_val:
+        if report_zero_gamma_model:
+            if best_gamma != 0.0:
+                zero_gamma_model = copy.deepcopy(model)
+
         assert best_epoch_iter >= 0
         print('combine_train_val')
         optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
@@ -1135,6 +1176,28 @@ def hyper_param_train(
                 sample_uniform_fn=sample_uniform_fn,
                 )
         torch.cuda.empty_cache()
+
+        if report_zero_gamma_model and zero_gamma_model is not None:
+            assert best_gamma != 0.0
+            assert zero_gamma_best_epoch_iter >= 0
+            optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
+            _, _ = train_ensemble(
+                    params, 
+                    train_batch_size,
+                    train_epochs, 
+                    [train_X, train_Y, X, Y],
+                    zero_gamma_model,
+                    optim,
+                    choose_type=params.final_train_choose_type,
+                    unseen_reg="normal",
+                    gamma=0.0,
+                    normalize_fn=normalize_fn,
+                    num_epoch_iters=zero_gamma_best_epoch_iter+1,
+                    predict_info_models=None,
+                    sample_uniform_fn=None,
+                    )
+            torch.cuda.empty_cache()
+
         #print('point 5:', nvidia_smi())
         print('combine_train_val done')
     elif params.hyper_search_choose_type != params.final_train_choose_type:
@@ -1163,7 +1226,10 @@ def hyper_param_train(
         assert best_model is not None
         model = best_model
 
-    return logging, best_gamma, data_split_rng
+    if report_zero_gamma_model:
+        return logging, best_gamma, data_split_rng, zero_gamma_model
+    else:
+        return logging, best_gamma, data_split_rng
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3

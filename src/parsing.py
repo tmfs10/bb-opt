@@ -120,6 +120,7 @@ def add_parse_args(parser):
             help="maxvar/defmean penalty")
     parser.add_argument('--ood_data_batch_factor', type=float)
     parser.add_argument('--take_log', type=str2bool)
+    parser.add_argument('--report_zero_gamma', type=str2bool)
 
     # data/output files/folders
     parser.add_argument('--data_dir', type=str)

@@ -265,8 +265,9 @@ for task_iter in range(len(task_name)):
             else:
                 assert False, params.sampling_dist + " not implemented"
 
+        zero_gamma_model = None
         if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
-            logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_gamma_model = dbopt.image_hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, X, Y],
@@ -276,6 +277,7 @@ for task_iter in range(len(task_name)):
                 data_split_rng=data_split_rng,
                 predict_info_models=predict_info_models if params.predict_mi else None,
                 sample_uniform_fn=sample_uniform_fn,
+                report_zero_gamma=params.report_zero_gamma,
                 )
         else:
             logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
@@ -298,6 +300,10 @@ for task_iter in range(len(task_name)):
     with torch.no_grad():
         init_model.eval()
         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+        if zero_gamma_model is not None:
+            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
+            zero_gamma_pred_means = zero_gamma_pred_means.detach()
+            zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
         ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
                 pre_ack_pred_means,
                 torch.sqrt(pre_ack_pred_vars),
@@ -320,6 +326,17 @@ for task_iter in range(len(task_name)):
                 )
         print('test_pred_stats:', pprint.pformat(test_pred_stats))
 
+        if zero_gamma_model is not None:
+            zero_gamma_test_pred_stats = bopt.get_pred_stats(
+                    zero_gamma_pred_means[:, test_idx],
+                    torch.sqrt(zero_gamma_pred_vars[:, test_idx]),
+                    Y[test_idx],
+                    params.output_noise_dist_fn, 
+                    params.sigmoid_coeff,
+                    train_Y=train_Y_cur,
+                    )
+            print('zero_gamma_test_pred_stats:', pprint.pformat(zero_gamma_test_pred_stats))
+
     ood_pred_stats = None
     if ood_inputs is not None:
         assert ood_labels is not None
@@ -327,6 +344,10 @@ for task_iter in range(len(task_name)):
 
         with torch.no_grad():
             ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+            if zero_gamma_model is not None:
+                zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(zero_gamma_model, ood_X, params.init_train_batch_size)
+                zero_gamma_ood_preds_means = zero_gamma_ood_preds_means.detach()
+                zero_gamma_ood_preds_vars = zero_gamma_ood_preds_vars.detach()
             ood_pred_stats = bopt.get_pred_stats(
                     ood_preds_means,
                     torch.sqrt(ood_preds_vars),
@@ -336,20 +357,59 @@ for task_iter in range(len(task_name)):
                     train_Y=train_Y_cur,
                     )
             print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
+            if zero_gamma_model is not None:
+                zero_gamma_ood_pred_stats = bopt.get_pred_stats(
+                        zero_gamma_ood_preds_means,
+                        torch.sqrt(zero_gamma_ood_preds_vars),
+                        ood_Y,
+                        params.output_noise_dist_fn, 
+                        params.sigmoid_coeff,
+                        train_Y=train_Y_cur,
+                        )
+                print('zero_gamma_ood_pred_stats:', pprint.pformat(zero_gamma_ood_pred_stats))
 
         if not params.log_all_train_iter:
             logging[0] = None
 
-        torch.save({
-            'model_state_dict': init_model.state_dict(), 
-            'logging': logging,
-            'best_gamma': best_gamma,
-            'train_idx': torch.from_numpy(train_idx),
-            'global_params': vars(params),
-            'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
-            'ood_pred_stats': ood_pred_stats,
-            'test_pred_stats': test_pred_stats,
-            }, init_model_path)
+        to_save_dict = {}
+        if not params.report_zero_gamma:
+            to_save_dict = {
+                'model_state_dict': init_model.state_dict(), 
+                'logging': logging,
+                'best_gamma': best_gamma,
+                'train_idx': torch.from_numpy(train_idx),
+                'global_params': vars(params),
+                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
+                'ood_pred_stats': ood_pred_stats,
+                'test_pred_stats': test_pred_stats,
+                }
+        elif zero_gamma_model is None:
+            to_save_dict = {
+                'model_state_dict': init_model.state_dict(), 
+                'logging': logging,
+                'best_gamma': best_gamma,
+                'train_idx': torch.from_numpy(train_idx),
+                'global_params': vars(params),
+                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
+                'ood_pred_stats': ood_pred_stats,
+                'test_pred_stats': test_pred_stats,
+                'zero_gamma_test_pred_stats': test_pred_stats,
+                'zero_gamma_ood_pred_stats': ood_pred_stats,
+                }
+        else:
+            to_save_dict = {
+                'model_state_dict': init_model.state_dict(), 
+                'logging': logging,
+                'best_gamma': best_gamma,
+                'train_idx': torch.from_numpy(train_idx),
+                'global_params': vars(params),
+                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
+                'ood_pred_stats': ood_pred_stats,
+                'test_pred_stats': test_pred_stats,
+                'zero_gamma_test_pred_stats': zero_gamma_test_pred_stats,
+                'zero_gamma_ood_pred_stats': zero_gamma_ood_pred_stats,
+                }
+        torch.save(to_save_dict, init_model_path)
 
     with open(file_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as main_f:
         if not loaded:
@@ -383,16 +443,7 @@ for task_iter in range(len(task_name)):
                 print('already done batch', ack_batch_size)
                 continue
 
-            torch.save({
-                'model_state_dict': init_model.state_dict(), 
-                'logging': logging,
-                'best_gamma': best_gamma,
-                'train_idx': torch.from_numpy(train_idx),
-                'global_params': vars(params),
-                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
-                'ood_pred_stats': ood_pred_stats,
-                'test_pred_stats': test_pred_stats,
-                }, batch_output_dir + "/0.pth")
+            torch.save(to_save_dict, batch_output_dir + "/0.pth")
 
             with open(batch_output_dir + "/stats.txt", 'w', buffering=1) as f:
                 ack_iter_info = {
@@ -523,6 +574,14 @@ for task_iter in range(len(task_name)):
                             cur_ack_idx = al.get_max_std_ack(
                                     params,
                                     pre_ack_pred_means,
+                                    ack_batch_size,
+                                    skip_idx_cur,
+                                    )
+                        elif params.ack_fun == "max_var_ratio":
+                            cur_ack_idx = al.get_max_var_ratio_ack(
+                                    params,
+                                    pre_ack_pred_means,
+                                    pre_ack_pred_vars,
                                     ack_batch_size,
                                     skip_idx_cur,
                                     )
@@ -701,8 +760,9 @@ for task_iter in range(len(task_name)):
                         else:
                             assert False, params.sampling_dist + " not implemented"
 
+                    zero_gamma_model = None
                     if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
-                        logging, best_gamma, data_split_rng = dbopt.image_hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model = dbopt.image_hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, X, Y],
@@ -712,6 +772,7 @@ for task_iter in range(len(task_name)):
                             data_split_rng=data_split_rng,
                             predict_info_models=predict_info_models if params.predict_mi else None,
                             sample_uniform_fn=sample_uniform_fn,
+                            report_zero_gamma=False,
                             )
                     else:
                         logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
@@ -843,6 +904,7 @@ for task_iter in range(len(task_name)):
                             'test_pred_stats': test_pred_stats,
                             'corr_stats': torch.tensor(corr_stats) if params.ack_change_stat_logging else None,
                             }
+
                     # inference regret computation using retrained ensemble
                     if params.mode == "bayes_opt":
                         s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
