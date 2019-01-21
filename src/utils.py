@@ -13,17 +13,13 @@ import bb_opt.src.sascorer as sascorer
 import pyro
 import torch
 from sklearn.model_selection import train_test_split
-from scipy.io import loadmat
 
 from bb_opt.src import non_matplotlib_utils # utils giving Sid segfault cuz of matplotlib import when used from command-line
 
 _Input_Labels = namedtuple("Input_Labels", ["inputs", "labels"])
 _Dataset = namedtuple("Dataset", ["train", "val", "test","top"])
 
-def load_image(mat_path):
-    d = loadmat(mat_path)
-    return d["image"], d["gender"][0], d["age"][0], d["db"][0], d["img_size"][0, 0], d["min_score"][0, 0]
-
+load_image = non_matplotlib_utils.load_image
 sigmoid = non_matplotlib_utils.sigmoid
 
 def load_fraction_best(average: bool = True):

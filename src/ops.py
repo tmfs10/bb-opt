@@ -202,3 +202,46 @@ def get_rng_state():
 def set_rng_state(state):
     torch.set_rng_state(state[0])
     np.random.set_state(state[1])
+
+def sqdist(X1, X2=None, do_mean=False, collect=True):
+    if X2 is None:
+        """
+        X is of shape (n, d, k) or (n, d)
+        return is of shape (n, n, d)
+        """
+        if X1.ndimension() == 2:
+            return (X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2
+        else:
+            assert X1.ndimension() == 3, X1.shape
+            if not collect:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
+
+            if do_mean:
+                return ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                sq = ((X1.unsqueeze(0) - X1.unsqueeze(1)) ** 2)
+                #assert not ops.is_inf(sq)
+                #assert not ops.is_nan(sq)
+                #assert (sq.view(-1) < 0).sum() == 0, str((sq.view(-1) < 0).sum())
+                return sq.sum(-1)
+    else:
+        """
+        X1 is of shape (n, d, k) or (n, d)
+        X2 is of shape (m, d, k) or (m, d)
+        return is of shape (n, m, d)
+        """
+        assert X1.ndimension() == X2.ndimension()
+        if X1.ndimension() == 2:
+            # (n, d)
+            return (X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2
+        else:
+            # (n, d, k)
+            assert X1.ndimension() == 3
+            if not collect:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2) # (n, n, d, k)
+            if do_mean:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).mean(-1)
+            else:
+                return ((X2.unsqueeze(0) - X1.unsqueeze(1)) ** 2).sum(-1)
+
+

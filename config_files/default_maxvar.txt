@@ -1,4 +1,6 @@
 
+--project dna_binding
+--mode bayes_opt
 --seed 1
 --model_init_seed 1
 --data_split_seed 1
@@ -10,6 +12,9 @@
 --ack_change_stat_logging True
 --ack_hsic_stat_logging False
 --empirical_ack_change_stat_logging False
+
+--num_ood_to_eval 0 
+--num_ind_to_eval 0 
 
 --exclude_top 0.1
 --init_train_examples 200
@@ -28,7 +33,7 @@
 --num_hidden 100
 --sigmoid_coeff 1.0
 --separate_mean_var False
---output_dist_fn Normal
+--output_noise_dist_fn Normal
 --init_train_l2 0.01
 --re_train_l2 0.01
 --early_stopping 10

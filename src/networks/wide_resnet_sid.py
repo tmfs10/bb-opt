@@ -48,13 +48,14 @@ class wide_basic(nn.Module):
 
     def forward(self, x):
         out = self.dropout(self.conv1(F.relu(self.bn1(x))))
+        #out = self.conv1(F.relu(self.bn1(x)))
         out = self.conv2(F.relu(self.bn2(out)))
         out += self.shortcut(x)
 
         return out
 
 class Wide_ResNet(nn.Module):
-    def __init__(self, depth, widen_factor, dropout_rate):
+    def __init__(self, depth, widen_factor, dropout_rate=0.3, fc_sampling=False):
         super(Wide_ResNet, self).__init__()
         self.in_planes = 16
         print(depth)
@@ -71,7 +72,10 @@ class Wide_ResNet(nn.Module):
         self.layer2 = self._wide_layer(wide_basic, nStages[2], n, dropout_rate, stride=2)
         self.layer3 = self._wide_layer(wide_basic, nStages[3], n, dropout_rate, stride=2)
         self.bn1 = nn.BatchNorm2d(nStages[3], momentum=0.9)
-        self.linear = nn.Linear(nStages[3],2)
+        self.nStages = nStages
+        self.fc_sampling = fc_sampling
+        if not fc_sampling:
+            self.linear = nn.Linear(nStages[3],2)
 
     def _wide_layer(self, block, planes, num_blocks, dropout_rate, stride):
         strides = [stride] + [1]*(num_blocks-1)
@@ -101,11 +105,14 @@ class Wide_ResNet(nn.Module):
         out = F.relu(self.bn1(out))
         out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
-        out = self.linear(out)
-        mean = torch.sigmoid(out[:,0])
-        variance = torch.sigmoid(out[:,1])*0.1+1e-5
 
-        return mean, variance
+        if not self.fc_sampling:
+            out = self.linear(out)
+            mean = torch.sigmoid(out[:,0])
+            variance = torch.sigmoid(out[:,1])*0.1+1e-5
+            return mean, variance
+        else:
+            return out
 
 #if __name__ == '__main__':
 #    net=Wide_ResNet(28, 10, 0.3, 10)
