@@ -19,8 +19,8 @@
 
 --exclude_top 0.0
 --init_train_examples 2000
---init_train_num_epochs 30
---re_train_num_epochs 30
+--init_train_num_epochs 20
+--re_train_num_epochs 20
 --init_train_batch_size 200
 --re_train_batch_size 200
 
@@ -43,17 +43,16 @@
 --sigmoid_coeff 1.0
 --separate_mean_var False
 --output_noise_dist_fn Normal
---early_stopping 10
+--early_stopping 5
 --take_log False
 
 --unseen_reg normal
---inverse_density False
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
 --ensemble_type fc
 --sampling_dist unseen_ind
 --report_zero_gamma False
---stdout_file stdout
+--stdout_file out.txt
 
 --data_dir ../data/
 --output_dir ../experiments/imdbwiki/ensemble1/o

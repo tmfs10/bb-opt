@@ -42,6 +42,8 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
                 'test_pred_stats',
                 'zero_gamma_ood_pred_stats',
                 'zero_gamma_test_pred_stats',
+                'invar_gamma_ood_pred_stats',
+                'invar_gamma_test_pred_stats',
                 ]
 
     stats = []
