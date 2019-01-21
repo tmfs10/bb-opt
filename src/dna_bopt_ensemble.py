@@ -15,10 +15,11 @@ parsing.add_parse_imdbwiki_args(parser)
 
 params = parsing.parse_args(parser)
 
-if params.gpu == -1:
-    gpu_id = gpu_init(best_gpu_metric="mem")
-else:
-    gpu_id = gpu_init(gpu_id=params.gpu)
+if params.device != "cpu":
+    if params.gpu == -1:
+        gpu_id = gpu_init(best_gpu_metric="mem")
+    else:
+        gpu_id = gpu_init(gpu_id=params.gpu)
 
 import os
 import torch
@@ -37,14 +38,17 @@ import copy
 import non_matplotlib_utils as utils
 import datetime
 import ops
-from deep_ensemble_sid import NNEnsemble, ResnetEnsemble
+from deep_ensemble_sid import NNEnsemble, ResnetEnsemble, ResnetEnsemble2
+
+torch.backends.cudnn.deterministic = True
 
 print('PARAMS:')
 for k, v in vars(params).items():
     print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
 
-print(f"Running on GPU {gpu_id}")
+if params.device != "cpu":
+    print(f"Running on GPU {gpu_id}")
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 params.device = device
 
@@ -68,6 +72,11 @@ if params.project == 'dna_binding':
 elif params.project in ['imdb', 'wiki']:
     task_name += [params.project]
     sample_uniform_fn = dbopt.image_sample_uniform
+
+
+if params.stdout_file != "stdout":
+    orig_stdout = sys.stdout
+    sys.stdout = open(params.output_dir + '/stdout.txt', 'w')
 
 print('output_dir:', params.output_dir)
 
@@ -109,10 +118,10 @@ for task_iter in range(len(task_name)):
         ood_inputs = inputs[female_gender].astype(np.float32)
         ood_labels = labels[female_gender].astype(np.float32)
 
-        if params.num_ood_to_eval > 0:
-            rand_idx = np.random.choice(ood_inputs.shape[0], size=(params.num_ood_to_eval,), replace=False).tolist()
-            ood_inputs = ood_inputs[rand_idx]
-            ood_labels = ood_labels[rand_idx]
+        #if params.num_ood_to_eval > 0:
+        #    rand_idx = np.random.choice(ood_inputs.shape[0], size=(params.num_ood_to_eval,), replace=False).tolist()
+        #    ood_inputs = ood_inputs[rand_idx]
+        #    ood_labels = ood_labels[rand_idx]
 
         inputs = inputs[male_gender].astype(np.float32)
         labels = labels[male_gender].astype(np.float32)
@@ -180,7 +189,7 @@ for task_iter in range(len(task_name)):
                 )
     elif params.project in ["wiki", "imdb"]:
         if params.ensemble_type == "fc":
-            init_model = ResnetEnsemble(
+            init_model = ResnetEnsemble2(
                     params,
                     params.num_models, 
                     inputs.shape[1], 
@@ -234,27 +243,16 @@ for task_iter in range(len(task_name)):
                     idx = [i for i in range(ood_X.shape[0])]
                     random.shuffle(idx)
                     out = ood_X[idx[:batch_size]]
-                    if params.ensemble_type == "fc":
-                        with torch.no_grad():
-                            init_model.eval()
-                            out = init_model.conv_forward(out)
                     return out
             elif params.sampling_dist == "unseen_ind":
                 def sample_uniform_fn(batch_size):
                     idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
                     random.shuffle(idx)
                     out = X[idx[:batch_size]]
-                    if params.ensemble_type == "fc":
-                        with torch.no_grad():
-                            init_model.eval()
-                            out = init_model.conv_forward(out)
                     return out
-            elif params.sampling_dist == "uniform_input" and params.ensemble_type == "fc":
+            elif params.sampling_dist == "uniform_input":
                 def sample_uniform_fn(batch_size):
-                    with torch.no_grad():
-                        init_model.eval()
-                        out = dbopt.image_sample_uniform(batch_size)
-                        out = init_model.conv_forward(out)
+                    out = dbopt.image_sample_uniform(batch_size)
                     return out
             elif params.sampling_dist == "uniform_fc_input":
                 def sample_uniform_fn(batch_size):
@@ -266,8 +264,8 @@ for task_iter in range(len(task_name)):
                 assert False, params.sampling_dist + " not implemented"
 
         zero_gamma_model = None
-        if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
-            logging, best_gamma, data_split_rng, zero_gamma_model = dbopt.image_hyper_param_train(
+        if params.project in ['imdb', 'wiki']:
+            logging, best_gamma, data_split_rng, zero_gamma_model, invar_model = dbopt.image_hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, X, Y],
@@ -278,6 +276,8 @@ for task_iter in range(len(task_name)):
                 predict_info_models=predict_info_models if params.predict_mi else None,
                 sample_uniform_fn=sample_uniform_fn,
                 report_zero_gamma=params.report_zero_gamma,
+                report_invar_gamma=False,
+                normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 )
         else:
             logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
@@ -299,11 +299,23 @@ for task_iter in range(len(task_name)):
 
     with torch.no_grad():
         init_model.eval()
-        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(init_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
-        if zero_gamma_model is not None:
-            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
-            zero_gamma_pred_means = zero_gamma_pred_means.detach()
-            zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
+        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
+                init_model, 
+                X, 
+                params.re_train_batch_size,
+                progress_bar=params.stdout_file == "stdout",
+                ) # (num_candidate_points, num_samples)
+        if params.unseen_reg != "normal":
+            if zero_gamma_model is not None:
+                zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
+                zero_gamma_pred_means = zero_gamma_pred_means.detach()
+                zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
+
+            if invar_model is not None:
+                invar_pred_means, invar_pred_vars = dbopt.ensemble_forward(invar_model, X, params.re_train_batch_size)
+                invar_pred_means = invar_pred_means.detach()
+                invar_pred_vars = invar_pred_vars.detach()
+
         ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
                 pre_ack_pred_means,
                 torch.sqrt(pre_ack_pred_vars),
@@ -315,6 +327,7 @@ for task_iter in range(len(task_name)):
                 single_gaussian=params.single_gaussian_test_nll,
                 num_to_eval=params.num_ind_to_eval,
                 )
+        print('ind_top_ood_pred_stats:', pprint.pformat(ind_top_ood_pred_stats))
 
         test_pred_stats = bopt.get_pred_stats(
                 pre_ack_pred_means[:, test_idx],
@@ -326,16 +339,31 @@ for task_iter in range(len(task_name)):
                 )
         print('test_pred_stats:', pprint.pformat(test_pred_stats))
 
-        if zero_gamma_model is not None:
-            zero_gamma_test_pred_stats = bopt.get_pred_stats(
-                    zero_gamma_pred_means[:, test_idx],
-                    torch.sqrt(zero_gamma_pred_vars[:, test_idx]),
-                    Y[test_idx],
-                    params.output_noise_dist_fn, 
-                    params.sigmoid_coeff,
-                    train_Y=train_Y_cur,
-                    )
-            print('zero_gamma_test_pred_stats:', pprint.pformat(zero_gamma_test_pred_stats))
+        if params.unseen_reg != "normal":
+            if zero_gamma_model is not None:
+                zero_gamma_test_pred_stats = bopt.get_pred_stats(
+                        zero_gamma_pred_means[:, test_idx],
+                        torch.sqrt(zero_gamma_pred_vars[:, test_idx]),
+                        Y[test_idx],
+                        params.output_noise_dist_fn, 
+                        params.sigmoid_coeff,
+                        train_Y=train_Y_cur,
+                        )
+                print('zero_gamma_test_pred_stats:', pprint.pformat(zero_gamma_test_pred_stats))
+            else:
+                zero_gamma_test_pred_stats = test_pred_stats
+            if invar_model is not None:
+                invar_test_pred_stats = bopt.get_pred_stats(
+                        invar_pred_means[:, test_idx],
+                        torch.sqrt(invar_pred_vars[:, test_idx]),
+                        Y[test_idx],
+                        params.output_noise_dist_fn, 
+                        params.sigmoid_coeff,
+                        train_Y=train_Y_cur,
+                        )
+                print('invar_test_pred_stats:', pprint.pformat(invar_test_pred_stats))
+            else:
+                invar_test_pred_stats = zero_gamma_test_pred_stats
 
     ood_pred_stats = None
     if ood_inputs is not None:
@@ -348,6 +376,12 @@ for task_iter in range(len(task_name)):
                 zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(zero_gamma_model, ood_X, params.init_train_batch_size)
                 zero_gamma_ood_preds_means = zero_gamma_ood_preds_means.detach()
                 zero_gamma_ood_preds_vars = zero_gamma_ood_preds_vars.detach()
+
+            if invar_model is not None:
+                invar_ood_preds_means, invar_ood_preds_vars = dbopt.ensemble_forward(invar_model, ood_X, params.init_train_batch_size)
+                invar_ood_preds_means = invar_ood_preds_means.detach()
+                invar_ood_preds_vars = invar_ood_preds_vars.detach()
+
             ood_pred_stats = bopt.get_pred_stats(
                     ood_preds_means,
                     torch.sqrt(ood_preds_vars),
@@ -357,58 +391,51 @@ for task_iter in range(len(task_name)):
                     train_Y=train_Y_cur,
                     )
             print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
-            if zero_gamma_model is not None:
-                zero_gamma_ood_pred_stats = bopt.get_pred_stats(
-                        zero_gamma_ood_preds_means,
-                        torch.sqrt(zero_gamma_ood_preds_vars),
-                        ood_Y,
-                        params.output_noise_dist_fn, 
-                        params.sigmoid_coeff,
-                        train_Y=train_Y_cur,
-                        )
-                print('zero_gamma_ood_pred_stats:', pprint.pformat(zero_gamma_ood_pred_stats))
+            if params.unseen_reg != "normal" and params.report_zero_gamma:
+                if zero_gamma_model is not None:
+                    zero_gamma_ood_pred_stats = bopt.get_pred_stats(
+                            zero_gamma_ood_preds_means,
+                            torch.sqrt(zero_gamma_ood_preds_vars),
+                            ood_Y,
+                            params.output_noise_dist_fn, 
+                            params.sigmoid_coeff,
+                            train_Y=train_Y_cur,
+                            )
+                    print('zero_gamma_ood_pred_stats:', pprint.pformat(zero_gamma_ood_pred_stats))
+                else:
+                    zero_gamma_ood_pred_stats = ood_pred_stats
+                if invar_model is not None:
+                    invar_ood_pred_stats = bopt.get_pred_stats(
+                            invar_ood_preds_means,
+                            torch.sqrt(invar_ood_preds_vars),
+                            ood_Y,
+                            params.output_noise_dist_fn, 
+                            params.sigmoid_coeff,
+                            train_Y=train_Y_cur,
+                            )
+                    print('invar_ood_pred_stats:', pprint.pformat(invar_ood_pred_stats))
+                else:
+                    invar_ood_pred_stats = zero_gamma_ood_pred_stats
 
         if not params.log_all_train_iter:
             logging[0] = None
 
-        to_save_dict = {}
-        if not params.report_zero_gamma:
-            to_save_dict = {
-                'model_state_dict': init_model.state_dict(), 
-                'logging': logging,
-                'best_gamma': best_gamma,
-                'train_idx': torch.from_numpy(train_idx),
-                'global_params': vars(params),
-                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
-                'ood_pred_stats': ood_pred_stats,
-                'test_pred_stats': test_pred_stats,
-                }
-        elif zero_gamma_model is None:
-            to_save_dict = {
-                'model_state_dict': init_model.state_dict(), 
-                'logging': logging,
-                'best_gamma': best_gamma,
-                'train_idx': torch.from_numpy(train_idx),
-                'global_params': vars(params),
-                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
-                'ood_pred_stats': ood_pred_stats,
-                'test_pred_stats': test_pred_stats,
-                'zero_gamma_test_pred_stats': test_pred_stats,
-                'zero_gamma_ood_pred_stats': ood_pred_stats,
-                }
-        else:
-            to_save_dict = {
-                'model_state_dict': init_model.state_dict(), 
-                'logging': logging,
-                'best_gamma': best_gamma,
-                'train_idx': torch.from_numpy(train_idx),
-                'global_params': vars(params),
-                'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
-                'ood_pred_stats': ood_pred_stats,
-                'test_pred_stats': test_pred_stats,
-                'zero_gamma_test_pred_stats': zero_gamma_test_pred_stats,
-                'zero_gamma_ood_pred_stats': zero_gamma_ood_pred_stats,
-                }
+        to_save_dict = {
+            #'model_state_dict': init_model.state_dict(), 
+            'logging': logging,
+            'best_gamma': best_gamma,
+            'train_idx': torch.from_numpy(train_idx),
+            'global_params': vars(params),
+            'ind_top_ood_pred_stats': ind_top_ood_pred_stats,
+            'ood_pred_stats': ood_pred_stats,
+            'test_pred_stats': test_pred_stats,
+            }
+        if params.report_zero_gamma and params.unseen_reg != "normal":
+            to_save_dict['zero_gamma_test_pred_stats'] = zero_gamma_test_pred_stats
+            to_save_dict['zero_gamma_ood_pred_stats'] = zero_gamma_ood_pred_stats
+            to_save_dict['invar_gamma_test_pred_stats'] = invar_test_pred_stats
+            to_save_dict['invar_gamma_ood_pred_stats'] = invar_ood_pred_stats
+
         torch.save(to_save_dict, init_model_path)
 
     with open(file_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as main_f:
@@ -737,17 +764,10 @@ for task_iter in range(len(task_name)):
                                 idx = list(set(range(X.shape[0])).difference(skip_idx_cur))
                                 random.shuffle(idx)
                                 out = X[idx[:batch_size]]
-                                if params.ensemble_type == "fc":
-                                    with torch.no_grad():
-                                        cur_model.eval()
-                                        out = cur_model.conv_forward(out)
                                 return out
-                        elif params.sampling_dist == "uniform_input" and params.ensemble_type == "fc":
+                        elif params.sampling_dist == "uniform_input":
                             def sample_uniform_fn(batch_size):
-                                with torch.no_grad():
-                                    cur_model.eval()
-                                    out = dbopt.image_sample_uniform(batch_size)
-                                    out = cur_model.conv_forward(out)
+                                out = dbopt.image_sample_uniform(batch_size)
                                 return out
                         elif params.sampling_dist == "uniform_fc_input":
                             def sample_uniform_fn(batch_size):
@@ -761,8 +781,8 @@ for task_iter in range(len(task_name)):
                             assert False, params.sampling_dist + " not implemented"
 
                     zero_gamma_model = None
-                    if params.project in ['imdb', 'wiki'] and params.ensemble_type == "fc":
-                        logging, best_gamma, data_split_rng, zero_gamma_model = dbopt.image_hyper_param_train(
+                    if params.project in ['imdb', 'wiki']:
+                        logging, best_gamma, data_split_rng, zero_gamma_model, invar_model = dbopt.image_hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, X, Y],
@@ -772,7 +792,7 @@ for task_iter in range(len(task_name)):
                             data_split_rng=data_split_rng,
                             predict_info_models=predict_info_models if params.predict_mi else None,
                             sample_uniform_fn=sample_uniform_fn,
-                            report_zero_gamma=False,
+                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                             )
                     else:
                         logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
@@ -892,7 +912,7 @@ for task_iter in range(len(task_name)):
                     ack_labels = labels[ack_array]
 
                     to_save_dict = {
-                            'model_state_dict': cur_model.state_dict(), 
+                            #'model_state_dict': cur_model.state_dict(), 
                             'logging': logging,
                             'best_gamma': best_gamma,
                             'ack_idx': torch.from_numpy(ack_array),
@@ -949,3 +969,5 @@ for task_iter in range(len(task_name)):
                     sys.stdout.flush()
                     
             #main_f.write(str(ack_batch_size) + "\t" + s + "\n")
+
+sys.stdout.close()

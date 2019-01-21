@@ -1,3 +1,4 @@
+ bayesian_opt.py  ep_ensemble_sid.py  dna_bopt.py  a_bopt_ensemble.py  s/collect_stats.py  parsing.py  ctive_learning.txt  ops.py                           X
 
 --gpu -1
 --project wiki
@@ -14,13 +15,13 @@
 --num_ood_to_eval 2000
 --num_test_points 2000
 
---ack_batch_size 50
+--ack_batch_size 20
 --num_acks 100
 
 --exclude_top 0.0
---init_train_examples 2000
---init_train_num_epochs 30
---re_train_num_epochs 30
+--init_train_examples 1000
+--init_train_num_epochs 20
+--re_train_num_epochs 20
 --init_train_batch_size 200
 --re_train_batch_size 200
 
@@ -43,17 +44,15 @@
 --sigmoid_coeff 1.0
 --separate_mean_var False
 --output_noise_dist_fn Normal
---early_stopping 10
+--early_stopping 5
 --take_log False
 
 --unseen_reg normal
---inverse_density False
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
 --ensemble_type fc
---sampling_dist unseen_ind
+--sampling_dist uniform_input
 --report_zero_gamma False
---stdout_file stdout
 
 --data_dir ../data/
 --output_dir ../experiments/imdbwiki/ensemble1/o
@@ -83,3 +82,16 @@
 --ucb_step 0.0
 
 --predict_ood False
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+~
+"../config_files/default_image_active_learning.txt" 83L, 1550C written                                                                     25,23         All

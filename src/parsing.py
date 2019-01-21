@@ -64,8 +64,8 @@ def add_parse_args(parser):
             help='random seed')
     parser.add_argument('--data_split_seed', type=int, 
             help='random seed')
-    parser.add_argument('--device', type=str, 
-            help='use cuda (default: True)')
+    parser.add_argument('--device', type=str)
+    parser.add_argument('--stdout_file', type=str)
     parser.add_argument('--clean', type=str2bool, 
             help='remove existing saved dir')
     parser.add_argument('--log_all_train_iter', type=str2bool)
@@ -114,6 +114,7 @@ def add_parse_args(parser):
     parser.add_argument('--re_train_l2', type=float)
 
     parser.add_argument('--unseen_reg', type=strlower)
+    parser.add_argument('--inverse_density', type=str2bool)
     parser.add_argument('--ensemble_type', type=str)
     parser.add_argument('--sampling_dist', type=str)
     parser.add_argument('--gammas', type=float, nargs='+',

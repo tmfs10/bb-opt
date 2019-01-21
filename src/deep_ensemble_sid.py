@@ -668,7 +668,6 @@ class ResnetEnsemble(torch.nn.Module):
         return self.conv_model.nStages[3]
 
     def freeze_conv(self):
-        self.conv_model.eval()
         for param in self.conv_model.parameters():
             param.requires_grad = False
 
@@ -706,6 +705,107 @@ class ResnetEnsemble(torch.nn.Module):
     def reset_parameters(self):
         self.conv_model.reset_parameters()
         self.fc_layers.reset_parameters()
+
+    @staticmethod
+    def combine_means_variances(means, variances):
+        return NNEnsemble.combine_means_variances(means, variances)
+
+    @staticmethod
+    def compute_negative_log_likelihood(
+        labels, means, variances, return_mse: bool = False
+    ):
+        return NNEnsemble.compute_negative_log_likelihood(
+                labels,
+                means,
+                variances,
+                return_mse
+                )
+
+    @staticmethod
+    def report_metric(labels, means, variances, custom_std=None, return_mse=False):
+        return NNEnsemble.fc_layers(
+                labels,
+                means,
+                variances,
+                custom_std,
+                return_mse
+                )
+
+
+class ResnetEnsemble2(torch.nn.Module):
+    def __init__(self,
+        params,
+        n_models,
+        n_inputs,
+        depth=16,
+        widen_factor=8,
+        n_hidden=100,
+        dropout_factor=0.0,
+    ):
+        super().__init__()
+        assert params.ensemble_type == "fc", params.ensemble_type
+
+        self.conv_model = nn.ModuleList([Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True) for i in range(n_models)])
+        self.fc_layers = nn.ModuleList([NN(self.conv_model[0].nStages[3], n_hidden) for i in range(n_models)])
+
+        print('num resnet params:', sum(p.numel() for p in self.conv_model[0].parameters()) * n_models)
+        print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers[0].parameters()) * n_models)
+
+    def fc_input_size(self):
+        return self.conv_model.nStages[3]
+
+    def freeze_conv(self):
+        for i in range(len(self.conv_model)):
+            for param in self.conv_model[i].parameters():
+                param.requires_grad = False
+
+    def unfreeze_conv(self):
+        for i in range(len(self.conv_model)):
+            for param in self.conv_model[i].parameters():
+                param.requires_grad = True
+
+    def forward(self, x):
+        n_models = len(self.conv_model)
+        fc_input = [self.conv_model[i](x) for i in range(n_models)]
+        out_mean = []
+        out_var = []
+        for i in range(n_models):
+            out = self.fc_layers[i](fc_input[i])
+            out_mean += [out[0]]
+            out_var += [out[1]]
+
+        return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0)
+
+    def conv_forward(self, x, batch_size=0):
+        n_models = len(self.conv_model)
+        if batch_size > 0:
+            N = x.shape[0]
+            num_batches = N//batch_size+1
+            batches = [i*batch_size  for i in range(num_batches)] + [N]
+            out = [[] for i in range(n_models)]
+            for bi in range(num_batches):
+                bs = batches[bi]
+                be = batches[bi+1]
+                bN = be-bs
+                if bN <= 0:
+                    continue
+                for i in range(n_models):
+                    out[i] += [self.conv_model[i](x[bs:be])]
+            for i in range(n_models):
+                out[i] = torch.cat(out, dim=0)
+            return torch.stack(out, dim=0)
+        else:
+            return torch.stack([self.conv_model[i](x) for i in range(n_models)], dim=0)
+
+    def fc_forward(self, fc_input):
+        assert fc_input.shape[0] == len(self.conv_model)
+        out = [self.fc_layers[i](fc_input[i]) for i in range(n_models)]
+        return torch.stack(out, dim=0)
+
+    def reset_parameters(self):
+        for i in range(len(self.conv_model)):
+            self.conv_model[i].reset_parameters()
+            self.fc_layers[i].reset_parameters()
 
     @staticmethod
     def combine_means_variances(means, variances):
