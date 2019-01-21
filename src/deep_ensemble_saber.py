@@ -45,8 +45,8 @@ class NN(torch.nn.Module):
         hidden = self.non_linearity(self.hidden(x))
         output = self.output(hidden)
         mean =torch.sigmoid(output[:,0])
-        #variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
-        variance =torch.sigmoid(output[:,1])*0.01+self.min_variance
+        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        #variance =torch.sigmoid(output[:,1])*0.01+self.min_variance
         #mean = output[:, 0]
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance

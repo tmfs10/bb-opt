@@ -350,14 +350,16 @@ def load_data_saber2(
     )
     return dataset
 
-def load_data_top(
+def load_data_gc(
     data_root: str,
     project: str,
     dataset: str,
     train_size,
     val_size: None,
-    standardize_labels: bool = False,
-    random_state: int = 521,
+    top_percent:float=0.1,
+    log_transform:bool=True,
+    standardize_labels: bool = True,
+    random_state: int = 153,#521,
     device: Optional = None,
 ) -> _Dataset:
     device = device or "cpu"
@@ -365,9 +367,19 @@ def load_data_top(
     data_dir = get_path(data_root, project, dataset)
     inputs = np.load(get_path(data_dir, "inputs.npy"))
     labels = np.load(get_path(data_dir, "labels.npy"))
+    if log_transform:
+        labels = np.log(labels)
+    indices = np.arange(labels.shape[0])
+    cg_loc=[1,2,5,6,9,10,13,14,17,18,21,22,25,26,29,30]
+    gc_hi=np.where(inputs[:,cg_loc].sum(axis=1)>int(top_percent*8.0))
+    gc_low=np.setdiff1d(indices,gc_hi)
+    inputs_l = inputs[gc_low]
+    labels_l = labels[gc_low]
+    top_inputs = inputs[gc_hi]
+    top_labels = labels[gc_hi]
 
-    train_inputs, test_inputs, train_labels, test_labels = top_split(
-        inputs, labels, train_size=train_size, random_state=random_state
+    train_inputs, test_inputs, train_labels, test_labels = train_test_split(
+        inputs_l, labels_l, train_size=train_size, random_state=random_state
     )
 
     if val_size:
@@ -378,14 +390,16 @@ def load_data_top(
         val_inputs = val_labels = None
 
     if standardize_labels:
+
         train_label_mean = train_labels.mean()
         train_label_std = train_labels.std()
 
-        train_labels = (train_labels - train_label_mean) / train_label_std
-        test_labels = (test_labels - train_label_mean) / train_label_std
+        train_labels = sigmoid((train_labels - train_label_mean) / train_label_std)
+        test_labels = sigmoid((test_labels - train_label_mean) / train_label_std)
+        top_labels = sigmoid((top_labels - train_label_mean) / train_label_std)
 
         if val_inputs is not None:
-            val_labels = (val_labels - train_label_mean) / train_label_std
+            val_labels =sigmoid((val_labels - train_label_mean) / train_label_std)
 
     train_inputs = torch.tensor(train_inputs).float().to(device)
     train_labels = torch.tensor(train_labels).float().to(device)
@@ -397,12 +411,97 @@ def load_data_top(
     test_inputs = torch.tensor(test_inputs).float().to(device)
     test_labels = torch.tensor(test_labels).float().to(device)
 
+    top_inputs = torch.tensor(top_inputs).float().to(device)
+    top_labels = torch.tensor(top_labels).float().to(device)
+
     dataset = _Dataset(
-        *[
+        *[  
             _Input_Labels(inputs, labels)
             for inputs, labels in zip(
                 [train_inputs, val_inputs, test_inputs, top_inputs],
-                [train_labels, val_labels, test_labels, top_inputs],
+                [train_labels, val_labels, test_labels, top_labels],
+            )
+        ]
+	)
+    return dataset
+
+def load_data_uci(
+    data_root: str,
+    project: str,
+    dataset: str,
+    train_size,
+    val_size: None,
+    top_percent:float=None,
+    standardize_labels: bool = True,
+    random_state: int = 521,
+    device: Optional = None,
+) -> _Dataset:
+    device = device or "cpu"
+
+    data_dir = join(data_root,dataset,'data','data.txt')
+    data=np.loadtxt(data_dir)
+    labels=data[:,-1]
+    inputs=data[:,0:-1]
+    indices = np.arange(data.shape[0])
+    train_size=int(train_size*labels.shape[0])
+    val_size=int(val_size*train_size)
+    labels_sort_idx = labels.argsort() 
+    sort_idx = labels_sort_idx[:-int(labels.shape[0]*top_percent)]
+    indices = indices[sort_idx]
+    inputs_l = inputs[indices]
+    labels_l = labels[indices]
+    top_inputs = inputs[labels_sort_idx[-int(labels.shape[0]*top_percent):]]
+    top_labels = labels[labels_sort_idx[-int(labels.shape[0]*top_percent):]]
+
+    train_inputs, test_inputs, train_labels, test_labels = train_test_split(
+        inputs_l, labels_l, train_size=train_size, random_state=random_state
+    )
+
+    if val_size:
+        train_inputs, val_inputs, train_labels, val_labels = train_test_split(
+            train_inputs, train_labels, test_size=val_size, random_state=random_state
+        )
+    else:
+        val_inputs = val_labels = None
+
+    if standardize_labels:
+
+        train_label_mean = train_labels.mean()
+        train_label_std = train_labels.std()
+        train_input_mean = train_inputs.mean(axis=0)
+        train_input_std = train_inputs.std(axis=0)
+        train_input_std[train_input_std==0]=1e-15
+        print(train_input_mean,train_input_std)
+
+        train_labels = sigmoid((train_labels - train_label_mean) / train_label_std)
+        test_labels = sigmoid((test_labels - train_label_mean) / train_label_std)
+        top_labels = sigmoid((top_labels - train_label_mean) / train_label_std)
+        train_inputs = (train_inputs-train_input_mean)/train_input_std
+        test_inputs = (test_inputs-train_input_mean)/train_input_std
+        top_inputs = (top_inputs-train_input_mean)/train_input_std
+
+        if val_inputs is not None:
+            val_labels =sigmoid((val_labels - train_label_mean) / train_label_std)
+            val_inputs = (val_inputs-train_input_mean)/train_input_std
+    train_inputs = torch.tensor(train_inputs).float().to(device)
+    train_labels = torch.tensor(train_labels).float().to(device)
+
+    if val_inputs is not None:
+        val_inputs = torch.tensor(val_inputs).float().to(device)
+        val_labels = torch.tensor(val_labels).float().to(device)
+
+    test_inputs = torch.tensor(test_inputs).float().to(device)
+    test_labels = torch.tensor(test_labels).float().to(device)
+
+    top_inputs = torch.tensor(top_inputs).float().to(device)
+    top_labels = torch.tensor(top_labels).float().to(device)
+
+    dataset = _Dataset(
+        *[  
+            _Input_Labels(inputs, labels)
+            for inputs, labels in zip(
+                [train_inputs, val_inputs, test_inputs, top_inputs],
+                [train_labels, val_labels, test_labels, top_labels],
             )
         ]
     )
@@ -425,7 +524,6 @@ def load_data_wiki(
     image,gender,labels, _, _, _ = load_image(data_dir)
     inputs=np.moveaxis(image, -1, 1)
     indices = np.arange(labels.shape[0])
-
     if top_percent: 
         labels_sort_idx = labels.argsort()
         sort_idx = labels_sort_idx[:-int(labels.shape[0]*top_percent)]

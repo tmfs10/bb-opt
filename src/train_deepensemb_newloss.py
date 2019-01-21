@@ -18,7 +18,7 @@ from bb_opt.src.deep_ensemble_saber import (
     NNEnsemble,
     RandomNN,
 )
-from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber, load_data_saber2
+from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber, load_data_saber2,load_data_gc
 from gpu_utils.utils import gpu_init
 
 def parse_args():
@@ -71,6 +71,8 @@ if __name__ == "__main__":
 		data = load_data_saber(data_root, project, dataset, n_train, n_val, standardize_labels=True, device=device)
 	elif args.data_type =='top':
 		data = load_data_saber2(data_root, project, dataset, n_train, n_val, args.percent, standardize_labels=True,random_state=args.seed, device=device)
+	elif args.data_type =='gc':
+		data = load_data_gc(data_root, project, dataset, n_train, n_val, args.percent, standardize_labels=True,random_state=args.seed, device=device)
 	n_inputs = data.train.inputs.shape[1]
 	train_loader = DataLoader(TensorDataset(data.train.inputs, data.train.labels),batch_size=batch_size,shuffle=True)
 	n_models = args.ensem_size
