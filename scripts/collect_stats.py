@@ -105,26 +105,45 @@ def plot_data_vs_ack_iter(
     arrs,
     to_eval,
     legend_loc=0,
+    num_samples_label=False,
+    title=None,
+    figsize=None,
+    save_path=None,
 ):
     assert mode in ["avg_seeds", "avg_ratio", "no_avg"]
     for filename in filenames:
+        if figsize is not None:
+            plt.figure(figsize=figsize)
         if mode in ["avg_seeds", "avg_ratio"]:
-            plt.figure(figsize=(15,4))
-            plt.xlabel('ack_iter')
+            if num_samples_label:
+                plt.xlabel('# of samples acquired')
+            else:
+                plt.xlabel('# of acquisitions')
             plt.ylabel(ylabel)
-            plt.title(filename)
+            if title is None:
+                title2 = filename.split("_")[0]
+            else:
+                title2 = title
+            plt.title(title2)
         legend = []
         points = {}
         for exp in to_eval:
+            modd = False
+            if exp == "ensemble7/o_none_ucb_maxvar_inverse_g000510204080_":
+                modd = True
             if mode == "no_avg":
                 plt.figure(figsize=(6,4))
-                plt.xlabel('ack_iter')
+                if num_samples_label:
+                    plt.xlabel('# of samples acquired')
+                else:
+                    plt.xlabel('# of acquisitions')
                 plt.ylabel(ylabel)
                 plt.title(filename + " ; " + arrs[exp][1])
             points[exp] = []
 
             # iterates over the diff seeds
-            for stats in arrs[exp][0]:
+            for i_sample in range(len(arrs[exp][0])):
+                stats = arrs[exp][0][i_sample]
                 if filename not in stats:
                     continue
                 if batch_size not in stats[filename]:
@@ -132,7 +151,17 @@ def plot_data_vs_ack_iter(
                 if len(stats[filename][batch_size]) < num_acks:
                     continue
                 cur_stats = stats[filename][batch_size]
-                cur_points = [data_extractor_fn(cur_stats[ack_iter], filename) for ack_iter in range(num_acks)]
+                try:
+                    cur_points = []
+                    start = 0
+                    end = num_acks
+                    if modd:
+                        start = 1
+                        end = num_acks+1
+                    for ack_iter in range(start, end):
+                        cur_points += [data_extractor_fn(cur_stats[ack_iter], filename)]
+                except Exception as e:
+                    print(ack_iter, i_sample)
                 #cur_points = cur_points + [cur_points[-1]]*(num_acks-len(cur_stats))
                 cur_points = np.array(cur_points)
                 if mode == 'no_avg':
@@ -142,10 +171,16 @@ def plot_data_vs_ack_iter(
 
             if mode == 'avg_seeds':
                 points[exp] = np.array(points[exp]).mean(axis=0)
-                plt.plot(points[exp])
+                num_sampled = [(i+1)*batch_size for i in range(len(points[exp]))]
+                if num_samples_label:
+                    plt.plot(num_sampled, points[exp].tolist())
+                else:
+                    plt.plot(points[exp])
                 legend += [arrs[exp][1]]
         if mode in ["avg_seeds", "avg_ratio"]:
             plt.legend(legend, loc=legend_loc)
+        if save_path is not None:
+            plt.savefig(save_path + "/" + title2.lower() + ".png", bbox_inches="tight")
 
 
 def prop_test(
@@ -176,7 +211,10 @@ def prop_test(
                 cur_stats = stats[filename][batch_size]
                 if len(cur_stats) <= ack_iter:
                     continue
-                stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
+                if exp == "ensemble7/o_none_ucb_maxvar_inverse_g000510204080_":
+                    stat[i] += [data_extractor_fn(cur_stats[ack_iter+1], filename)]
+                else:
+                    stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
         if len(stat[0]) == 0 or len(stat[1]) == 0:
             break
 
@@ -199,7 +237,7 @@ def prop_test(
                 pval_list[1] += [pval]
             else:
                 pval_list[0] += [pval]
-            print(filename, pval, m[0], m[1], c, '\t', '(std:', std[0], std[1], ')')
+            print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
 
     print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
     print('count: %d/%d' % (count, total))
@@ -257,7 +295,7 @@ def prop_test2(
                 pval_list[1] += [pval]
             else:
                 pval_list[0] += [pval]
-            print(filename, pval, m[0], m[1], c, '\t', '(std:', std[0], std[1], ')')
+            print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
 
     print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
     print('count: %d/%d' % (count, total))

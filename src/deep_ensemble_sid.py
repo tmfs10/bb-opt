@@ -745,7 +745,7 @@ class ResnetEnsemble2(torch.nn.Module):
         super().__init__()
         assert params.ensemble_type == "fc", params.ensemble_type
 
-        self.conv_model = nn.ModuleList([Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True) for i in range(n_models)])
+        self.conv_model = nn.ModuleList([Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True, do_batch_norm=params.resnet_do_batch_norm) for i in range(n_models)])
         self.fc_layers = nn.ModuleList([NN(self.conv_model[0].nStages[3], n_hidden) for i in range(n_models)])
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model[0].parameters()) * n_models)
@@ -764,7 +764,7 @@ class ResnetEnsemble2(torch.nn.Module):
             for param in self.conv_model[i].parameters():
                 param.requires_grad = True
 
-    def forward(self, x):
+    def forward(self, x, return_fc_input=False):
         n_models = len(self.conv_model)
         fc_input = [self.conv_model[i](x) for i in range(n_models)]
         out_mean = []
@@ -774,7 +774,10 @@ class ResnetEnsemble2(torch.nn.Module):
             out_mean += [out[0]]
             out_var += [out[1]]
 
-        return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0)
+        if return_fc_input:
+            return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0), [t.detach() for t in fc_input]
+        else:
+            return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0)
 
     def conv_forward(self, x, batch_size=0):
         n_models = len(self.conv_model)
@@ -798,9 +801,15 @@ class ResnetEnsemble2(torch.nn.Module):
             return torch.stack([self.conv_model[i](x) for i in range(n_models)], dim=0)
 
     def fc_forward(self, fc_input):
+        n_models = len(self.conv_model)
         assert fc_input.shape[0] == len(self.conv_model)
-        out = [self.fc_layers[i](fc_input[i]) for i in range(n_models)]
-        return torch.stack(out, dim=0)
+        out_mean = []
+        out_var = []
+        for i in range(n_models):
+            out = self.fc_layers[i](fc_input[i])
+            out_mean += [out[0]]
+            out_var += [out[1]]
+        return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0)
 
     def reset_parameters(self):
         for i in range(len(self.conv_model)):

@@ -86,3 +86,4 @@
 --ood_pred_lr 0.001
 --ood_pred_epoch_iter 100
 --ood_pred_batch_size 1000
+--stdout_file stdout
