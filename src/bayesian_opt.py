@@ -14,9 +14,10 @@ import torch
 from tqdm import tnrange, trange
 import torch.nn as nn
 from torch.utils.data import TensorDataset, DataLoader
-import pyro
-import pyro.optim
+#import pyro
+#import pyro.optim
 import info_measures as info
+"""
 from pyro.distributions import (
     Normal,
     TransformedDistribution,
@@ -26,6 +27,7 @@ from pyro.distributions import (
     Laplace,
     Gamma,
 )
+"""
 from typing import (
     Union,
     Tuple,
@@ -53,7 +55,7 @@ from bb_opt.src import ops
 from bb_opt.src.non_matplotlib_utils import get_path
 import bb_opt.src.non_matplotlib_utils as utils
 from bb_opt.src.bo_model import BOModel
-from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
+#from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
 
 def ExtendedGamma(shape, scale, ndimension=0):
     device = "cuda" if scale.is_cuda else "cpu"
@@ -65,7 +67,7 @@ def ExtendedGamma(shape, scale, ndimension=0):
 
 def laplace_priors(
     model: torch.nn.Module, mean: float = 0., b: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     priors = {}
     for name, param in model.named_parameters():
         priors[name] = Laplace(
@@ -78,7 +80,7 @@ def laplace_priors(
 
 def extended_gamma_priors(
     model: torch.nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     priors = {}
     for name, param in model.named_parameters():
 
@@ -93,6 +95,7 @@ def extended_gamma_priors(
     return priors
 
 
+"""
 class SpikeSlabNormal(TorchDistribution):
     def __init__(self, param, std1: float = 0.03, std2: float = 2, alpha: float = 0.7):
         super().__init__(event_shape=param.shape)
@@ -135,17 +138,18 @@ class SpikeSlabNormal(TorchDistribution):
 
 def spike_slab_priors(
     model: torch.nn.Module, std1: float = 0.03, std2: float = 2., alpha: float = 0.7
-) -> Dict[str, TorchDistribution]:
+):
     priors = {}
     for name, param in model.named_parameters():
         priors[name] = SpikeSlabNormal(param, std1, std2, alpha)
 
     return priors
+"""
 
 
 def laplace_variationals(
     model: torch.nn.Module, mean: float = 0., b: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     variational_dists = {}
     for name, param in model.named_parameters():
         location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
@@ -160,7 +164,7 @@ def laplace_variationals(
 
 def extended_gamma_variationals(
     model: torch.nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     variational_dists = {}
     for name, param in model.named_parameters():
         location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
@@ -178,7 +182,7 @@ def extended_gamma_variationals(
 
 def iaf_variationals(
     model: torch.nn.Module, n_hidden: int
-) -> Dict[str, TorchDistribution]:
+):
     """
     Create IAF variational distributions from a standard normal base.
     """
@@ -196,7 +200,7 @@ def iaf_variationals(
 
 def optimize(
     model: BOModel,
-    acquisition_func: AcquisitionFunction,
+    acquisition_func,
     inputs: np.ndarray,
     labels: Union[pd.Series, np.ndarray],
     top_k_percent: int = 1,
@@ -209,8 +213,8 @@ def optimize(
     retrain_every: int = 1,
     partial_train_epochs: int = 10,
     save_key: str = "",
-    acquisition_func_greedy: Optional[AcquisitionFunction] = None,
-) -> np.ndarray:
+    acquisition_func_greedy = None,
+):
 
     n_batches = n_batches if n_batches != -1 else int(np.ceil(len(labels) / batch_size))
     if save_key and exp:
@@ -330,7 +334,7 @@ def acquire_batch_uniform(
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
-) -> List[int]:
+):
     unused_idx = [i for i in range(len(inputs)) if i not in sampled_idx]
     np.random.shuffle(unused_idx)
     return unused_idx[:batch_size]
@@ -367,7 +371,7 @@ def acquire_batch_nn_greedy(
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
-) -> List[int]:
+):
     # I'm predicting on the entire data set each time even though we only need preds on the
     # un-acquired data; keeping track of the indices is easier this way, though if it's too
     # slow, I'm sure you could change this
@@ -457,7 +461,7 @@ def acquire_batch_ei(
     exp: Optional = None,
     n_bnn_samples: int = 50,
     **unused_kwargs,
-) -> List[int]:
+):
     if isinstance(model, Sequence):  # bnn
         bnn_model, guide = model
         preds = bnn_predict(guide, inputs, n_samples=n_bnn_samples)
@@ -486,7 +490,7 @@ def acquire_batch_pdts(
     exp: Optional = None,
     kernel: Optional[Callable] = None,
     preds_multiplier: float = 2.0,
-) -> Set[int]:
+):
     bnn_model, guide = model
     batch = []
     acquirable_idx = list(set(range(len(inputs))).difference(sampled_idx))
@@ -520,7 +524,7 @@ def acquire_batch_hsic_mean_std(
     hsic_coeff: float = 150.0,
     preds_multiplier: float = 2.0,
     metric: str = "mu / sigma - hsic",
-) -> List[int]:
+):
     n_preds = int(preds_multiplier * batch_size)
     bnn_model, guide = model
 
@@ -603,7 +607,7 @@ def acquire_batch_hsic_pdts(
     kernel: Optional[Callable] = None,
     preds_multiplier: float = 2.0,
     pdts_multiplier: float = 2.0,
-) -> List[int]:
+):
 
     acquirable_idx = acquire_batch_pdts(
         model,
@@ -677,7 +681,7 @@ def acquire_batch_mves(
     kernel: Optional[Callable] = None,
     mi_estimator: str = "HSIC",
     n_max_dist_points: int = 1,
-) -> List[int]:
+):
     return acquire_batch_es(
         model,
         inputs,
@@ -705,7 +709,7 @@ def acquire_batch_es(
     mi_estimator: str = "HSIC",
     max_value_es: bool = False,
     n_max_dist_points: int = 1,
-) -> List[int]:
+):
 
     acquirable_idx = set(range(len(inputs))).difference(sampled_idx)
 
@@ -1257,7 +1261,7 @@ def acquire_batch_via_grad_er(
     input_shape: List[int],
     seed: torch.tensor = None,
     one_hot=True,
-) -> torch.tensor:
+):
 
     ack_batch_size = params.ack_batch_size
     if seed is None:
@@ -1475,7 +1479,7 @@ def acquire_batch_via_grad_hsic(
     sparse_hsic_penalty=0,
     sparse_hsic_threshold=0.,
     jupyter: bool = False,
-) -> torch.tensor:
+):
 
     assert sparse_hsic_threshold >= 0
     assert sparse_hsic_threshold < 1
@@ -1556,7 +1560,7 @@ def acquire_batch_via_grad_hsic2(
     one_hot=True,
     input_transform=lambda x : x,
     jupyter: bool = False,
-) -> torch.tensor:
+):
 
     print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
     input_tensor_list = []
@@ -1630,7 +1634,7 @@ def acquire_batch_via_grad_opt_location(
     one_hot=True,
     input_transform=lambda x : x,
     jupyter: bool = False,
-) -> torch.tensor:
+):
 
     print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
     input_tensor_list = []
@@ -1691,7 +1695,7 @@ def acquire_batch_pi(
     sampled_idx: Set[int],
     batch_size: int,
     exp: Optional = None,
-) -> List[int]:
+):
     n_preds = 1000
     max_val = sampled_labels.max()
     bnn_model, guide = model

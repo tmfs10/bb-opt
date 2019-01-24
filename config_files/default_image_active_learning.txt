@@ -13,23 +13,24 @@
 --num_ind_to_eval 200
 --num_ood_to_eval 2000
 --num_test_points 2000
+--debug False
 
 --ack_batch_size 50
 --num_acks 100
 
 --exclude_top 0.0
---init_train_examples 2000
+--init_train_examples 3000
 --init_train_num_epochs 30
---re_train_num_epochs 30
+--re_train_num_epochs 100
 --init_train_batch_size 200
---re_train_batch_size 200
+--re_train_batch_size 30
 
 --init_train_lr 1e-3
 --re_train_lr 1e-3
 --init_train_l2 1e-3
 --re_train_l2 1e-3
 
---val_frac 0.1
+--val_frac 0.33
 --ood_val_frac 0.1
 --num_train_val_splits 1
 --combine_train_val True
@@ -37,6 +38,7 @@
 
 --resnet_depth 4
 --resnet_width_factor 2
+--resnet_do_batch_norm True
 --resnet_dropout 0.0
 --num_hidden 100
 
@@ -48,10 +50,11 @@
 
 --unseen_reg normal
 --inverse_density False
+--true_max False
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
 --ensemble_type fc
---sampling_dist unseen_ind
+--sampling_dist uniform_input
 --report_zero_gamma False
 --stdout_file stdout
 
@@ -64,8 +67,8 @@
 --final_train_choose_type val,nll,ind
 
 --langevin_sampling False
---langevin_num_iter 20
---langevin_lr 30
+--langevin_num_iter 5
+--langevin_lr 1
 --langevin_beta 100000.0
 
 --ack_fun max_std

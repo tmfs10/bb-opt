@@ -55,6 +55,7 @@ def verify_empirical_stat(stat):
 
 def add_parse_args(parser):
     parser.add_argument('--gpu', type=int)
+    parser.add_argument('--debug', type=str2bool)
     parser.add_argument('--project', type=str)
     parser.add_argument('--mode', type=str)
     parser.add_argument('--config_file', type=str, nargs='+')
@@ -115,6 +116,7 @@ def add_parse_args(parser):
 
     parser.add_argument('--unseen_reg', type=strlower)
     parser.add_argument('--inverse_density', type=str2bool)
+    parser.add_argument('--true_max', type=str2bool)
     parser.add_argument('--ensemble_type', type=str)
     parser.add_argument('--sampling_dist', type=str)
     parser.add_argument('--gammas', type=float, nargs='+',
@@ -180,6 +182,7 @@ def add_parse_imdbwiki_args(parser):
     parser.add_argument('--resnet_width_factor', type=int)
     parser.add_argument('--resnet_dropout', type=float)
     parser.add_argument('--train_gender', type=int) # 0 female, 1 male, 2 both
+    parser.add_argument('--resnet_do_batch_norm', type=str2bool)
 
 
 def add_parse_args_grad(parser):

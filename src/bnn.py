@@ -5,8 +5,8 @@ from os.path import dirname
 from typing import TypeVar, Type, Optional, Callable, Union, Tuple, Any, Dict, List
 import torch
 from torch import nn
-import pyro
-from pyro.distributions import Normal, TorchDistribution
+#import pyro
+#from pyro.distributions import Normal, TorchDistribution
 from bb_opt.src.bo_model import BOModel
 from bb_opt.src.non_matplotlib_utils import get_early_stopping
 
@@ -15,7 +15,7 @@ _BNN = TypeVar("BNN", bound="BNN")
 
 def normal_priors(
     model: nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     priors = {}
     for name, param in model.named_parameters():
         priors[name] = Normal(
@@ -28,7 +28,7 @@ def normal_priors(
 
 def normal_variationals(
     model: nn.Module, mean: float = 0., std: float = 1.
-) -> Dict[str, TorchDistribution]:
+):
     variational_dists = {}
     for name, param in model.named_parameters():
         location = pyro.param(f"g_{name}_location", torch.randn_like(param) + mean)
@@ -45,7 +45,7 @@ def make_bnn_model(
     model: nn.Module,
     priors: Callable[[], Dict[str, TorchDistribution]],
     batch_size: int = 128,
-) -> Callable[[torch.Tensor, torch.Tensor], None]:
+):
     use_cuda = next(model.parameters()).device.type == "cuda"
 
     def bnn_model(inputs: torch.Tensor, labels: torch.Tensor):
@@ -65,7 +65,7 @@ def make_bnn_model(
 
 def make_guide(
     model: nn.Module, variational_dists: Callable[[], Dict[str, TorchDistribution]]
-) -> Callable[[Optional[torch.Tensor], Optional[torch.Tensor]], nn.Module]:
+):
     def guide(
         inputs: Optional[torch.Tensor] = None, labels: Optional[torch.Tensor] = None
     ):
