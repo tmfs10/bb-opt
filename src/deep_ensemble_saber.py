@@ -51,6 +51,29 @@ class NN(torch.nn.Module):
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean, variance
 
+class NN3(torch.nn.Module):
+    """
+    Single-layer MLP that predicts a Gaussian for each point.
+    """
+
+    def __init__(self, n_inputs: int, n_hidden: int, min_variance: float = 1e-5):
+        super().__init__()
+        self.hidden = Linear(n_inputs, n_hidden)
+        self.output = Linear(n_hidden, 2)
+        self.non_linearity = ReLU()
+        self.softplus = Softplus()
+        self.min_variance = min_variance
+
+    def forward(self, x):
+        hidden = self.non_linearity(self.hidden(x))
+        output = self.output(hidden)
+        mean =1.5*(torch.sigmoid(output[:,0])-0.5)
+        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        #variance =torch.sigmoid(output[:,1])*0.01+self.min_variance
+        #mean = output[:, 0]
+        #variance = self.softplus(output[:, 1]) + self.min_variance
+        return mean, variance
+
 class NN2(torch.nn.Module):
     """
     Single-layer MLP that predicts a Gaussian for each point.
@@ -325,7 +348,7 @@ class NNEnsemble(BOModel, torch.nn.Module):
                 ).to(device)
             else:
                 model = cls(
-                    n_models, NN2, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                    n_models, NN3, model_kwargs, adversarial_epsilon=adversarial_epsilon
                 ).to(device)
             return model
 
@@ -594,3 +617,56 @@ class NNEnsemble(BOModel, torch.nn.Module):
         except KeyError:
             load_checkpoint(fname, model)
             return model
+    @classmethod
+    def load_model2(
+        cls: Type[_NNEnsemble],
+        fname: str,
+        device: str = "cpu",
+        optimizer_func: Optional[Callable] = None,
+    ) -> Union[_NNEnsemble, Tuple[_NNEnsemble, Any]]:
+        """
+        WARNING - saving/loading an ensemble using this function assumes that each model
+        in the ensemble has the same number of hidden units and that the ensemble is
+        constructable by `NNEnsemble.get_model`.
+
+        :param fname: path to .pth file with weights to load
+        There must also be a .pkl file with the same base name/path with
+        a list of the activation function names to use.
+        :param device: device onto which to load the model
+        :optimizer_func: a function which takes in model parameters and returns an optimizer
+        If None, Adam is used (with lr=0.01).
+        :returns: (model, optimizer) if optimizer state was saved otherwise model
+        """
+        batch_size = 1  # this isn't used
+
+        with open(fname.replace(".pth", ".pkl"), "rb") as f:
+            kwargs = pickle.load(f)
+            n_models = kwargs["n_models"]
+            n_inputs = kwargs["n_inputs"]
+            n_hidden = kwargs["n_hidden"]
+            adversarial_epsilon = kwargs["adversarial_epsilon"]
+            nonlinearity_names = kwargs["nonlinearity_names"]
+
+        model = cls.get_model(
+            n_inputs,
+            batch_size,
+            n_models,
+            n_hidden,
+            adversarial_epsilon,
+            device,
+            nonlinearity_names,
+            single_layer=False
+        )
+
+        try:
+            optimizer = (
+                optimizer_func(model.parameters())
+                if optimizer_func
+                else torch.optim.Adam(model.parameters(), lr=0.01)
+            )
+            load_checkpoint(fname, model, optimizer)
+            return model, optimizer
+        except KeyError:
+            load_checkpoint(fname, model)
+            return model
+

@@ -102,7 +102,7 @@ def train_val_test_split(n, split, shuffle=True, rng=None):
 
 
 def load_checkpoint(fname: str, model, optimizer: Optional = None) -> None:
-    checkpoint = torch.load(fname)
+    checkpoint = torch.load(fname,map_location='cpu')
     model.load_state_dict(checkpoint["model_state"])
     model.eval()
     if optimizer:

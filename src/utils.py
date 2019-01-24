@@ -467,7 +467,7 @@ def load_data_uci(
         train_input_mean = train_inputs.mean(axis=0)
         train_input_std = train_inputs.std(axis=0)
         train_input_std[train_input_std==0]=1e-15
-        print(train_input_mean,train_input_std)
+        #print(train_input_mean,train_input_std)
 
         train_labels = sigmoid((train_labels - train_label_mean) / train_label_std)
         test_labels = sigmoid((test_labels - train_label_mean) / train_label_std)

@@ -960,6 +960,20 @@ def knn_density(train_x, x, k=5):
 
         return dist_sort
 
+def knn_density_max(train_x, x, k=5):
+    with torch.no_grad():
+        assert train_x.shape[1:] == x.shape[1:], "%s[1:] == %s[1:]" % (train_x.shape, x.shape)
+        assert len(x.shape) >= 2
+        if len(x.shape) > 2:
+            x = x.view(x.shape[0], -1)
+            train_x = train_x.view(train_x.shape[0], -1)
+        dist = ops.sqdist(x.unsqueeze(1), train_x.unsqueeze(1))
+        dist_sort, _ = torch.sort(dist, dim=1)
+        dist_sort = dist_sort[:, :k].max(dim=1)
+        #dist_sort = (dist_sort-dist_sort.min())/dist_sort.std()
+        dist_sort /= dist_sort.max()
+
+        return dist_sort
 
 def train_ensemble_image(
     params,

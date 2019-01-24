@@ -18,6 +18,7 @@ from bb_opt.src.deep_ensemble_saber import (
     NNEnsemble,
     RandomNN,
 )
+from bb_opt.src.dna_bopt import knn_density
 from bb_opt.src.utils import get_path, load_checkpoint, save_checkpoint, jointplot, load_data_saber, load_data_saber2,load_data_gc
 from gpu_utils.utils import gpu_init
 
@@ -117,6 +118,18 @@ if __name__ == "__main__":
 				out_data = sample_uniform(out_size)
 				means_o, variances_o = model(out_data)
 				var=(0.5*means_o.var(dim=0).mean())+(0.5*means.var(dim=0).mean())
+				loss=negative_log_likelihood-args.hyper*var
+				train_newloss.append(var.item())
+			elif args.loss_type=='idvar':
+				out_data = sample_uniform(out_size)
+				means_o, variances_o = model(out_data)
+				var=((means_o.var(dim=0)*knn_density(inputs,out_data,5)).mean())
+				loss=negative_log_likelihood-args.hyper*var
+				train_newloss.append(var.item())
+			elif args.loss_type=='idvar-max':
+				out_data = sample_uniform(out_size)
+				means_o, variances_o = model(out_data)
+				var=((means_o.var(dim=0)*knn_density_max(inputs,out_data,5)).mean())
 				loss=negative_log_likelihood-args.hyper*var
 				train_newloss.append(var.item())
 			loss.backward()
