@@ -299,6 +299,18 @@ for task_iter in range(len(task_name)):
                     sampling_info['ood_sampling_rng'] = ops.get_rng_state()
                     ops.set_rng_state(cur_rng)
                     return torch.stack(out, dim=0)
+            elif params.sampling_dist == "indist":
+                def sample_uniform_fn(batch_size, sampling_info):
+                    train_x = sampling_info["train_x"]
+                    ood_sampling_rng = sampling_info["ood_sampling_rng"]
+                    cur_rng = ops.get_rng_state()
+                    ops.set_rng_state(ood_sampling_rng)
+                    idx = [i for i in range(train_x.shape[0])]
+                    np.random.shuffle(idx)
+                    sampling_info['ood_sampling_rng'] = ops.get_rng_state()
+                    ops.set_rng_state(cur_rng)
+                    out = train_x[idx[:batch_size]]
+                    return out
             else:
                 assert False, params.sampling_dist + " not implemented"
 

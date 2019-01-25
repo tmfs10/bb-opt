@@ -752,15 +752,17 @@ class ResnetEnsemble2(torch.nn.Module):
         print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers[0].parameters()) * n_models)
 
     def fc_input_size(self):
-        return self.conv_model.nStages[3]
+        return self.conv_model[0].nStages[3]
 
     def freeze_conv(self):
         for i in range(len(self.conv_model)):
+            self.conv_model[i].eval()
             for param in self.conv_model[i].parameters():
                 param.requires_grad = False
 
     def unfreeze_conv(self):
         for i in range(len(self.conv_model)):
+            self.conv_model[i].train()
             for param in self.conv_model[i].parameters():
                 param.requires_grad = True
 

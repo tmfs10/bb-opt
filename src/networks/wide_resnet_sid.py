@@ -51,7 +51,6 @@ class wide_basic(nn.Module):
     def forward(self, x):
         if self.do_batch_norm:
             out = self.conv1(F.relu(self.bn1(x)))
-            #out = self.conv1(F.relu(self.bn1(x)))
             out = self.conv2(F.relu(self.bn2(out)))
         else:
             out = self.conv1(F.relu(x))
@@ -110,9 +109,10 @@ class Wide_ResNet(nn.Module):
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)
-        out = F.relu(out)
         if self.do_batch_norm:
             out = F.relu(self.bn1(out))
+        else:
+            out = F.relu(out)
         out = F.avg_pool2d(out, 8)
         out = out.view(out.size(0), -1)
 
