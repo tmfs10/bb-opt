@@ -1013,6 +1013,7 @@ def train_ensemble_image(
     ood_val_frac=0.0,
     sample_uniform_fn=None,
     ood_sampling_rng=None,
+    grad_gamma_search=False,
 ):
     with torch.no_grad():
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
@@ -1102,7 +1103,6 @@ def train_ensemble_image(
         time_since_last_best_epoch = 0
         logging = None
 
-    #print('point a0:', nvidia_smi())
     for epoch_iter in progress:
         if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
             break
@@ -1113,6 +1113,7 @@ def train_ensemble_image(
             bs = batches[bi]
             be = batches[bi+1]
             bN = be-bs
+            ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
             if bN <= 0:
                 continue
 
@@ -1127,11 +1128,7 @@ def train_ensemble_image(
                     max_px = temp.max(dim=0)[0]
                     sampling_info['min_px'] = min_px
                     sampling_info['max_px'] = max_px
-                #print('volume reduction factor:', -torch.sum(torch.log(max_px-min_px)), max_px.shape)
 
-            ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
-
-            #print('point a1:', nvidia_smi())
             if params.sampling_dist == "pom_fc_input":
                 means, variances, pom_fc_input = model_ensemble(bX, return_fc_input=True)
                 hist = [[np.histogram(fc_input[:, i], bins=10, density=False) for i in range(fc_input.shape[1])] for fc_input in pom_fc_input]
@@ -1154,21 +1151,20 @@ def train_ensemble_image(
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            #print('point a2:', nvidia_smi())
             nll = model_ensemble.compute_negative_log_likelihood(
                     bY,
                     means, 
                     variances, 
                     return_mse=False)
-            #print('point a3:', nvidia_smi())
 
             loss = nll
 
             optim.zero_grad()
             if unseen_reg != "normal":
+                model_ensemble.freeze_conv()
                 out_data = sample_uniform_fn(ood_data_batch_size, sampling_info=sampling_info)
 
-                if params.langevin_sampling and gamma > 0.0:
+                if params.langevin_sampling:
                     model_ensemble.eval()
                     #num_features = out_data.shape[1]
                     #xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
@@ -1203,6 +1199,7 @@ def train_ensemble_image(
 
                 if params.sampling_dist in ["bb_fc_input", "pom_fc_input"]:
                     means_o, variances_o = model_ensemble.fc_forward(out_data) # (num_samples, num_points)
+                    print('means_o mean', means_o.mean().item())
                 else:
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
@@ -1211,18 +1208,18 @@ def train_ensemble_image(
                         variances_o,
                         unseen_reg,
                         gamma,
-                        means=means,
+                        means=None,
                         o_weighting=weighting
                         )
-                model_ensemble.freeze_conv()
-                ood_loss.backward(retain_graph=True)
+                ood_loss.backward(retain_graph=False)
+                optim.zero_grad()
                 model_ensemble.unfreeze_conv()
 
             loss.backward()
 
+            optim.zero_grad()
             optim.step()
             torch.cuda.empty_cache()
-            #print('point a4:', nvidia_smi())
 
         model_ensemble.eval()
         with torch.no_grad():
@@ -1243,9 +1240,6 @@ def train_ensemble_image(
             assert train_mean_of_means.shape == train_Y.shape, "%s == %s" % (train_mean_of_means.shape, val_Y.shape)
             kt_corr = kendalltau(train_mean_of_means, train_Y)[0]
             kt_corrs += [kt_corr]
-            #kt_corr = 0
-
-            #print('point a5:', nvidia_smi())
 
             if num_epoch_iters is None:
                 val_means, val_variances = ensemble_forward(model_ensemble, val_X, batch_size, progress_bar=False)
@@ -1259,13 +1253,11 @@ def train_ensemble_image(
                         val_variances,
                         custom_std=train_Y.std() if params.report_metric_train_std else None,
                         return_mse=False)
-                #print('point a8:', nvidia_smi())
                 val_nll1 = val_nll1.detach().item()
                 val_nll2 = val_nll2.detach().item()
                 rmse = torch.sqrt(torch.mean((val_means.mean(dim=0)-val_Y)**2)).detach().item()
                 val_nlls[0] += [val_nll1]
                 val_nlls[1] += [val_nll2]
-                #print('point a9:', nvidia_smi())
                 val_rmses += [rmse]
                 val_mean_of_means = val_means.mean(dim=0)
                 assert val_mean_of_means.shape == val_Y.shape, "%s == %s" % (val_mean_of_means.shape, val_Y.shape)
@@ -1273,6 +1265,8 @@ def train_ensemble_image(
                 val_kt_corrs += [kt_corr]
 
                 nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
+
+                print('val_nll', val_nll2)
 
                 if "val" in choose_type:
                     if nll_criterion < best_nll:
