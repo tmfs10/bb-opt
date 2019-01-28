@@ -237,7 +237,7 @@ for task_iter in range(len(task_name)):
             train_idx = checkpoint["train_idx"].numpy()
     else:
         if params.project in ['imdb', 'wiki']:
-            if params.sampling_dist == "ood":
+            if params.sampling_space == "ood":
                 def sample_uniform_fn(batch_size, sampling_info=None):
                     ood_sampling_rng = sampling_info['ood_sampling_rng']
                     cur_rng = ops.get_rng_state()
@@ -248,30 +248,31 @@ for task_iter in range(len(task_name)):
                     ops.set_rng_state(cur_rng)
                     out = ood_X[idx[:batch_size]]
                     return out
-            elif params.sampling_dist == "unseen_ind":
+            elif params.sampling_space == "unseen_ind":
                 def sample_uniform_fn(batch_size, sampling_info=None):
                     idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
                     random.shuffle(idx)
                     out = X[idx[:batch_size]]
                     return out
-            elif params.sampling_dist in ["uniform_input", "uniform_input_to_fc"]:
+            elif params.sampling_space == "input" and params.sampling_dist == "uniform":
                 def sample_uniform_fn(batch_size, sampling_info=None):
                     out, rng = dbopt.image_sample_uniform(batch_size, sampling_info["ood_sampling_rng"])
                     sampling_info["ood_sampling_rng"] = rng
                     return out
-            elif params.sampling_dist == "uniform_fc_input":
+            elif params.sampling_space == "fc" and params.sampling_dist == "uniform":
                 def sample_uniform_fn(batch_size, sampling_info=None):
-                    fc_input_size = init_model.fc_input_size()
+                    model = sampling_info['model']
+                    fc_input_size = model.fc_input_size()
                     dist = tdist.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0))
                     out = dist.sample(sample_shape=(torch.Size([batch_size, fc_input_size])))
                     return out.to(params.device)
-            elif params.sampling_dist == "uniform_bb": # bb = bounding box
+            elif params.sampling_space == "input" and params.sampling_dist == "uniform_bb": # bb = bounding box
                 def sample_uniform_fn(batch_size, sampling_info):
                     max_px = sampling_info['max_px']
                     min_px = sampling_info['min_px']
                     u = tdist.Uniform(min_px, max_px)
                     return u.sample(sample_shape=torch.Size([batch_size])).view([batch_size]+list(X.shape[1:])).to(params.device)
-            elif params.sampling_dist == "pom_fc_input": # pom = product of marginals
+            elif params.sampling_space == "fc" and params.sampling_dist == "pom": # pom = product of marginals
                 def sample_uniform_fn(batch_size, sampling_info):
                     hist = sampling_info['hist']
                     out = []
@@ -285,7 +286,7 @@ for task_iter in range(len(task_name)):
                             out[-1] += [torch.from_numpy(np.random.uniform(low=low, high=high).astype(np.float32)).to(params.device)]
                         out[-1] = torch.stack(out[-1], dim=0).transpose(0, 1)
                     return torch.stack(out, dim=0)
-            elif params.sampling_dist == "bb_fc_input": # pom = product of marginals
+            elif params.sampling_space == "fc" and params.sampling_dist == "uniform_bb": # pom = product of marginals
                 def sample_uniform_fn(batch_size, sampling_info):
                     max_val = sampling_info['max_val']
                     min_val = sampling_info['min_val']
@@ -299,7 +300,7 @@ for task_iter in range(len(task_name)):
                     sampling_info['ood_sampling_rng'] = ops.get_rng_state()
                     ops.set_rng_state(cur_rng)
                     return torch.stack(out, dim=0)
-            elif params.sampling_dist == "indist":
+            elif params.sampling_space == "indist" and params.sampling_dist == "uniform":
                 def sample_uniform_fn(batch_size, sampling_info):
                     train_x = sampling_info["train_x"]
                     ood_sampling_rng = sampling_info["ood_sampling_rng"]
@@ -315,7 +316,6 @@ for task_iter in range(len(task_name)):
                 assert False, params.sampling_dist + " not implemented"
 
         zero_gamma_model = None
-        invar_model = None
         if params.project in ['imdb', 'wiki']:
             logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.image_hyper_param_train(
                 params,
@@ -328,7 +328,6 @@ for task_iter in range(len(task_name)):
                 predict_info_models=predict_info_models if params.predict_mi else None,
                 sample_uniform_fn=sample_uniform_fn,
                 report_zero_gamma=params.report_zero_gamma,
-                report_invar_gamma=False,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 )
         else:
@@ -355,18 +354,13 @@ for task_iter in range(len(task_name)):
                 init_model, 
                 X, 
                 params.re_train_batch_size,
-                progress_bar=params.stdout_file == "stdout",
+                progress_bar=params.progress_bar,
                 ) # (num_candidate_points, num_samples)
         if params.unseen_reg != "normal":
             if zero_gamma_model is not None:
                 zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
                 zero_gamma_pred_means = zero_gamma_pred_means.detach()
                 zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
-
-            if invar_model is not None:
-                invar_pred_means, invar_pred_vars = dbopt.ensemble_forward(invar_model, X, params.re_train_batch_size)
-                invar_pred_means = invar_pred_means.detach()
-                invar_pred_vars = invar_pred_vars.detach()
 
         ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
                 pre_ack_pred_means,
@@ -391,7 +385,7 @@ for task_iter in range(len(task_name)):
                 )
         print('test_pred_stats:', pprint.pformat(test_pred_stats))
 
-        if params.unseen_reg != "normal":
+        if params.unseen_reg != "normal" and params.report_zero_gamma:
             if zero_gamma_model is not None:
                 zero_gamma_test_pred_stats = bopt.get_pred_stats(
                         zero_gamma_pred_means[:, test_idx],
@@ -404,18 +398,6 @@ for task_iter in range(len(task_name)):
                 print('zero_gamma_test_pred_stats:', pprint.pformat(zero_gamma_test_pred_stats))
             else:
                 zero_gamma_test_pred_stats = test_pred_stats
-            if invar_model is not None:
-                invar_test_pred_stats = bopt.get_pred_stats(
-                        invar_pred_means[:, test_idx],
-                        torch.sqrt(invar_pred_vars[:, test_idx]),
-                        Y[test_idx],
-                        params.output_noise_dist_fn, 
-                        params.sigmoid_coeff,
-                        train_Y=train_Y_cur,
-                        )
-                print('invar_test_pred_stats:', pprint.pformat(invar_test_pred_stats))
-            else:
-                invar_test_pred_stats = zero_gamma_test_pred_stats
 
     ood_pred_stats = None
     if ood_inputs is not None:
@@ -423,16 +405,21 @@ for task_iter in range(len(task_name)):
         assert ood_inputs.shape[0] == ood_labels.shape[0]
 
         with torch.no_grad():
-            ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(init_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+            ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(
+                    init_model, 
+                    ood_X, 
+                    params.init_train_batch_size,
+                    progress_bar=params.progress_bar,
+                    ) # (num_candidate_points, num_samples)
+
             if zero_gamma_model is not None:
-                zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(zero_gamma_model, ood_X, params.init_train_batch_size)
+                zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(
+                        zero_gamma_model, 
+                        ood_X, 
+                        params.init_train_batch_size
+                        )
                 zero_gamma_ood_preds_means = zero_gamma_ood_preds_means.detach()
                 zero_gamma_ood_preds_vars = zero_gamma_ood_preds_vars.detach()
-
-            if invar_model is not None:
-                invar_ood_preds_means, invar_ood_preds_vars = dbopt.ensemble_forward(invar_model, ood_X, params.init_train_batch_size)
-                invar_ood_preds_means = invar_ood_preds_means.detach()
-                invar_ood_preds_vars = invar_ood_preds_vars.detach()
 
             ood_pred_stats = bopt.get_pred_stats(
                     ood_preds_means,
@@ -456,18 +443,6 @@ for task_iter in range(len(task_name)):
                     print('zero_gamma_ood_pred_stats:', pprint.pformat(zero_gamma_ood_pred_stats))
                 else:
                     zero_gamma_ood_pred_stats = ood_pred_stats
-                if invar_model is not None:
-                    invar_ood_pred_stats = bopt.get_pred_stats(
-                            invar_ood_preds_means,
-                            torch.sqrt(invar_ood_preds_vars),
-                            ood_Y,
-                            params.output_noise_dist_fn, 
-                            params.sigmoid_coeff,
-                            train_Y=train_Y_cur,
-                            )
-                    print('invar_ood_pred_stats:', pprint.pformat(invar_ood_pred_stats))
-                else:
-                    invar_ood_pred_stats = zero_gamma_ood_pred_stats
 
         if not params.log_all_train_iter:
             logging[0] = None
@@ -485,8 +460,6 @@ for task_iter in range(len(task_name)):
         if params.report_zero_gamma and params.unseen_reg != "normal":
             to_save_dict['zero_gamma_test_pred_stats'] = zero_gamma_test_pred_stats
             to_save_dict['zero_gamma_ood_pred_stats'] = zero_gamma_ood_pred_stats
-            to_save_dict['invar_gamma_test_pred_stats'] = invar_test_pred_stats
-            to_save_dict['invar_gamma_ood_pred_stats'] = invar_ood_pred_stats
 
         torch.save(to_save_dict, init_model_path)
     else:
@@ -867,7 +840,7 @@ for task_iter in range(len(task_name)):
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_gamma_model, invar_model = dbopt.image_hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model, _ = dbopt.image_hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, X, Y],

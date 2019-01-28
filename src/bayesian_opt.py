@@ -1869,7 +1869,7 @@ def get_pred_stats(
         std = pred_mean_std.mean().item()
 
         if combined_mean.shape[0] > 1:
-            kt_corr = kendalltau(combined_mean, Y)[0]
+            kt_corr = kendalltau(combined_mean.cpu().numpy(), Y.cpu().numpy())[0]
             rmse_std_corr = float(pearsonr(rse.cpu().numpy(), pred_mean_std.cpu().numpy())[0])
         else:
             kt_corr = 0
@@ -1952,7 +1952,7 @@ def get_ind_top_ood_pred_stats(
 
         rand_idx = torch.randperm(n)[:200]
         rand_idx = labels_sort_idx[rand_idx]
-        corr = np.corrcoef(preds[:, rand_idx].transpose(0, 1))
+        corr = np.corrcoef(preds[:, rand_idx].transpose(0, 1).cpu().numpy())
         pred_corr += [corr[np.tril_indices(corr.shape[0], k=-1)].mean()]
 
         ret = get_pred_stats(

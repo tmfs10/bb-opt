@@ -55,6 +55,7 @@ def verify_empirical_stat(stat):
 
 def add_parse_args(parser):
     parser.add_argument('--gpu', type=int)
+    parser.add_argument('--progress_bar', type=str2bool)
     parser.add_argument('--debug', type=str2bool)
     parser.add_argument('--project', type=str)
     parser.add_argument('--mode', type=str)
@@ -116,9 +117,11 @@ def add_parse_args(parser):
 
     parser.add_argument('--unseen_reg', type=strlower)
     parser.add_argument('--inverse_density', type=str2bool)
+    parser.add_argument('--inverse_density_emb_space', type=str2bool)
     parser.add_argument('--true_max', type=str2bool)
     parser.add_argument('--ensemble_type', type=str)
     parser.add_argument('--sampling_dist', type=str)
+    parser.add_argument('--sampling_space', type=str)
     parser.add_argument('--gammas', type=float, nargs='+',
             help="maxvar/defmean penalty")
     parser.add_argument('--ood_data_batch_factor', type=float)
