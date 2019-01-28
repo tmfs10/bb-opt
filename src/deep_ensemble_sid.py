@@ -766,6 +766,27 @@ class ResnetEnsemble2(torch.nn.Module):
             for param in self.conv_model[i].parameters():
                 param.requires_grad = True
 
+
+    def freeze_fc(self):
+        for i in range(len(self.fc_layers)):
+            self.fc_layers[i].eval()
+            for param in self.fc_layers[i].parameters():
+                param.requires_grad = False
+
+    def unfreeze_fc(self):
+        for i in range(len(self.fc_layers)):
+            self.fc_layers[i].eval()
+            for param in self.fc_layers[i].parameters():
+                param.requires_grad = False
+
+    def freeze(self):
+        self.freeze_conv()
+        self.freeze_fc()
+
+    def unfreeze(self):
+        self.unfreeze_conv()
+        self.unfreeze_fc()
+
     def forward(self, x, return_fc_input=False):
         n_models = len(self.conv_model)
         fc_input = [self.conv_model[i](x) for i in range(n_models)]
@@ -777,7 +798,7 @@ class ResnetEnsemble2(torch.nn.Module):
             out_var += [out[1]]
 
         if return_fc_input:
-            return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0), [t.detach() for t in fc_input]
+            return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0), torch.stack([t.detach() for t in fc_input])
         else:
             return torch.stack(out_mean, dim=0), torch.stack(out_var, dim=0)
 

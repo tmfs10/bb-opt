@@ -23,6 +23,7 @@ log/
 *.fls
 *.svg
 *.pdf
+*.swo
 output_*
 chemical_vae
 

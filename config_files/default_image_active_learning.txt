@@ -1,5 +1,6 @@
 
 --gpu -1
+--progress_bar True
 --project wiki
 --mode active_learning
 --seed 1
@@ -50,6 +51,7 @@
 
 --unseen_reg normal
 --inverse_density False
+--inverse_density_emb_space False
 --true_max False
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
@@ -67,7 +69,7 @@
 --final_train_choose_type val,nll,ind
 
 --langevin_sampling False
---langevin_num_iter 5
+--langevin_num_iter 10
 --langevin_lr 1
 --langevin_beta 100000.0
 
