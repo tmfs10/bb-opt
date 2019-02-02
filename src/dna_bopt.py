@@ -1398,6 +1398,9 @@ def image_hyper_param_train(
     report_zero_gamma=False,
 ):
     gamma_added = False
+    regression = params.num_acks == 0
+    if unseen_reg == "normal":
+        gammas = [0.0]
     if report_zero_gamma and 0.0 not in gammas:
         gammas = [0.0] + gammas
         gamma_added = True
@@ -1490,57 +1493,56 @@ def image_hyper_param_train(
     assert best_gamma is not None
     print('best gamma:', best_gamma)
 
-    """
-    zero_gamma_model = None
-    if report_zero_gamma:
-        if best_gamma != 0.0:
-            zero_gamma_model = copy.deepcopy(model)
+    if not regression:
+        zero_gamma_model = None
+        if report_zero_gamma:
+            if best_gamma != 0.0:
+                zero_gamma_model = copy.deepcopy(model)
 
-    assert best_epoch_iter >= 0
-    print('combine_train_val')
-    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-    #print('point 4:', nvidia_smi())
-    _, _ = train_ensemble_image(
-            params,
-            train_batch_size,
-            train_epochs, 
-            [train_X, train_Y, X, Y],
-            model,
-            optim,
-            choose_type=params.final_train_choose_type,
-            unseen_reg=unseen_reg,
-            gamma=best_gamma,
-            normalize_fn=normalize_fn,
-            num_epoch_iters=best_epoch_iter+1,
-            sample_uniform_fn=sample_uniform_fn,
-            ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-            )
-    torch.cuda.empty_cache()
-
-    if zero_gamma_model is not None:
-        assert best_gamma != 0.0
-        assert zero_gamma_best_epoch_iter >= 0
-        optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
+        assert best_epoch_iter >= 0
+        print('combine_train_val')
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        #print('point 4:', nvidia_smi())
         _, _ = train_ensemble_image(
-                params, 
+                params,
                 train_batch_size,
                 train_epochs, 
                 [train_X, train_Y, X, Y],
-                zero_gamma_model,
+                model,
                 optim,
                 choose_type=params.final_train_choose_type,
-                unseen_reg="normal",
-                gamma=0.0,
+                unseen_reg=unseen_reg,
+                gamma=best_gamma,
                 normalize_fn=normalize_fn,
-                num_epoch_iters=zero_gamma_best_epoch_iter+1,
-                sample_uniform_fn=None,
+                num_epoch_iters=best_epoch_iter+1,
+                sample_uniform_fn=sample_uniform_fn,
                 ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
                 )
         torch.cuda.empty_cache()
 
-    #print('point 5:', nvidia_smi())
-    print('combine_train_val done')
-    """
+        if zero_gamma_model is not None:
+            assert best_gamma != 0.0
+            assert zero_gamma_best_epoch_iter >= 0
+            optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
+            _, _ = train_ensemble_image(
+                    params, 
+                    train_batch_size,
+                    train_epochs, 
+                    [train_X, train_Y, X, Y],
+                    zero_gamma_model,
+                    optim,
+                    choose_type=params.final_train_choose_type,
+                    unseen_reg="normal",
+                    gamma=0.0,
+                    normalize_fn=normalize_fn,
+                    num_epoch_iters=zero_gamma_best_epoch_iter+1,
+                    sample_uniform_fn=None,
+                    ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                    )
+            torch.cuda.empty_cache()
+
+        #print('point 5:', nvidia_smi())
+        print('combine_train_val done')
 
     return logging, best_gamma, data_split_rng, zero_gamma_model, best_gamma_model
 

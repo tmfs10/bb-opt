@@ -323,7 +323,7 @@ for task_iter in range(len(task_name)):
                 [train_X_init, train_Y_cur, X, Y],
                 "init",
                 params.gammas,
-                params.unseen_reg,
+                params.unseen_reg if params.num_acks == 0 else "normal",
                 data_split_rng=data_split_rng,
                 predict_info_models=predict_info_models if params.predict_mi else None,
                 sample_uniform_fn=sample_uniform_fn,
@@ -493,7 +493,6 @@ for task_iter in range(len(task_name)):
             idx_at_each_iter = [train_idx.tolist()]
 
             train_X_cur = train_X_init.clone()
-            train_Y_cur = train_Y_cur.clone()
 
             cur_model = copy.deepcopy(init_model)
 
@@ -769,8 +768,8 @@ for task_iter in range(len(task_name)):
                     random.shuffle(new_idx)
                     new_idx = torch.LongTensor(new_idx)
 
-                    train_X_cur = X.new_tensor(X[new_idx]).detach()
-                    train_Y_cur = Y.new_tensor(Y[new_idx]).detach()
+                    train_X_cur = X[new_idx].clone().detach()
+                    train_Y_cur = Y[new_idx].clone().detach()
 
                     print("train_X_cur.shape", train_X_cur.shape)
                     
@@ -783,60 +782,6 @@ for task_iter in range(len(task_name)):
                         cur_model,
                         ensemble_init_rng
                         )
-                    if params.project in ['imdb', 'wiki']:
-                        if params.sampling_dist == "ood":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                idx = [i for i in range(ood_X.shape[0])]
-                                random.shuffle(idx)
-                                out = ood_X[idx[:batch_size]]
-                                return out
-                        elif params.sampling_dist == "unseen_ind":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
-                                random.shuffle(idx)
-                                out = X[idx[:batch_size]]
-                                return out
-                        elif params.sampling_dist in ["uniform_input", "uniform_input_to_fc"]:
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                out = dbopt.image_sample_uniform(batch_size)
-                                return out
-                        elif params.sampling_dist == "uniform_fc_input":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                fc_input_size = cur_model.fc_input_size()
-                                dist = tdist.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0))
-                                out = dist.sample(sample_shape=(torch.Size([batch_size, fc_input_size])))
-                                return out.to(params.device)
-                        elif params.sampling_dist == "uniform_bb": # bb = bounding box
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                max_px = sampling_info['max_px']
-                                min_px = sampling_info['min_px']
-                                u = tdist.Uniform(min_px, max_px)
-                                return u.sample(sample_shape=torch.Size([batch_size])).view([batch_size]+list(X.shape[1:])).to(params.device)
-                        elif params.sampling_dist == "pom_fc_input": # pom = product of marginals
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                hist = sampling_info['hist']
-                                out = []
-                                for i_model in range(len(hist)):
-                                    out += [ [] ]
-                                    for i_point in range(len(hist[i_model])):
-                                        n = len(hist[i_model][i_point][0])
-                                        idx = np.random.choice(n, size=batch_size, p=hist[i_model][i_point][0])
-                                        low = hist[i_model][i_point][1][idx]
-                                        high = hist[i_model][i_point][1][idx+1]
-                                        out[-1] += [torch.from_numpy(np.random.uniform(low=low, high=high).astype(np.float32)).to(params.device)]
-                                    out[-1] = torch.stack(out[-1], dim=0).transpose(0, 1)
-                                return torch.stack(out, dim=0)
-                        elif params.sampling_dist == "bb_fc_input": # pom = product of marginals
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                max_val = sampling_info['max_val']
-                                min_val = sampling_info['min_val']
-                                out = []
-                                for i in range(len(max_val)):
-                                    u = tdist.uniform.Uniform(min_val[i], max_val[i])
-                                    out += [u.sample(sample_shape=torch.Size([batch_size]))]
-                                return torch.stack(out, dim=0)
-                        else:
-                            assert False, params.sampling_dist + " not implemented"
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:

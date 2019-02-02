@@ -99,10 +99,15 @@ class Wide_ResNet(nn.Module):
                 self.layer1,
                 self.layer2,
                 self.layer3,
-                self.linear,
                 ]
+        if not self.fc_sampling:
+            nets += [self.linear]
         for k in nets:
-            k.reset_parameters()
+            if isinstance(k, nn.Sequential):
+                for i in range(len(k)):
+                    k[i].reset_parameters()
+            else:
+                k.reset_parameters()
 
     def forward(self, x):
         out = self.conv1(x)
