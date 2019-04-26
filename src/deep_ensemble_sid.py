@@ -19,6 +19,7 @@ from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.networks.wide_resnet_sid import Wide_ResNet
+import bayesian_opt as bopt
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -56,6 +57,8 @@ class NN(torch.nn.Module):
         self.min_variance = min_variance
         self.sigmoid_coeff = sigmoid_coeff
         self.n_hidden = n_hidden
+        #self.pred_var_out = nn.Softplus()
+        self.pred_var_out = torch.sigmoid
 
     def forward(self, x):
         hidden = []
@@ -72,13 +75,13 @@ class NN(torch.nn.Module):
                 mean = torch.sigmoid(output[0][:, 0])*self.sigmoid_coeff
             else:
                 mean = output[:, 0]
-            variance = torch.sigmoid(output[0][:, 1])*0.1+self.min_variance
+            variance = self.pred_var_out(output[0][:, 1])*0.1+self.min_variance
         else:
             if self.sigmoid_coeff > 0:
                 mean = torch.sigmoid(output[0])*self.sigmoid_coeff
             else:
                 mean = output[0]
-            variance = torch.sigmoid(output[1])*0.1+self.min_variance
+            variance = self.pred_var_out(output[1])*0.1+self.min_variance
 
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean.view(-1), variance.view(-1)
@@ -188,10 +191,12 @@ class NNEnsemble(torch.nn.Module):
 
     def __init__(
         self,
-        n_models: int,
+        n_models,
         model_generator,
         model_kwargs_generator,
-        adversarial_epsilon: Optional = None,
+        adversarial_epsilon=None,
+        mu_prior=None,
+        std_prior=None,
     ):
         super().__init__()
 
@@ -217,6 +222,37 @@ class NNEnsemble(torch.nn.Module):
             ]
         )
         self.adversarial_epsilon = adversarial_epsilon
+
+        self.mu_prior = mu_prior
+        self.std_prior = std_prior
+        self.anchor_models = []
+        if mu_prior is not None:
+            self.anchor_models = [copy.deepcopy(model) in self.models] 
+            self.generate_new_anchors()
+
+    def generate_new_anchors(self):
+        for model in self.anchor_models:
+            for param in model.parameters():
+                param.normal_(self.mu_prior, self.std_prior)
+
+    def bayesian_ensemble_loss(self, data_noise):
+        if len(self.anchor_models) == 0:
+            return 0.
+
+        l2 = [0.] * len(self.anchor_models)
+        for i in range(len(self.anchor_models)):
+            normal_model = self.models[i]
+            anchor_model = self.anchor_models[i]
+            normal_params = [param for param in normal_model.parameters()]
+            anchor_params = [param for param in anchor_model.parameters()]
+
+            n_params = len(normal_params)
+            assert n_params == len(anchor_params)
+
+            for j in range(n_params)
+                l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
+
+        return torch.sum(l2)
 
     def reset_parameters(self):
         for model in self.models:
@@ -282,8 +318,14 @@ class NNEnsemble(torch.nn.Module):
 
     @staticmethod
     def compute_negative_log_likelihood(
-        labels, means, variances, return_mse: bool = False
+        labels, 
+        means, 
+        variances, 
+        custom_std=None,
+        return_mse=False,
     ):
+        if custom_std is not None:
+            variances = custom_std**2
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
@@ -295,7 +337,7 @@ class NNEnsemble(torch.nn.Module):
 
     @staticmethod
     def get_per_point_nll(
-        labels, means, variances, return_mse: bool = False
+        labels, means, variances, return_mse=False
     ):
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
@@ -310,29 +352,18 @@ class NNEnsemble(torch.nn.Module):
         labels, means, variances, custom_std=None, return_mse=False
     ):
         num_samples = means.shape[0]
-        m = means.mean(dim=0)
-        v = (variances + means ** 2).mean(dim=0) - (m ** 2)
-        mse_m = (labels - m) ** 2
-        mse = (labels - means) ** 2
-        # 1.83 = 2*pi
 
         d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
         negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean().detach()
 
-        if custom_std is None:
-            d = tdist.Normal(m, torch.sqrt(v))
-        else:
-            d = tdist.Normal(m, custom_std)
-        negative_log_likelihood2 = -d.log_prob(labels).mean().detach()
-
-        #nll1 = 0.5 * (torch.log(variances) + mse / variances + 1.834)
-        #nll1 = nll1.mean(dim=-1).mean()
-        #nll2 = 0.5*(torch.log(v)+ mse_m/v + 1.834)
-        #nll2 = nll2.mean()
-
-        #print('shapes:', labels.shape, m.shape, means.shape, variances.shape)
-        #print('c:', negative_log_likelihood1, nll1)
-        #print('c:', negative_log_likelihood2, nll2)
+        m, v = bopt.combine_means_variances(means, variances)
+        mse_m = ((labels - m) ** 2).detach()
+        #if custom_std is None:
+        #    d = tdist.Normal(m, torch.sqrt(v))
+        #else:
+        #    d = tdist.Normal(m, custom_std)
+        #negative_log_likelihood2 = -d.log_prob(labels).mean().detach()
+        negative_log_likelihood2 = bopt.get_nll(means, torch.sqrt(variances), labels, tdist.Normal, single_gaussian=True).mean().detach()
 
         if return_mse:
             return negative_log_likelihood1, negative_log_likelihood2, mse_m.mean()
@@ -570,19 +601,23 @@ class NNEnsemble(torch.nn.Module):
         dropout: float=0.3,
         device=None,
         extra_random: bool = False,
+        mu_prior=None,
+        std_prior=None,
     ):
         device = device or "cpu"
 
         model_kwargs = {
                 "depth": depth,
                 "widen_factor": widen_factor,
-                "dropout_rate":dropout
+                "dropout_rate":dropout,
                 } # args.depth, args.widen_factor, args.dropout, num_classes
         model = cls(   
                     n_models, 
                     Wide_ResNet, 
                     model_kwargs, 
-                    adversarial_epsilon=None
+                    adversarial_epsilon=None,
+                    mu_prior=mu_prior,
+                    std_prior=std_prior,
                 ).to(device)
         return model
 
@@ -648,6 +683,8 @@ class ResnetEnsemble(torch.nn.Module):
         widen_factor=8,
         n_hidden=100,
         dropout_factor=0.0,
+        mu_prior=None,
+        std_prior=None,
     ):
         super().__init__()
         assert params.ensemble_type == "fc", params.ensemble_type
@@ -663,6 +700,37 @@ class ResnetEnsemble(torch.nn.Module):
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model.parameters()))
         print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers.parameters()))
+
+        self.mu_prior = mu_prior
+        self.std_prior = std_prior
+        self.anchor_models = []
+        if mu_prior is not None:
+            self.anchor_models = [copy.deepcopy(model) for model in self.fc_layers.models] 
+            self.generate_new_anchors()
+
+    def generate_new_anchors(self):
+        for model in self.anchor_models:
+            for param in model.parameters():
+                param.normal_(self.mu_prior, self.std_prior)
+
+    def bayesian_ensemble_loss(self, data_noise):
+        if len(self.anchor_models) == 0:
+            return 0.
+
+        l2 = [0.] * len(self.anchor_models)
+        for i in range(len(self.anchor_models)):
+            normal_model = self.fc_layers.models[i]
+            anchor_model = self.anchor_models[i]
+            normal_params = [param for param in normal_model.parameters()]
+            anchor_params = [param for param in anchor_model.parameters()]
+
+            n_params = len(normal_params)
+            assert n_params == len(anchor_params)
+
+            for j in range(n_params)
+                l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
+
+        return torch.sum(l2)
 
     def fc_input_size(self):
         return self.conv_model.nStages[3]
@@ -741,6 +809,8 @@ class ResnetEnsemble2(torch.nn.Module):
         widen_factor=8,
         n_hidden=100,
         dropout_factor=0.0,
+        mu_prior=None,
+        std_prior=None,
     ):
         super().__init__()
         assert params.ensemble_type == "fc", params.ensemble_type
@@ -750,6 +820,39 @@ class ResnetEnsemble2(torch.nn.Module):
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model[0].parameters()) * n_models)
         print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers[0].parameters()) * n_models)
+
+        self.mu_prior = mu_prior
+        self.std_prior = std_prior
+        self.anchor_models = []
+        if mu_prior is not None:
+            self.anchor_models = [[copy.deepcopy(self.conv_model[i]), copy.deepcopy(self.fc_layers[i])] for i in range(n_models)] 
+            self.generate_new_anchors()
+
+    def generate_new_anchors(self):
+        for model in self.anchor_models:
+            for param in model.parameters():
+                param.normal_(self.mu_prior, self.std_prior)
+
+    def bayesian_ensemble_loss(self, data_noise):
+        if len(self.anchor_models) == 0:
+            return 0.
+
+        l2 = [0.] * len(self.anchor_models)
+        for i in range(len(self.anchor_models)):
+            normal_model = [self.conv_model[i], self.fc_layers[i]]
+            anchor_model = self.anchor_models[i]
+
+            for k in range(2):
+                normal_params = [param for param in normal_model[k].parameters()]
+                anchor_params = [param for param in anchor_model[k].parameters()]
+
+                n_params = len(normal_params)
+                assert n_params == len(anchor_params)
+
+                for j in range(n_params)
+                    l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
+
+        return torch.sum(l2)
 
     def fc_input_size(self):
         return self.conv_model[0].nStages[3]
@@ -863,5 +966,3 @@ class ResnetEnsemble2(torch.nn.Module):
                 custom_std,
                 return_mse
                 )
-
-

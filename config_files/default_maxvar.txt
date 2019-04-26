@@ -52,7 +52,6 @@
 --num_acks 30
 
 --single_gaussian_test_nll True
---report_metric_train_std False
 --empirical_stat std
 --empirical_stat_val_fraction 0.1
 --ucb_ekb_weighting 0.5

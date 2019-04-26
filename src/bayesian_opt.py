@@ -1464,7 +1464,7 @@ def two_dist_hsic(
 
 def acquire_batch_via_grad_hsic(
     params,
-    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    model_ensemble,
     input_shape: List[int],
     opt_values: torch.tensor, # (num_samples, preds)
     ack_batch_size,
@@ -1781,9 +1781,9 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
 
 
 def combine_means_variances(means, variances):
-    mean = means.mean(dim=0)
-    variance = (variances + means ** 2).mean(dim=0) - mean ** 2
-    return mean, variance
+    m = means.mean(dim=0)
+    variance = (variances + means ** 2).mean(dim=0) - m ** 2
+    return m, variance
 
 
 def get_nll(
@@ -1803,13 +1803,13 @@ def get_nll(
                 mean,
                 torch.sqrt(variance),
                 )
-        log_prob = -output_dist.log_prob(Y)
+        nll = -output_dist.log_prob(Y)
     else:
         output_dist = output_noise_dist_fn(
                 preds.view(-1),
                 std.view(-1))
-        log_prob = -output_dist.log_prob(Y.repeat([m]))
-    return log_prob
+        nll = -output_dist.log_prob(Y.repeat([m]))
+    return nll
 
 
 def get_pred_stats(
@@ -1851,14 +1851,14 @@ def get_pred_stats(
 
             baseline_rmse = torch.sqrt(torch.mean((Y-train_Y.mean())**2)).item()
 
-        log_prob = torch.mean(
-                    get_nll(
-                        pred_means, 
-                        pred_std, 
-                        Y,
-                        output_noise_dist_fn,
-                        )
-                    ).item()
+        nll = torch.mean(
+                get_nll(
+                    pred_means, 
+                    pred_std, 
+                    Y,
+                    output_noise_dist_fn,
+                    )
+                ).item()
 
         combined_mean, combined_variances = combine_means_variances(pred_means, pred_std**2)
         se = (combined_mean-Y)**2
@@ -1882,7 +1882,7 @@ def get_pred_stats(
 
 
         ret = {
-                'log_prob' : log_prob,
+                'log_prob' : nll,
                 'rmse' : rmse,
                 'kt_corr' : kt_corr,
                 'std' : std,
@@ -2260,7 +2260,8 @@ def fake_ack_value(
         pred_means, pred_vars = model(X)
         er = pred_means.mean(dim=0).view(-1)
         std = pred_means.std(dim=0).view(-1)
-        ucb_measure = er + (params.ucb * std)
+        #ucb_measure = er + (params.ucb * std)
+        ucb_measure = std
         ucb_measure[skip_idx + ack_idx] = ucb_measure.min()
         ucb_sort, ucb_sort_idx = torch.sort(ucb_measure, descending=True)
 
@@ -2275,6 +2276,7 @@ def get_nb_mcts_ack(
     ack_batch_size,
     skip_idx,
     train_fn,
+    normalize_fn,
 ):
     skip_idx = list(skip_idx)
     train_X, train_Y, X, Y = data
@@ -2296,24 +2298,18 @@ def get_nb_mcts_ack(
         if len(ack_idx) >= ack_batch_size:
             break
 
-        if params.sigmoid_coeff > 0:
-            bY = utils.sigmoid_standardization(
-                    train_Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
-        else:
-            bY = utils.normal_standardization(
-                    train_Y,
-                    train_Y.mean(),
-                    train_Y.std(),
-                    exp=torch.exp)
+        bY = normalize_fn(
+                train_Y,
+                train_Y.mean(),
+                train_Y.std(),
+                exp=torch.exp)
 
         print('batch_iter', batch_iter)
 
         candidate_fake_ack_idx = ucb_sort_idx[:10]
 
         std_mean = std.mean().item()
+        std_max = std.max().item()
 
         fake_ack_scores = []
         for fake_ack_iter in range(len(candidate_fake_ack_idx)):
@@ -2332,7 +2328,7 @@ def get_nb_mcts_ack(
                     ack_batch_size,
                     train_fn
                     )
-            fake_ack_scores += [ucb_sort[fake_ack_iter].item() + score]
+            fake_ack_scores += [er[candidate_fake_ack_idx[fake_ack_iter]].item() + params.ucb*(std_max-score)]
         idx = torch.sort(torch.tensor(fake_ack_scores, device=params.device), descending=True)[1]
         ack_idx += [candidate_fake_ack_idx[idx[0].item()].item()]
 

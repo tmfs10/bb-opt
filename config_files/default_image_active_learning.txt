@@ -22,9 +22,10 @@
 --exclude_top 0.0
 --init_train_examples 3000
 --init_train_num_epochs 30
---re_train_num_epochs 100
+--re_train_num_epochs 30
 --init_train_batch_size 200
---re_train_batch_size 30
+--re_train_batch_size 200
+--fixed_num_epoch_iters 0
 
 --init_train_lr 1e-3
 --re_train_lr 1e-3
@@ -32,6 +33,7 @@
 --re_train_l2 1e-3
 
 --val_frac 0.33
+--held_out_val 0
 --ood_val_frac 0.1
 --num_train_val_splits 1
 --combine_train_val True
@@ -57,6 +59,7 @@
 --ood_data_batch_factor 1.0
 --ensemble_type fc
 --sampling_dist uniform_input
+--sampling_space input
 --report_zero_gamma False
 --stdout_file stdout
 
@@ -64,7 +67,6 @@
 --output_dir ../experiments/imdbwiki/ensemble1/o
 
 --single_gaussian_test_nll True
---report_metric_train_std False
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 

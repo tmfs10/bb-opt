@@ -90,7 +90,7 @@ def train_val_test_split(n, split, shuffle=True, rng=None):
         rng = ops.get_rng_state()
         ops.set_rng_state(cur_rng)
 
-    if split[0] < 1:
+    if split[0] <= 1:
         assert sum(split) <= 1.
         train_end = int(n * split[0])
         val_end = train_end + int(n * split[1])
