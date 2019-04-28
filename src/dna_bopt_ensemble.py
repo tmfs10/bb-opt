@@ -42,9 +42,6 @@ from deep_ensemble_sid import NNEnsemble, ResnetEnsemble, ResnetEnsemble2
 
 torch.backends.cudnn.deterministic = True
 
-print('PARAMS:')
-for k, v in vars(params).items():
-    print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
 
 if params.device != "cpu":
@@ -65,6 +62,10 @@ if params.re_train_batch_size == -1:
     params.re_train_batch_size = params.init_train_batch_size
 if params.re_train_l2 < 0:
     params.re_train_l2 = params.init_train_l2
+
+print('PARAMS:')
+for k, v in vars(params).items():
+    print(k, v)
 
 np.random.seed(params.seed)
 torch.manual_seed(params.seed)
