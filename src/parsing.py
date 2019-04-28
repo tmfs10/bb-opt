@@ -3,6 +3,7 @@
 import argparse
 import torch.distributions as tdist
 import yaml
+import copy
 
 def str2bool(v):
     if v.lower() in ('true', '1', 'y', 'yes'):
@@ -151,8 +152,8 @@ def add_parse_args(parser):
 
     # bayesian ensemble
     parser.add_argument('--bayesian_ensemble', type=str2bool, help='Do bayesian ensemble?')
-    parser.add_argument('--bayesian_mu_prior', type=float)
-    parser.add_argument('--bayesian_mu_std', type=float)
+    parser.add_argument('--bayesian_theta_prior', type=float)
+    parser.add_argument('--bayesian_theta_std', type=float)
 
     # infomax update
     parser.add_argument('--infomax_update_weight', type=float)
@@ -226,15 +227,21 @@ def add_parse_args_wrongness(parser):
 
 def parse_args(parser):
     args = parser.parse_args()
+    args_dict = vars(args)
+    cmd_line_args_dict = copy.deepcopy(vars(args))
+
     if len(args.config_file) > 0:
         for filename in args.config_file:
             with open(filename, 'r') as f:
                 args2, leftovers = parser.parse_known_args(f.read().split())
-                args_dict = vars(args)
                 for k, v in vars(args2).items():
-                    if args_dict[k] is not None:
+                    if v is None:
                         continue
                     args_dict[k] = v
+    for k, v in cmd_line_args_dict.items():
+        if v is None:
+            continue
+        args_dict[k] = v
 
     if args.unseen_reg == "normal":
         args.gammas = [0.0]

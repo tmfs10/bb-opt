@@ -4,8 +4,8 @@
 --project wiki
 --mode active_learning
 --seed 1
---model_init_seed 1
---data_split_seed 1
+--model_init_seed -1
+--data_split_seed -1
 --device cuda
 --clean True
 --log_all_train_iter False
@@ -20,17 +20,17 @@
 --num_acks 100
 
 --exclude_top 0.0
---init_train_examples 3000
---init_train_num_epochs 30
---re_train_num_epochs 30
---init_train_batch_size 200
---re_train_batch_size 200
 --fixed_num_epoch_iters 0
+--init_train_examples 3000
 
+--init_train_num_epochs 30
+--re_train_num_epochs -1
+--init_train_batch_size 200
+--re_train_batch_size -1
 --init_train_lr 1e-3
---re_train_lr 1e-3
+--re_train_lr -1
 --init_train_l2 1e-3
---re_train_l2 1e-3
+--re_train_l2 -1
 
 --val_frac 0.33
 --held_out_val 0
@@ -50,6 +50,7 @@
 --output_noise_dist_fn Normal
 --early_stopping 10
 --take_log False
+--fixed_noise_std -1
 
 --unseen_reg normal
 --inverse_density False
@@ -90,3 +91,7 @@
 --ucb_step 0.0
 
 --predict_ood False
+
+--bayesian_ensemble False
+--bayesian_theta_prior 0
+--bayesian_theta_std 1

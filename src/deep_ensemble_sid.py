@@ -249,7 +249,7 @@ class NNEnsemble(torch.nn.Module):
             n_params = len(normal_params)
             assert n_params == len(anchor_params)
 
-            for j in range(n_params)
+            for j in range(n_params):
                 l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
         return torch.sum(l2)
@@ -727,7 +727,7 @@ class ResnetEnsemble(torch.nn.Module):
             n_params = len(normal_params)
             assert n_params == len(anchor_params)
 
-            for j in range(n_params)
+            for j in range(n_params):
                 l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
         return torch.sum(l2)
@@ -780,12 +780,17 @@ class ResnetEnsemble(torch.nn.Module):
 
     @staticmethod
     def compute_negative_log_likelihood(
-        labels, means, variances, return_mse: bool = False
+        labels, 
+        means, 
+        variances, 
+        custom_std=None,
+        return_mse=False,
     ):
         return NNEnsemble.compute_negative_log_likelihood(
                 labels,
                 means,
                 variances,
+                custom_std,
                 return_mse
                 )
 
@@ -849,7 +854,7 @@ class ResnetEnsemble2(torch.nn.Module):
                 n_params = len(normal_params)
                 assert n_params == len(anchor_params)
 
-                for j in range(n_params)
+                for j in range(n_params):
                     l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
         return torch.sum(l2)
@@ -948,13 +953,18 @@ class ResnetEnsemble2(torch.nn.Module):
 
     @staticmethod
     def compute_negative_log_likelihood(
-        labels, means, variances, return_mse: bool = False
+        labels, 
+        means, 
+        variances, 
+        custom_std=None,
+        return_mse=False,
     ):
         return NNEnsemble.compute_negative_log_likelihood(
                 labels,
                 means,
                 variances,
-                return_mse
+                custom_std,
+                return_mse,
                 )
 
     @staticmethod

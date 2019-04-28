@@ -52,6 +52,20 @@ if params.device != "cpu":
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 params.device = device
 
+# set data split seed to model seed if data split seed is -1
+if params.model_init_seed == -1:
+    params.model_init_seed = params.seed
+if params.data_split_seed == -1:
+    params.data_split_seed = params.model_init_seed
+if params.re_train_num_epochs == -1:
+    params.re_train_num_epochs = params.init_train_num_epochs
+if params.re_train_lr < 0:
+    params.re_train_lr = params.init_train_lr
+if params.re_train_batch_size == -1:
+    params.re_train_batch_size = params.init_train_batch_size
+if params.re_train_l2 < 0:
+    params.re_train_l2 = params.init_train_l2
+
 np.random.seed(params.seed)
 torch.manual_seed(params.seed)
 random.seed(params.seed)
