@@ -729,9 +729,9 @@ def choose_best_model(
         best_measure,
         best_nll,
         best_kt_corr,
-        val_Y,
         train_mean_of_means,
         val_mean_of_means,
+        val_Y,
         ):
     best_model = None
     best_found = False
@@ -1278,7 +1278,6 @@ def train_ensemble_image(
 
             loss = nll
             loss += model_ensemble.bayesian_ensemble_loss(torch.sqrt(variances.mean()))/bN
-            loss += ((variances-1)**2).mean()
 
             optim.zero_grad()
             if unseen_reg != "normal" and gamma > 0.0:
