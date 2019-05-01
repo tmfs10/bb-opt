@@ -1,6 +1,8 @@
 
 --project dna_binding
 --mode bayes_opt
+
+--progress_bar True
 --seed 1
 --model_init_seed -1
 --data_split_seed -1
@@ -24,6 +26,7 @@
 --re_train_num_epochs -1
 --re_train_lr -1
 --re_train_batch_size -1
+--held_out_val 0
 --val_frac 0.1
 --ood_val_frac 0.1
 --num_train_val_splits 1
@@ -89,5 +92,5 @@
 --stdout_file stdout
 
 --bayesian_ensemble False
---bayesian_theta_prior 0
---bayesian_theta_std 1
+--bayesian_theta_prior_mu 0
+--bayesian_theta_prior_std 1

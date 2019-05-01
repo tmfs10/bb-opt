@@ -11,6 +11,7 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
+import copy
 import torch.nn as nn
 from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
@@ -194,6 +195,7 @@ class NNEnsemble(torch.nn.Module):
         n_models,
         model_generator,
         model_kwargs_generator,
+        device='cuda',
         adversarial_epsilon=None,
         mu_prior=None,
         std_prior=None,
@@ -227,18 +229,20 @@ class NNEnsemble(torch.nn.Module):
         self.std_prior = std_prior
         self.anchor_models = []
         if mu_prior is not None:
-            self.anchor_models = [copy.deepcopy(model) in self.models] 
+            self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models] 
             self.generate_new_anchors()
 
     def generate_new_anchors(self):
-        for model in self.anchor_models:
-            for param in model.parameters():
-                param.normal_(self.mu_prior, self.std_prior)
+        with torch.no_grad():
+            for model in self.anchor_models:
+                for param in model.parameters():
+                    param.normal_(self.mu_prior, self.std_prior)
 
     def bayesian_ensemble_loss(self, data_noise):
         if len(self.anchor_models) == 0:
             return 0.
 
+        assert data_noise > 0
         l2 = [0.] * len(self.anchor_models)
         for i in range(len(self.anchor_models)):
             normal_model = self.models[i]
@@ -252,7 +256,7 @@ class NNEnsemble(torch.nn.Module):
             for j in range(n_params):
                 l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
-        return torch.sum(l2)
+        return torch.sum(torch.tensor(l2))
 
     def reset_parameters(self):
         for model in self.models:
@@ -325,7 +329,7 @@ class NNEnsemble(torch.nn.Module):
         return_mse=False,
     ):
         if custom_std is not None:
-            variances = custom_std**2
+            variances = torch.tensor(custom_std**2).cuda()
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
@@ -388,24 +392,43 @@ class NNEnsemble(torch.nn.Module):
         n_models: int = 5,
         n_hidden: int = 100,
         adversarial_epsilon: Optional = None,
-        device=None,
+        device='cuda',
         nonlinearity_names: Sequence[str] = None,
         extra_random: bool = False,
         single_layer:bool = True,
         sigmoid_coeff : float = 1.,
         separate_mean_var = False,
+        mu_prior=None,
+        std_prior=None,
     ):
-        device = device or "cpu"
+        assert not extra_random, "Not implemented"
 
         if not extra_random:
-            model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden, "sigmoid_coeff": sigmoid_coeff, "separate_mean_var": separate_mean_var}
+            model_kwargs = {
+                    "n_inputs": n_inputs, 
+                    "n_hidden": n_hidden, 
+                    "sigmoid_coeff": sigmoid_coeff, 
+                    "separate_mean_var": separate_mean_var,
+                   }
             if single_layer:
                 model = cls(
-                    n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                    n_models, 
+                    NN, 
+                    model_kwargs, 
+                    device=device,
+                    adversarial_epsilon=adversarial_epsilon,
+                    mu_prior=mu_prior,
+                    std_prior=std_prior,
                 ).to(device)
             else:
                 model = cls(
-                    n_models, NN2, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                    n_models, 
+                    NN2, 
+                    model_kwargs, 
+                    device=device,
+                    adversarial_epsilon=adversarial_epsilon,
+                    mu_prior=mu_prior,
+                    std_prior=std_prior,
                 ).to(device)
             return model
 
@@ -615,6 +638,7 @@ class NNEnsemble(torch.nn.Module):
                     n_models, 
                     Wide_ResNet, 
                     model_kwargs, 
+                    device=device,
                     adversarial_epsilon=None,
                     mu_prior=mu_prior,
                     std_prior=std_prior,
@@ -814,6 +838,7 @@ class ResnetEnsemble2(torch.nn.Module):
         widen_factor=8,
         n_hidden=100,
         dropout_factor=0.0,
+        device='cuda',
         mu_prior=None,
         std_prior=None,
     ):
@@ -830,13 +855,15 @@ class ResnetEnsemble2(torch.nn.Module):
         self.std_prior = std_prior
         self.anchor_models = []
         if mu_prior is not None:
-            self.anchor_models = [[copy.deepcopy(self.conv_model[i]), copy.deepcopy(self.fc_layers[i])] for i in range(n_models)] 
+            self.anchor_models = [[copy.deepcopy(self.conv_model[i]).to(device), copy.deepcopy(self.fc_layers[i]).to(device)] for i in range(n_models)] 
             self.generate_new_anchors()
 
     def generate_new_anchors(self):
-        for model in self.anchor_models:
-            for param in model.parameters():
-                param.normal_(self.mu_prior, self.std_prior)
+        with torch.no_grad():
+            for model_pair in self.anchor_models:
+                for model in model_pair:
+                    for param in model.parameters():
+                        param.normal_(self.mu_prior, self.std_prior)
 
     def bayesian_ensemble_loss(self, data_noise):
         if len(self.anchor_models) == 0:
@@ -856,6 +883,7 @@ class ResnetEnsemble2(torch.nn.Module):
 
                 for j in range(n_params):
                     l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
+        l2 = torch.tensor(l2)
 
         return torch.sum(l2)
 

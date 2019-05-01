@@ -24,6 +24,7 @@ from tqdm import tnrange, trange
 from deep_ensemble_sid import (
     NNEnsemble,
     RandomNN,
+    ResnetEnsemble2,
 )
 
 def nvidia_smi():
@@ -304,7 +305,7 @@ def get_model_nn_ensemble(
             num_inputs, 
             num_models, 
             num_hidden, 
-            device, 
+            device=device, 
             sigmoid_coeff=sigmoid_coeff, 
             extra_random=extra_random,
             separate_mean_var=separate_mean_var,
@@ -763,7 +764,7 @@ def choose_best_model(
     return best_found, best_nll, best_kt_corr, best_measure
 
 
-def train_ensemble(
+def train_ensemble2(
     params,
     batch_size,
     num_epochs,
@@ -884,12 +885,8 @@ def train_ensemble(
             ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
 
             #print('point a1:', nvidia_smi())
-            if params.sampling_dist == "pom_fc_input":
-                means, variances, pom_fc_input = model_ensemble(bX, return_fc_input=True)
-                hist = [[np.histogram(fc_input[i], bins=10, density=True) for i in range(fc_input.shape[0])] for fc_input in pom_fc_input]
-                sampling_info['hist'] = hist
-            else:
-                means, variances = model_ensemble(bX)
+            assert params.sampling_dist != "pom_fc_input"
+            means, variances = model_ensemble(bX)
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
@@ -903,7 +900,7 @@ def train_ensemble(
             #print('point a3:', nvidia_smi())
 
             loss = nll
-            loss += model_ensemble.bayesian_ensemble_loss(params.bayesian_ensemble_noise_std)/bN
+            loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             if unseen_reg != "normal" and gamma > 0.0:
                 out_data = sample_uniform_fn(ood_data_batch_size)
@@ -921,12 +918,7 @@ def train_ensemble(
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     #print('std after:', means_o.std(dim=0).mean().item())
                     model_ensemble.train()
-                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                else:
-                    if params.sampling_dist == "pom_fc_input":
-                        means_o, variances_o = model_ensemble.fc_forward(out_data) # (num_samples, num_points)
-                    else:
-                        means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
                 loss += unseen_data_loss(
                         means_o,
@@ -1113,7 +1105,7 @@ def knn_density(train_x, x, k=5, true_max=False):
         return dist_sort
 
 
-def train_ensemble_image(
+def train_ensemble(
     params,
     batch_size,
     num_epochs,
@@ -1129,6 +1121,8 @@ def train_ensemble_image(
     early_stopping=10,
     adv_alpha=1.0,
     adv_epsilon=0.0,
+    predict_info_models=None,
+    hsic_custom_kernel=None,
     data_split_rng=None,
     jupyter=False,
     ood_val_frac=0.0,
@@ -1243,21 +1237,33 @@ def train_ensemble_image(
             if bN <= 0:
                 continue
 
-            sampling_info = {'ood_sampling_rng': ood_sampling_rng, 'train_x': train_X, 'model': model_ensemble}
+            if isinstance(model_ensemble, NNEnsemble):
+                sampling_info = {}
+            else:
+                sampling_info = {'ood_sampling_rng': ood_sampling_rng, 'train_x': train_X, 'model': model_ensemble}
             with torch.no_grad():
                 bX = train_X[bs:be].detach()
                 bY = train_Y[bs:be].detach()
 
-            if params.inverse_density_emb_space:
+                if params.unseen_reg != "normal" and params.sampling_dist == "uniform_bb" and isinstance(model_ensemble, NNEnsemble):
+                    temp = bX.view(bX.shape[0], -1)
+                    min_px = temp.min(dim=0)[0]
+                    max_px = temp.max(dim=0)[0]
+                    sampling_info['min_px'] = min_px
+                    sampling_info['max_px'] = max_px
+
+            if params.inverse_density_emb_space and isinstance(model_ensemble, ResnetEnsemble2):
                 means, variances, conv_emb = model_ensemble(bX, return_fc_input=True)
             else:
                 means, variances = model_ensemble(bX)
 
             if params.sampling_dist == "pom_fc_input":
+                assert isinstance(model_ensemble, ResnetEnsemble2)
                 hist = [[np.histogram(fc_input[:, i], bins=10, density=False) for i in range(fc_input.shape[1])] for fc_input in conv_emb]
                 hist = [[(k[i][0]/float(sum(k[i][0])), k[i][1]) for i in range(len(k))] for k in hist]
                 sampling_info['hist'] = hist
             elif params.sampling_dist == "bb_fc_input":
+                assert isinstance(model_ensemble, ResnetEnsemble2)
                 min_val = []
                 max_val = []
                 for i in range(len(bb_fc_input)):
@@ -1277,13 +1283,17 @@ def train_ensemble_image(
                     return_mse=False)
 
             loss = nll
-            loss += model_ensemble.bayesian_ensemble_loss(torch.sqrt(variances.mean()))/bN
+            loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             optim.zero_grad()
             if unseen_reg != "normal" and gamma > 0.0:
-                model_ensemble.freeze_conv()
+                if isinstance(model_ensemble, ResnetEnsemble2):
+                    model_ensemble.freeze_conv()
+
                 out_data = sample_uniform_fn(ood_data_batch_size, sampling_info=sampling_info)
+
                 if params.sampling_space != "fc" and params.inverse_density_emb_space:
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     out_data_conv_emb = model_ensemble.conv_forward(out_data).detach()
 
                 if params.langevin_sampling and gamma > 0.0:
@@ -1299,9 +1309,12 @@ def train_ensemble_image(
                             )
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     model_ensemble.train()
-                    model_ensemble.freeze_conv()
+
+                    if isinstance(model_ensemble, ResnetEnsemble2):
+                        model_ensemble.freeze_conv()
 
                 if params.sampling_space == "fc":
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     weighting = torch.ones(out_data.shape[1], device=params.device)
                 else:
                     weighting = torch.ones(out_data.shape[0], device=params.device)
@@ -1310,6 +1323,7 @@ def train_ensemble_image(
                     with torch.no_grad():
                         assert params.sampling_space != "fc" or params.inverse_density_emb_space
                         if params.inverse_density_emb_space:
+                            assert isinstance(model_ensemble, ResnetEnsemble2)
                             assert conv_emb.shape[0] == out_data_conv_emb.shape[0], "%s[0] == %s[0]" % (conv_emb.shape, out_data_conv_emb.shape)
                             temp = []
                             for i_ensemble in range(conv_emb.shape[0]):
@@ -1322,6 +1336,7 @@ def train_ensemble_image(
                         weighting = temp
 
                 if params.inverse_density_emb_space:
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     means_o, variances_o = model_ensemble.fc_forward(out_data_conv_emb) # (num_samples, num_points)
                 else:
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
@@ -1334,13 +1349,44 @@ def train_ensemble_image(
                         means=means,
                         o_weighting=weighting
                         )
-                ood_loss.backward(retain_graph=True)
-                model_ensemble.unfreeze_conv()
+
+                if isinstance(model_ensemble, ResnetEnsemble2):
+                    ood_loss.backward(retain_graph=True)
+                    model_ensemble.unfreeze_conv()
+                else:
+                    loss += ood_loss
+
+            if predict_info_models is not None:
+                s_idx = predict_info_models.sample_points(params.num_predict_sample_points)
+                with torch.no_grad():
+                    predictor_preds, _ = model_ensemble(X[s_idx])
+                old_stats = collect_stats_to_predict(
+                        params,
+                        Y[s_idx],
+                        predictor_preds,
+                        )
+
+                loss += old_stats['hsic']
 
             loss.backward()
 
             optim.step()
             torch.cuda.empty_cache()
+
+        if predict_info_models is not None:
+            for i in range(150):
+                predict_info_models.optim.zero_grad()
+                predictor_loss = predict_info_loss(
+                        params,
+                        model_ensemble,
+                        predict_info_models,
+                        bX,
+                        X[s_idx],
+                        Y[s_idx],
+                        old_stats,
+                        )
+                predictor_loss.backward()
+                predict_info_models.optim.step()
 
         model_ensemble.eval()
         with torch.no_grad():
@@ -1472,7 +1518,7 @@ def train_ensemble_image(
     return logging, data_split_rng
 
 
-def image_hyper_param_train(
+def hyper_param_train(
     params,
     model,
     data,
@@ -1529,7 +1575,7 @@ def image_hyper_param_train(
             optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
             data_split_rng2 = copy.deepcopy(data_split_rng)
             best_cur_epoch_iter = None
-            logging, data_split_rng2 = train_ensemble_image(
+            logging, data_split_rng2 = train_ensemble(
                     params,
                     train_batch_size,
                     train_epochs,
@@ -1600,6 +1646,29 @@ def image_hyper_param_train(
 
     if not do_combine_train_val_training:
         assert best_gamma_model is not None
+    elif params.hyper_search_choose_type != params.final_train_choose_type:
+        assert False, "for paper we aren't doing this option"
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        logging, data_split_rng2 = train_ensemble(
+                params,
+                train_batch_size,
+                train_epochs,
+                data,
+                model_copy,
+                optim,
+                choose_type=params.final_train_choose_type,
+                unseen_reg=unseen_reg,
+                gamma=gamma,
+                normalize_fn=normalize_fn,
+                val_frac=params.val_frac,
+                early_stopping=params.early_stopping,
+                data_split_rng=data_split_rng2,
+                ood_val_frac=params.ood_val_frac,
+                sample_uniform_fn=sample_uniform_fn,
+                ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                num_epoch_iters=num_epoch_iters,
+                unseen_idx=unseen_idx,
+                )
     else:
         zero_gamma_model = None
         if report_zero_gamma:
@@ -1610,7 +1679,7 @@ def image_hyper_param_train(
         print('combine_train_val')
         optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
         #print('point 4:', nvidia_smi())
-        logging2, _ = train_ensemble_image(
+        logging2, _ = train_ensemble(
                 params,
                 train_batch_size,
                 train_epochs, 
@@ -1635,7 +1704,7 @@ def image_hyper_param_train(
             assert best_gamma != 0.0
             assert zero_gamma_best_epoch_iter >= 0
             optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
-            _, _ = train_ensemble_image(
+            _, _ = train_ensemble(
                     params, 
                     train_batch_size,
                     train_epochs, 
@@ -1681,7 +1750,7 @@ def one_hot_list_to_number(inputs, data=None):
 
 
 
-def hyper_param_train(
+def hyper_param_train2(
     params,
     model,
     data,

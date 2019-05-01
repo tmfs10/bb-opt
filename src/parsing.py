@@ -152,8 +152,8 @@ def add_parse_args(parser):
 
     # bayesian ensemble
     parser.add_argument('--bayesian_ensemble', type=str2bool, help='Do bayesian ensemble?')
-    parser.add_argument('--bayesian_theta_prior', type=float)
-    parser.add_argument('--bayesian_theta_std', type=float)
+    parser.add_argument('--bayesian_theta_prior_mu', type=float)
+    parser.add_argument('--bayesian_theta_prior_std', type=float)
 
     # infomax update
     parser.add_argument('--infomax_update_weight', type=float)

@@ -209,35 +209,22 @@ for task_iter in range(len(task_name)):
                 sigmoid_coeff=params.sigmoid_coeff, 
                 device=params.device,
                 separate_mean_var=params.separate_mean_var,
-                mu_prior=params.bayesian_mu_prior if params.bayesian_ensemble else None,
-                std_prior=params.bayesian_std_prior if params.bayesian_ensemble else None,
+                mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
+                std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
                 )
     elif params.project in ["wiki", "imdb"]:
-        if params.ensemble_type == "fc":
-            init_model = ResnetEnsemble2(
-                    params,
-                    params.num_models, 
-                    inputs.shape[1], 
-                    depth=params.resnet_depth,
-                    widen_factor=params.resnet_width_factor,
-                    n_hidden=params.num_hidden,
-                    dropout_factor=params.resnet_dropout,
-                    mu_prior=params.bayesian_mu_prior if params.bayesian_ensemble else None,
-                    std_prior=params.bayesian_std_prior if params.bayesian_ensemble else None,
-                    ).to(params.device)
-        elif params.ensemble == "all":
-            init_model = NNEnsemble.get_model_resnet(
-                    inputs.shape[1], 
-                    params.num_models, 
-                    params.resnet_depth,
-                    params.resnet_width_factor,
-                    params.resnet_dropout,
-                    device=params.device,
-                    mu_prior=params.bayesian_mu_prior if params.bayesian_ensemble else None,
-                    std_prior=params.bayesian_std_prior if params.bayesian_ensemble else None,
-                    )
-        else:
-            assert False, params.ensemble_type + " not implemented"
+        init_model = ResnetEnsemble2(
+                params,
+                params.num_models, 
+                inputs.shape[1], 
+                depth=params.resnet_depth,
+                widen_factor=params.resnet_width_factor,
+                n_hidden=params.num_hidden,
+                dropout_factor=params.resnet_dropout,
+                device=params.device,
+                mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
+                std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
+                ).to(params.device)
     untrained_model = copy.deepcopy(init_model)
 
     ensemble_init_rng = ops.get_rng_state()
@@ -353,7 +340,7 @@ for task_iter in range(len(task_name)):
 
         zero_gamma_model = None
         if params.project in ['imdb', 'wiki']:
-            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.image_hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -368,7 +355,7 @@ for task_iter in range(len(task_name)):
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 )
         else:
-            logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -827,7 +814,7 @@ for task_iter in range(len(task_name)):
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.image_hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -842,7 +829,7 @@ for task_iter in range(len(task_name)):
                             unseen_idx=unseen_idx,
                             )
                     else:
-                        logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
