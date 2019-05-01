@@ -3,6 +3,7 @@
 import argparse
 import torch.distributions as tdist
 import yaml
+import copy
 
 def str2bool(v):
     if v.lower() in ('true', '1', 'y', 'yes'):
@@ -83,6 +84,7 @@ def add_parse_args(parser):
     # train params
     parser.add_argument('--exclude_top', type=float01)
     parser.add_argument('--init_train_examples', type=int)
+    parser.add_argument('--fixed_num_epoch_iters', type=int)
     parser.add_argument('--init_train_num_epochs', type=int)
     parser.add_argument('--init_train_lr', type=float)
     parser.add_argument('--init_train_batch_size', type=int)
@@ -95,6 +97,7 @@ def add_parse_args(parser):
             help="num early stopping iters. 0 means no early stoppping")
     parser.add_argument('--val_frac', type=float,
             help="val frac to hold out as in-distribution validation set")
+    parser.add_argument('--held_out_val', type=int)
     parser.add_argument('--ood_val_frac', type=float,
             help="top frac to hold out as out-of-distribution validation set")
     parser.add_argument('--num_train_val_splits', type=int)
@@ -102,10 +105,10 @@ def add_parse_args(parser):
     parser.add_argument("--gamma_cutoff", type=str2bool,
             help="Search starting from first gamma and end search as soon as new gamma is not best so far")
     parser.add_argument('--single_gaussian_test_nll', type=str2bool)
-    parser.add_argument('--report_metric_train_std', type=str2bool)
     parser.add_argument('--empirical_stat', type=verify_empirical_stat)
     parser.add_argument('--empirical_diversity_only', type=str2bool)
     parser.add_argument('--empirical_stat_val_fraction', type=float)
+    parser.add_argument('--report_zero_gamma', type=str2bool)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -126,7 +129,7 @@ def add_parse_args(parser):
             help="maxvar/defmean penalty")
     parser.add_argument('--ood_data_batch_factor', type=float)
     parser.add_argument('--take_log', type=str2bool)
-    parser.add_argument('--report_zero_gamma', type=str2bool)
+    parser.add_argument('--fixed_noise_std', type=float)
 
     # data/output files/folders
     parser.add_argument('--data_dir', type=str)
@@ -146,6 +149,14 @@ def add_parse_args(parser):
     parser.add_argument('--predict_mmd', type=str2bool)
     parser.add_argument('--num_predict_sample_points', type=int)
     parser.add_argument('--ack_emb_kernel_dim', type=int)
+
+    # bayesian ensemble
+    parser.add_argument('--bayesian_ensemble', type=str2bool, help='Do bayesian ensemble?')
+    parser.add_argument('--bayesian_theta_prior_mu', type=float)
+    parser.add_argument('--bayesian_theta_prior_std', type=float)
+
+    # infomax update
+    parser.add_argument('--infomax_update_weight', type=float)
 
 
 def add_parse_args_nongrad(parser):
@@ -216,15 +227,21 @@ def add_parse_args_wrongness(parser):
 
 def parse_args(parser):
     args = parser.parse_args()
+    args_dict = vars(args)
+    cmd_line_args_dict = copy.deepcopy(vars(args))
+
     if len(args.config_file) > 0:
         for filename in args.config_file:
             with open(filename, 'r') as f:
                 args2, leftovers = parser.parse_known_args(f.read().split())
-                args_dict = vars(args)
                 for k, v in vars(args2).items():
-                    if args_dict[k] is not None:
+                    if v is None:
                         continue
                     args_dict[k] = v
+    for k, v in cmd_line_args_dict.items():
+        if v is None:
+            continue
+        args_dict[k] = v
 
     if args.unseen_reg == "normal":
         args.gammas = [0.0]

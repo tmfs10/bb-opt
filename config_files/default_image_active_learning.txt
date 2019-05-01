@@ -1,11 +1,12 @@
 
---gpu -1
---progress_bar True
 --project wiki
 --mode active_learning
+
+--gpu -1
+--progress_bar True
 --seed 1
---model_init_seed 1
---data_split_seed 1
+--model_init_seed -1
+--data_split_seed -1
 --device cuda
 --clean True
 --log_all_train_iter False
@@ -20,18 +21,20 @@
 --num_acks 100
 
 --exclude_top 0.0
+--fixed_num_epoch_iters 0
 --init_train_examples 3000
+
 --init_train_num_epochs 30
 --re_train_num_epochs 100
 --init_train_batch_size 200
 --re_train_batch_size 30
-
 --init_train_lr 1e-3
---re_train_lr 1e-3
+--re_train_lr -1
 --init_train_l2 1e-3
---re_train_l2 1e-3
+--re_train_l2 -1
 
 --val_frac 0.33
+--held_out_val 0
 --ood_val_frac 0.1
 --num_train_val_splits 1
 --combine_train_val True
@@ -48,6 +51,7 @@
 --output_noise_dist_fn Normal
 --early_stopping 10
 --take_log False
+--fixed_noise_std -1
 
 --unseen_reg normal
 --inverse_density False
@@ -56,7 +60,8 @@
 --gammas 1.0 5.0 10.0 20.0
 --ood_data_batch_factor 1.0
 --ensemble_type fc
---sampling_dist uniform_input
+--sampling_dist uniform
+--sampling_space input
 --report_zero_gamma False
 --stdout_file stdout
 
@@ -64,7 +69,6 @@
 --output_dir ../experiments/imdbwiki/ensemble1/o
 
 --single_gaussian_test_nll True
---report_metric_train_std False
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
 
@@ -88,3 +92,7 @@
 --ucb_step 0.0
 
 --predict_ood False
+
+--bayesian_ensemble False
+--bayesian_theta_prior_mu 0
+--bayesian_theta_prior_std 1

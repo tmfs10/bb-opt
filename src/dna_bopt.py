@@ -24,6 +24,7 @@ from tqdm import tnrange, trange
 from deep_ensemble_sid import (
     NNEnsemble,
     RandomNN,
+    ResnetEnsemble2,
 )
 
 def nvidia_smi():
@@ -297,15 +298,19 @@ def get_model_nn_ensemble(
     sigmoid_coeff,
     separate_mean_var=False,
     extra_random=False,
+    mu_prior=None,
+    std_prior=None,
 ):
     model = NNEnsemble.get_model(
             num_inputs, 
             num_models, 
             num_hidden, 
-            device, 
+            device=device, 
             sigmoid_coeff=sigmoid_coeff, 
             extra_random=extra_random,
             separate_mean_var=separate_mean_var,
+            mu_prior=mu_prior,
+            std_prior=std_prior,
             )
     model = model.to(device)
     return model
@@ -532,14 +537,13 @@ def reinit_model(
             reset_rng_state = ops.get_rng_state()
             ops.set_rng_state(cur_rng_state)
         elif params.ack_model_init_mode == "init_init":
-            assert False, "init_init not implemented"
             cur_model = copy.deepcopy(init_model)
         elif params.ack_model_init_mode == "finetune":
             pass
         else:
             assert False, params.ack_model_init_mode + " not implemented"
 
-    return reset_rng_state
+    return reset_rng_state, cur_model
 
 
 def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
@@ -581,8 +585,186 @@ def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
     return loss_fn
 
 
+def make_validation_set(
+    data,
+    choose_type,
+    num_epoch_iters,
+    val_frac,
+    ood_val_frac,
+    data_split_rng,
+):
+    train_X, train_Y, val_X, val_Y, X, Y = data
+    if "ood" in choose_type:
+        assert ood_val_frac > 1e-3
+        assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
+        sorted_idx = torch.sort(train_Y, descending=True)[1]
+        val_N = int(N * ood_val_frac)
+        idx = torch.arange(N)
+        train_idx = idx[sorted_idx[val_N:]]
+        val_idx = idx[sorted_idx[:val_N]]
+    elif "ind" in choose_type:
+        train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
+                N, 
+                [1-val_frac, val_frac],
+                rng=data_split_rng,
+                )
+    else:
+        assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
-def train_ensemble(
+    if num_epoch_iters is None:
+        assert val_idx.shape[0] > 0
+        val_X = train_X[val_idx]
+        train_X = train_X[train_idx]
+        val_Y = train_Y[val_idx]
+        train_Y = train_Y[train_idx]
+        print("%d num_val" % (val_X.shape[0]))
+
+    if normalize_fn is not None:
+        mean = train_Y.mean()
+        std = train_Y.std()
+        train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
+        if num_epoch_iters is None:
+            val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+
+
+    return train_X, train_Y, val_X, val_Y
+
+
+def normalize_for_training(
+    normalize_fn,
+    train_Y,
+    val_Y,
+    num_epoch_iters,
+):
+    if normalize_fn is not None:
+        mean = train_Y.mean()
+        std = train_Y.std()
+        train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
+        if num_epoch_iters is None:
+            val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
+    return train_Y, val_Y
+
+
+def compute_single_gaussian_baseline(
+    train_Y,
+):
+    train_mean = train_Y.mean()
+    train_std = train_Y.std()
+    train_normal = tdist.normal.Normal(train_mean, train_std)
+    train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).detach().item()
+
+    val_baseline_rmse = val_baseline_nll = None
+    if num_epoch_iters is None:
+        val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).detach().item()
+        val_baseline_nll = -train_normal.log_prob(val_Y).mean().detach().item()
+
+    return train_baseline_rmse, val_baseline_rmse, val_baseline_nll
+
+
+def make_batches(
+    N,
+    batch_size,
+):
+    num_batches = N//batch_size+1
+    batches = [i*batch_size  for i in range(num_batches)] + [N]
+    return num_batches, batches
+
+
+def info_max_loss(
+    params,
+    X,
+    unseen_idx,
+    old_model,
+    cur_model,
+    n_points=100,
+):
+    unseen_idx = random.sample(unseen_idx, n_points)
+    X = X[unseen_idx]
+    old_preds, _ = old_model(X) # (num ensemble members, num points)
+    cur_preds, _ = cur_model(X)
+    kernel_fn = getattr(hsic, "dimwise_" + params.hsic_kernel_fn)
+
+    old_kernels = kernel_fn(old_preds)
+    cur_kernels = kernel_fn(cur_preds)
+
+    old_kernels = old_kernels.permute([2, 0, 1])
+    cur_kernels = cur_kernels.permute([2, 0, 1])
+
+    old_hsic = torch.mean(hsic_xy_parallel(old_kernels, cur_kernels, normalized=params.normalize_hsic))
+    return total_hsic
+
+
+def record_stats_ensemble(
+    params,
+    model,
+    X,
+    Y,
+):
+    means, variances = model(X)
+    means = means.detach()
+    variances = variances.detach()
+
+    custom_std = None
+    if params.fixed_noise_std > ops._eps:
+        custom_std = params.fixed_noise_std
+
+    nll1, nll2 = NNEnsemble.report_metric(
+            Y,
+            means,
+            variances,
+            custom_std=custom_std,
+            return_mse=False)
+    rmse = torch.sqrt(torch.mean((means.mean(dim=0)-Y)**2)).detach().item()
+    std = means.std(0).mean().detach().item()
+    mean_of_means = means.mean(dim=0).detach()
+    assert mean_of_means.shape == Y.shape, "%s == %s" % (mean_of_means.shape, Y.shape)
+    kt_corr = kendalltau(mean_of_means.cpu(), Y.cpu())[0]
+
+    return rmse, std, kt_corr, nll1.item(), nll2.item(), mean_of_means
+
+
+def choose_best_model(
+        choose_type,
+        nll_criterion,
+        kt_corr,
+        best_measure,
+        best_nll,
+        best_kt_corr,
+        train_mean_of_means,
+        val_mean_of_means,
+        val_Y,
+        ):
+    best_model = None
+    best_found = False
+    if "val" in choose_type:
+        if nll_criterion < best_nll:
+            best_nll = nll_criterion
+            if "nll" in choose_type:
+                best_found = True
+                best_measure = best_nll
+        if kt_corr > best_kt_corr:
+            best_kt_corr = kt_corr
+            if "kt_corr" in choose_type:
+                best_found = True
+                best_measure = best_kt_corr
+        if "classify" in choose_type:
+            kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
+            mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
+            classify_kt_corr = kendalltau(mean_preds, kt_labels)[0]
+            if best_measure is None or best_measure < classify_kt_corr:
+                best_measure = classify_kt_corr
+                best_found = True
+        if "bopt" in choose_type:
+            max_idx = torch.argmax(val_mean_of_means)
+            measure = val_Y[max_idx]
+            if best_measure is None or best_measure < measure:
+                best_measure = measure
+                best_found = True
+
+    return best_found, best_nll, best_kt_corr, best_measure
+
+
+def train_ensemble2(
     params,
     batch_size,
     num_epochs,
@@ -604,57 +786,38 @@ def train_ensemble(
     jupyter=False,
     ood_val_frac=0.0,
     sample_uniform_fn=None,
+    unseen_idx=None,
 ):
     with torch.no_grad():
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
         adv_train = adv_epsilon > 1e-9
-        train_X, train_Y, X, Y = data
+        train_X, train_Y, val_X, val_Y, X, Y = data
+        assert val_X is None
         N = train_X.shape[0]
         assert val_frac >= 0.01
         assert val_frac <= 0.9
 
         if num_epoch_iters is not None:
             assert num_epoch_iters > 0
-        elif "ood" in choose_type:
-            assert ood_val_frac > 1e-3
-            assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
-            sorted_idx = torch.sort(train_Y, descending=True)[1]
-            val_N = int(N * ood_val_frac)
-            idx = torch.arange(N)
-            train_idx = idx[sorted_idx[val_N:]]
-            val_idx = idx[sorted_idx[:val_N]]
-        elif "ind" in choose_type:
-            train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
-                    N, 
-                    [1-val_frac, val_frac],
-                    rng=data_split_rng,
+        elif val_X is None:
+            train_X, train_Y, val_X, val_Y = make_validation_set(
+                    data, 
+                    choose_type,
+                    num_epoch_iters,
+                    val_frac,
+                    ood_val_frac,
+                    data_split_rng,
                     )
-        else:
-            assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
-        if num_epoch_iters is None:
-            assert val_idx.shape[0] > 0
-            val_X = train_X[val_idx]
-            train_X = train_X[train_idx]
-            val_Y = train_Y[val_idx]
-            train_Y = train_Y[train_idx]
-            print("%d num_val" % (val_X.shape[0]))
+        train_Y, val_Y = normalize_for_training(
+                normalize_fn,
+                train_Y,
+                val_Y,
+                num_epoch_iters,
+                )
 
-        if normalize_fn is not None:
-            mean = train_Y.mean()
-            std = train_Y.std()
-            train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
-            if num_epoch_iters is None:
-                val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
-
-        train_mean = train_Y.mean()
-        train_std = train_Y.std()
-        train_normal = tdist.normal.Normal(train_mean, train_std)
-        train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).detach().item()
-        if num_epoch_iters is None:
-            val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).detach().item()
-            val_baseline_nll = -train_normal.log_prob(val_Y).mean().detach().item()
+        train_baseline_rmse, val_baseline_rmse, val_baseline_nll = compute_single_gaussian_baseline(train_Y)
 
         N = train_X.shape[0]
         print("training:")
@@ -666,7 +829,7 @@ def train_ensemble(
         num_batches = N//batch_size+1
         batches = [i*batch_size  for i in range(num_batches)] + [N]
 
-        kt_corrs = []
+        train_kt_corrs = []
         val_kt_corrs = []
         train_nlls = []
         val_nlls = [[], []]
@@ -722,12 +885,8 @@ def train_ensemble(
             ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
 
             #print('point a1:', nvidia_smi())
-            if params.sampling_dist == "pom_fc_input":
-                means, variances, pom_fc_input = model_ensemble(bX, return_fc_input=True)
-                hist = [[np.histogram(fc_input[i], bins=10, density=True) for i in range(fc_input.shape[0])] for fc_input in pom_fc_input]
-                sampling_info['hist'] = hist
-            else:
-                means, variances = model_ensemble(bX)
+            assert params.sampling_dist != "pom_fc_input"
+            means, variances = model_ensemble(bX)
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
@@ -735,11 +894,13 @@ def train_ensemble(
             nll = model_ensemble.compute_negative_log_likelihood(
                     bY,
                     means, 
-                    variances, 
+                    variances,
+                    custom_std=params.fixed_noise_std if params.fixed_noise_std > ops._eps else None,
                     return_mse=False)
             #print('point a3:', nvidia_smi())
 
             loss = nll
+            loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             if unseen_reg != "normal" and gamma > 0.0:
                 out_data = sample_uniform_fn(ood_data_batch_size)
@@ -757,12 +918,7 @@ def train_ensemble(
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     #print('std after:', means_o.std(dim=0).mean().item())
                     model_ensemble.train()
-                    means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                else:
-                    if params.sampling_dist == "pom_fc_input":
-                        means_o, variances_o = model_ensemble.fc_forward(out_data) # (num_samples, num_points)
-                    else:
-                        means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
                 loss += unseen_data_loss(
                         means_o,
@@ -806,93 +962,43 @@ def train_ensemble(
                     predict_info_models.optim.step()
 
         model_ensemble.eval()
+
         with torch.no_grad():
-            train_means, train_variances = model_ensemble(train_X)
-            train_means = train_means.detach()
-            train_variances = train_variances.detach()
-            train_nll1, train_nll2 = NNEnsemble.report_metric(
-                    train_Y,
-                    train_means,
-                    train_variances,
-                    custom_std=train_Y.std() if params.report_metric_train_std else None,
-                    return_mse=False)
-            train_nlls += [train_nll1.detach().item()]
-            rmse = torch.sqrt(torch.mean((train_means.mean(dim=0)-train_Y)**2)).detach().item()
-            train_rmses += [rmse]
-            train_std += [train_means.std(0).mean().detach().item()]
-            train_mean_of_means = train_means.mean(dim=0).detach()
-            assert train_mean_of_means.shape == train_Y.shape, "%s == %s" % (train_mean_of_means.shape, val_Y.shape)
-            kt_corr = kendalltau(train_mean_of_means, train_Y)[0]
-            kt_corrs += [kt_corr]
-            #kt_corr = 0
 
-            #print('point a5:', nvidia_smi())
-
+            train_rmse, train_std, train_kt_corr, _, _, train_mean_of_means = record_stats_ensemble(params, model_ensemble, train_X, train_Y)
+            train_rmses += [train_rmse]
+            train_std += [train_std]
+            train_kt_corrs += [train_kt_corr]
+            
             if num_epoch_iters is None:
-                val_means, val_variances = model_ensemble(val_X)
-                #print('point a7:', nvidia_smi())
-                val_means = val_means.detach()
-                val_variances = val_variances.detach()
-                indv_rmse = torch.sqrt(((val_means-val_Y)**2).mean(dim=1)).detach()
-                val_std += [val_means.std(0).mean().detach().item()]
-                val_nll1, val_nll2 = NNEnsemble.report_metric(
-                        val_Y,
-                        val_means,
-                        val_variances,
-                        custom_std=train_Y.std() if params.report_metric_train_std else None,
-                        return_mse=False)
-                #print('point a8:', nvidia_smi())
-                val_nll1 = val_nll1.detach().item()
-                val_nll2 = val_nll2.detach().item()
-                rmse = torch.sqrt(torch.mean((val_means.mean(dim=0)-val_Y)**2)).detach().item()
+                val_rmse, val_std, val_kt_corr, val_nll1, val_nll2, val_mean_of_means = record_stats_ensemble(params, model_ensemble, val_X, val_Y)
+                val_rmses += [val_rmse]
+                val_std += [val_std]
+                val_kt_corrs += [val_kt_corr]
                 val_nlls[0] += [val_nll1]
                 val_nlls[1] += [val_nll2]
-                #print('point a9:', nvidia_smi())
-                val_rmses += [rmse]
-                val_mean_of_means = val_means.mean(dim=0)
-                assert val_mean_of_means.shape == val_Y.shape, "%s == %s" % (val_mean_of_means.shape, val_Y.shape)
-                kt_corr = kendalltau(val_mean_of_means, val_Y)[0]
-                val_kt_corrs += [kt_corr]
 
                 nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
 
-                if "val" in choose_type:
-                    if nll_criterion < best_nll:
-                        best_nll = nll_criterion
-                        if "nll" in choose_type:
-                            best_epoch_iter = epoch_iter
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                            best_measure = best_nll
-                    if kt_corr > best_kt_corr:
-                        best_kt_corr = kt_corr
-                        if "kt_corr" in choose_type:
-                            best_epoch_iter = epoch_iter
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                            best_measure = best_kt_corr
-                    if "classify" in choose_type:
-                        kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
-                        mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
-                        classify_kt_corr = kendalltau(mean_preds, kt_labels)[0]
-                        if best_measure is None or best_measure < classify_kt_corr:
-                            best_measure = classify_kt_corr
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                    if "bopt" in choose_type:
-                        max_idx = torch.argmax(val_mean_of_means)
-                        measure = val_Y[max_idx]
-                        if best_measure is None or best_measure < measure:
-                            best_measure = measure
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
+                best_found, best_nll, best_kt_corr, best_measure = choose_best_model(
+                        choose_type,
+                        nll_criterion,
+                        val_kt_corr,
+                        best_measure,
+                        best_nll,
+                        best_kt_corr,
+                        train_mean_of_means,
+                        val_mean_of_means,
+                        val_Y,
+                        )
+
+                if best_found:
+                    time_since_last_best_epoch = 0
+                    best_epoch_iter = epoch_iter
+                    best_model = copy.deepcopy(model_ensemble.state_dict())
 
                 if params.progress_bar:
-                    progress.set_description(f"Corr: {kt_corr:.3f}")
+                    progress.set_description(f"Corr: {val_kt_corr:.3f}")
 
                 if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
                     assert epoch_iter >= early_stopping
@@ -914,7 +1020,10 @@ def train_ensemble(
         val_rmses = [-1]
         val_std = [-1]
 
-    print ('best_nll:', best_nll)
+    if num_epoch_iters is None:
+        print ('best_nll:', best_nll)
+    else:
+        print ('end_nll:', float(val_nlls[1][-1]))
 
     if num_epoch_iters is None:
         logging =  [
@@ -1010,7 +1119,7 @@ def knn_density_max(train_x, x, k=5):
 
         return dist_sort
 
-def train_ensemble_image(
+def train_ensemble(
     params,
     batch_size,
     num_epochs,
@@ -1026,24 +1135,25 @@ def train_ensemble_image(
     early_stopping=10,
     adv_alpha=1.0,
     adv_epsilon=0.0,
+    predict_info_models=None,
+    hsic_custom_kernel=None,
     data_split_rng=None,
     jupyter=False,
     ood_val_frac=0.0,
     sample_uniform_fn=None,
     ood_sampling_rng=None,
+    unseen_idx=None,
 ):
     with torch.no_grad():
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
         adv_train = adv_epsilon > 1e-9
-        train_X, train_Y, X, Y = data
+        train_X, train_Y, val_X, val_Y, X, Y = data
         N = train_X.shape[0]
         assert val_frac >= 0.01
         assert val_frac <= 0.9
 
-        if num_epoch_iters is not None:
-            assert num_epoch_iters > 0
-        elif "ood" in choose_type:
+        if "ood" in choose_type:
             assert ood_val_frac > 1e-3
             assert ood_val_frac <= 0.5, "val_frac is %0.3f. validation set cannot be larger than train set" % (ood_val_frac)
             sorted_idx = torch.sort(train_Y, descending=True)[1]
@@ -1052,34 +1162,40 @@ def train_ensemble_image(
             train_idx = idx[sorted_idx[val_N:]]
             val_idx = idx[sorted_idx[:val_N]]
         elif "ind" in choose_type:
-            train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
-                    N, 
-                    [1-val_frac, val_frac],
-                    rng=data_split_rng,
-                    )
+            if val_X is None:
+                train_idx, val_idx, _, data_split_rng = utils.train_val_test_split(
+                        N, 
+                        [1-val_frac, val_frac],
+                        rng=data_split_rng,
+                        )
+            else:
+                train_idx, _, _, data_split_rng = utils.train_val_test_split(
+                        N, 
+                        [1., 0.],
+                        rng=data_split_rng,
+                        )
         else:
             assert "validation set distribution not found in choose_type=%s" % (choose_type,)
 
-        if num_epoch_iters is None:
-            assert val_idx.shape[0] > 0
+        if val_X is None and val_idx.shape[0] > 0:
             val_X = train_X[val_idx]
-            train_X = train_X[train_idx]
             val_Y = train_Y[val_idx]
-            train_Y = train_Y[train_idx]
-            print("%d num_val" % (val_X.shape[0]))
+        train_X = train_X[train_idx]
+        train_Y = train_Y[train_idx]
+        print("%d num_val" % (val_X.shape[0]))
 
         if normalize_fn is not None:
             mean = train_Y.mean()
             std = train_Y.std()
             train_Y = normalize_fn(train_Y, mean, std, exp=torch.exp)
-            if num_epoch_iters is None:
+            if val_X is not None:
                 val_Y = normalize_fn(val_Y, mean, std, exp=torch.exp)
 
         train_mean = train_Y.mean()
         train_std = train_Y.std()
         train_normal = tdist.normal.Normal(train_mean, train_std)
         train_baseline_rmse = torch.sqrt(((train_mean-train_Y)**2).mean()).detach().item()
-        if num_epoch_iters is None:
+        if val_X is not None:
             val_baseline_rmse = torch.sqrt(((train_mean-val_Y)**2).mean()).detach().item()
             val_baseline_nll = -train_normal.log_prob(val_Y).mean().detach().item()
 
@@ -1093,14 +1209,14 @@ def train_ensemble_image(
         num_batches = N//batch_size+1
         batches = [i*batch_size  for i in range(num_batches)] + [N]
 
-        kt_corrs = []
+        train_kt_corrs = []
         val_kt_corrs = []
-        train_nlls = []
+        train_nlls = [[], []]
         val_nlls = [[], []]
         val_rmses = []
         train_rmses = []
-        train_std = []
-        val_std = []
+        train_stds = []
+        val_stds = []
         best_val_indv_rmse = None
 
         if params.progress_bar:
@@ -1135,21 +1251,33 @@ def train_ensemble_image(
             if bN <= 0:
                 continue
 
-            sampling_info = {'ood_sampling_rng': ood_sampling_rng, 'train_x': train_X, 'model': model_ensemble}
+            if isinstance(model_ensemble, NNEnsemble):
+                sampling_info = {}
+            else:
+                sampling_info = {'ood_sampling_rng': ood_sampling_rng, 'train_x': train_X, 'model': model_ensemble}
             with torch.no_grad():
                 bX = train_X[bs:be].detach()
                 bY = train_Y[bs:be].detach()
 
-            if params.inverse_density_emb_space:
+                if params.unseen_reg != "normal" and params.sampling_dist == "uniform_bb" and isinstance(model_ensemble, NNEnsemble):
+                    temp = bX.view(bX.shape[0], -1)
+                    min_px = temp.min(dim=0)[0]
+                    max_px = temp.max(dim=0)[0]
+                    sampling_info['min_px'] = min_px
+                    sampling_info['max_px'] = max_px
+
+            if params.inverse_density_emb_space and isinstance(model_ensemble, ResnetEnsemble2):
                 means, variances, conv_emb = model_ensemble(bX, return_fc_input=True)
             else:
                 means, variances = model_ensemble(bX)
 
             if params.sampling_dist == "pom_fc_input":
+                assert isinstance(model_ensemble, ResnetEnsemble2)
                 hist = [[np.histogram(fc_input[:, i], bins=10, density=False) for i in range(fc_input.shape[1])] for fc_input in conv_emb]
                 hist = [[(k[i][0]/float(sum(k[i][0])), k[i][1]) for i in range(len(k))] for k in hist]
                 sampling_info['hist'] = hist
             elif params.sampling_dist == "bb_fc_input":
+                assert isinstance(model_ensemble, ResnetEnsemble2)
                 min_val = []
                 max_val = []
                 for i in range(len(bb_fc_input)):
@@ -1164,16 +1292,22 @@ def train_ensemble_image(
             nll = model_ensemble.compute_negative_log_likelihood(
                     bY,
                     means, 
-                    variances, 
+                    variances,
+                    custom_std=params.fixed_noise_std if params.fixed_noise_std > ops._eps else None,
                     return_mse=False)
 
             loss = nll
+            loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             optim.zero_grad()
-            if unseen_reg != "normal":
-                model_ensemble.freeze_conv()
+            if unseen_reg != "normal" and gamma > 0.0:
+                if isinstance(model_ensemble, ResnetEnsemble2):
+                    model_ensemble.freeze_conv()
+
                 out_data = sample_uniform_fn(ood_data_batch_size, sampling_info=sampling_info)
+
                 if params.sampling_space != "fc" and params.inverse_density_emb_space:
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     out_data_conv_emb = model_ensemble.conv_forward(out_data).detach()
 
                 if params.langevin_sampling and gamma > 0.0:
@@ -1189,17 +1323,21 @@ def train_ensemble_image(
                             )
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     model_ensemble.train()
-                    model_ensemble.freeze_conv()
+
+                    if isinstance(model_ensemble, ResnetEnsemble2):
+                        model_ensemble.freeze_conv()
 
                 if params.sampling_space == "fc":
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     weighting = torch.ones(out_data.shape[1], device=params.device)
                 else:
                     weighting = torch.ones(out_data.shape[0], device=params.device)
 
-                with torch.no_grad():
-                    if params.inverse_density:
+                if params.inverse_density:
+                    with torch.no_grad():
                         assert params.sampling_space != "fc" or params.inverse_density_emb_space
                         if params.inverse_density_emb_space:
+                            assert isinstance(model_ensemble, ResnetEnsemble2)
                             assert conv_emb.shape[0] == out_data_conv_emb.shape[0], "%s[0] == %s[0]" % (conv_emb.shape, out_data_conv_emb.shape)
                             temp = []
                             for i_ensemble in range(conv_emb.shape[0]):
@@ -1212,6 +1350,7 @@ def train_ensemble_image(
                         weighting = temp
 
                 if params.inverse_density_emb_space:
+                    assert isinstance(model_ensemble, ResnetEnsemble2)
                     means_o, variances_o = model_ensemble.fc_forward(out_data_conv_emb) # (num_samples, num_points)
                 else:
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
@@ -1224,96 +1363,85 @@ def train_ensemble_image(
                         means=means,
                         o_weighting=weighting
                         )
-                ood_loss.backward(retain_graph=True)
-                model_ensemble.unfreeze_conv()
+
+                if isinstance(model_ensemble, ResnetEnsemble2):
+                    ood_loss.backward(retain_graph=True)
+                    model_ensemble.unfreeze_conv()
+                else:
+                    loss += ood_loss
+
+            if predict_info_models is not None:
+                s_idx = predict_info_models.sample_points(params.num_predict_sample_points)
+                with torch.no_grad():
+                    predictor_preds, _ = model_ensemble(X[s_idx])
+                old_stats = collect_stats_to_predict(
+                        params,
+                        Y[s_idx],
+                        predictor_preds,
+                        )
+
+                loss += old_stats['hsic']
 
             loss.backward()
 
             optim.step()
             torch.cuda.empty_cache()
 
+        if predict_info_models is not None:
+            for i in range(150):
+                predict_info_models.optim.zero_grad()
+                predictor_loss = predict_info_loss(
+                        params,
+                        model_ensemble,
+                        predict_info_models,
+                        bX,
+                        X[s_idx],
+                        Y[s_idx],
+                        old_stats,
+                        )
+                predictor_loss.backward()
+                predict_info_models.optim.step()
+
         model_ensemble.eval()
         with torch.no_grad():
-            train_means, train_variances = ensemble_forward(model_ensemble, train_X, batch_size, progress_bar=False)
-            train_means = train_means.detach()
-            train_variances = train_variances.detach()
-            train_nll1, train_nll2 = NNEnsemble.report_metric(
-                    train_Y,
-                    train_means,
-                    train_variances,
-                    custom_std=train_Y.std() if params.report_metric_train_std else None,
-                    return_mse=False)
-            train_nlls += [train_nll1.detach().item()]
-            rmse = torch.sqrt(torch.mean((train_means.mean(dim=0)-train_Y)**2)).detach().item()
-            train_rmses += [rmse]
-            train_std += [train_means.std(0).mean().detach().item()]
-            train_mean_of_means = train_means.mean(dim=0).detach()
-            assert train_mean_of_means.shape == train_Y.shape, "%s == %s" % (train_mean_of_means.shape, val_Y.shape)
-            kt_corr = kendalltau(train_mean_of_means.cpu().numpy(), train_Y.cpu().numpy())[0]
-            kt_corrs += [kt_corr]
+            train_rmse, train_std, train_kt_corr, train_nll1, train_nll2, train_mean_of_means = record_stats_ensemble(params, model_ensemble, train_X, train_Y)
+            train_rmses += [train_rmse]
+            train_stds += [train_std]
+            train_kt_corrs += [train_kt_corr]
+            train_nlls[0] += [train_nll1]
+            train_nlls[1] += [train_nll2]
 
-            if num_epoch_iters is None:
-                val_means, val_variances = ensemble_forward(model_ensemble, val_X, batch_size, progress_bar=False)
-                val_means = val_means.detach()
-                val_variances = val_variances.detach()
-                indv_rmse = torch.sqrt(((val_means-val_Y)**2).mean(dim=1)).detach()
-                val_std += [val_means.std(0).mean().detach().item()]
-                val_nll1, val_nll2 = NNEnsemble.report_metric(
-                        val_Y,
-                        val_means,
-                        val_variances,
-                        custom_std=train_Y.std() if params.report_metric_train_std else None,
-                        return_mse=False)
-                val_nll1 = val_nll1.detach().item()
-                val_nll2 = val_nll2.detach().item()
-                rmse = torch.sqrt(torch.mean((val_means.mean(dim=0)-val_Y)**2)).detach().item()
+            if val_X is not None:
+                val_rmse, val_std, val_kt_corr, val_nll1, val_nll2, val_mean_of_means = record_stats_ensemble(params, model_ensemble, val_X, val_Y)
+                val_rmses += [val_rmse]
+                val_stds += [val_std]
+                val_kt_corrs += [val_kt_corr]
                 val_nlls[0] += [val_nll1]
                 val_nlls[1] += [val_nll2]
-                val_rmses += [rmse]
-                val_mean_of_means = val_means.mean(dim=0)
-                assert val_mean_of_means.shape == val_Y.shape, "%s == %s" % (val_mean_of_means.shape, val_Y.shape)
-                kt_corr = kendalltau(val_mean_of_means.cpu().numpy(), val_Y.cpu().numpy())[0]
-                val_kt_corrs += [kt_corr]
 
                 nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
 
-                if "val" in choose_type:
-                    if nll_criterion < best_nll:
-                        best_nll = nll_criterion
-                        if "nll" in choose_type:
-                            best_epoch_iter = epoch_iter
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                            best_measure = best_nll
-                    if kt_corr > best_kt_corr:
-                        best_kt_corr = kt_corr
-                        if "kt_corr" in choose_type:
-                            best_epoch_iter = epoch_iter
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                            best_measure = best_kt_corr
-                    if "classify" in choose_type:
-                        kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
-                        mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
-                        classify_kt_corr = kendalltau(mean_preds, kt_labels)[0]
-                        if best_measure is None or best_measure < classify_kt_corr:
-                            best_measure = classify_kt_corr
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
-                    if "bopt" in choose_type:
-                        max_idx = torch.argmax(val_mean_of_means)
-                        measure = val_Y[max_idx]
-                        if best_measure is None or best_measure < measure:
-                            best_measure = measure
-                            time_since_last_best_epoch = 0
-                            best_model = copy.deepcopy(model_ensemble.state_dict())
-                            best_val_indv_rmse = indv_rmse
+            if num_epoch_iters is None:
+                assert val_X is not None
+                best_found, best_nll, best_kt_corr, best_measure = choose_best_model(
+                        choose_type,
+                        nll_criterion,
+                        val_kt_corr,
+                        best_measure,
+                        best_nll,
+                        best_kt_corr,
+                        train_mean_of_means,
+                        val_mean_of_means,
+                        val_Y,
+                        )
+
+                if best_found:
+                    time_since_last_best_epoch = 0
+                    best_epoch_iter = epoch_iter
+                    best_model = copy.deepcopy(model_ensemble.state_dict())
 
                 if params.progress_bar:
-                    progress.set_description(f"Corr: {kt_corr:.3f}")
+                    progress.set_description(f"Corr: {val_kt_corr:.3f}")
 
                 if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
                     assert epoch_iter >= early_stopping
@@ -1326,32 +1454,37 @@ def train_ensemble_image(
             assert num_epochs == 0
 
     if num_epochs == 0:
-        kt_corrs = [-1]
+        train_kt_corrs = [-1]
         train_nlls = [-1]
         train_rmses = [-1]
-        train_std = [-1]
+        train_stds = [-1]
         val_kt_corrs = [-1]
+        train_nlls = [[-1], [-1]]
         val_nlls = [[-1], [-1]]
         val_rmses = [-1]
-        val_std = [-1]
-
-    print ('best_nll:', best_nll)
+        val_stds = [-1]
 
     if num_epoch_iters is None:
+        print ('best_nll:', best_nll)
+    else:
+        print ('end_nll:', float(val_nlls[1][-1]))
+
+
+    if val_X is not None:
         logging =  [
                 {
                 'train' : {
                     #'kt_corr': kt_corrs,
                     #'nll': train_nlls,
                     #'rmse': train_rmses,
-                    #'std': train_std,
+                    #'std': train_stds,
                     },
                 'val' : {
                     'kt_corr': val_kt_corrs,
                     'nll1': val_nlls[0],
                     'nll2': val_nlls[1],
                     'rmse': val_rmses,
-                    'std': val_std,
+                    'std': val_stds,
                     },
                 'baseline': {
                     'nll': val_baseline_nll,
@@ -1368,17 +1501,18 @@ def train_ensemble_image(
                 },
                 {
                 'train' : {
-                    'kt_corr': float(kt_corrs[best_epoch_iter]),
-                    'nll': float(train_nlls[best_epoch_iter]),
+                    'kt_corr': float(train_kt_corrs[best_epoch_iter]),
+                    'nll1': float(train_nlls[0][best_epoch_iter]),
+                    'nll2': float(train_nlls[1][best_epoch_iter]),
                     'rmse': float(train_rmses[best_epoch_iter]),
-                    'std': float(train_std[best_epoch_iter]),
+                    'std': float(train_stds[best_epoch_iter]),
                     },
                 'val' : {
                     'kt_corr': float(val_kt_corrs[best_epoch_iter]),
                     'nll1': float(val_nlls[0][best_epoch_iter]),
                     'nll2': float(val_nlls[1][best_epoch_iter]),
                     'rmse': float(val_rmses[best_epoch_iter]),
-                    'std': float(val_std[best_epoch_iter]),
+                    'std': float(val_stds[best_epoch_iter]),
                     },
                 'baseline': {
                     'nll': val_baseline_nll,
@@ -1398,7 +1532,7 @@ def train_ensemble_image(
     return logging, data_split_rng
 
 
-def image_hyper_param_train(
+def hyper_param_train(
     params,
     model,
     data,
@@ -1410,19 +1544,31 @@ def image_hyper_param_train(
     sample_uniform_fn=None,
     normalize_fn=None,
     report_zero_gamma=False,
+    num_epoch_iters=None,
+    unseen_idx=None,
 ):
     gamma_added = False
+    regression = params.num_acks == 0
+    if unseen_reg == "normal":
+        gammas = [0.0]
     if report_zero_gamma and 0.0 not in gammas:
         gammas = [0.0] + gammas
         gamma_added = True
 
+    train_X, train_Y, val_X, val_Y, X, Y = data
+
+    do_hyper_param_search = len(gammas) > 1 or num_epoch_iters is None # search for gamma and/or early stopping point
+    do_combine_train_val_training = params.combine_train_val and (val_X is None) and not regression 
+    best_gamma = None
+    if not do_hyper_param_search:
+        best_gamma = gammas[0]
+        do_combine_train_val_training = True
+
     best_nll = float('inf')
     best_logging = None
-    best_gamma = None
 
     zero_gamma_nll = None
     zero_gamma_best_epoch_iter = None
-    invar_model = None
 
     zero_gamma_model = None
     best_gamma_model = None
@@ -1434,22 +1580,97 @@ def image_hyper_param_train(
 
     ood_sampling_rng = ops.get_rng_state()
 
-    train_X, train_Y, X, Y = data
     best_epoch_iter = None
 
-    for gamma in gammas:
-        model_copy = copy.deepcopy(model)
-        optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
-        data_split_rng2 = copy.deepcopy(data_split_rng)
-        best_cur_epoch_iter = None
-        logging, data_split_rng2 = train_ensemble_image(
+    logging = None
+    if do_hyper_param_search:
+        for gamma in gammas:
+            model_copy = copy.deepcopy(model)
+            optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
+            data_split_rng2 = copy.deepcopy(data_split_rng)
+            best_cur_epoch_iter = None
+            logging, data_split_rng2 = train_ensemble(
+                    params,
+                    train_batch_size,
+                    train_epochs,
+                    data,
+                    model_copy,
+                    optim,
+                    choose_type=params.hyper_search_choose_type,
+                    unseen_reg=unseen_reg,
+                    gamma=gamma,
+                    normalize_fn=normalize_fn,
+                    val_frac=params.val_frac,
+                    early_stopping=params.early_stopping,
+                    data_split_rng=data_split_rng2,
+                    ood_val_frac=params.ood_val_frac,
+                    sample_uniform_fn=sample_uniform_fn,
+                    ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                    num_epoch_iters=num_epoch_iters,
+                    unseen_idx=unseen_idx,
+                    )
+            torch.cuda.empty_cache()
+
+            found_best = False
+            best_cur_epoch_iter = None
+            if num_epoch_iters is None:
+                val_nll_cur = logging[1]['best']['nll']
+            else:
+                val_nll_cur = logging[1]['val']['nll2']
+            best_cur_epoch_iter = logging[1]['best']['epoch_iter']
+
+            if gamma == 0.0:
+                zero_gamma_best_epoch_iter = best_cur_epoch_iter
+                zero_gamma_nll = float(val_nll_cur)
+                zero_gamma_model = copy.deepcopy(model_copy)
+
+            if gamma > 0.0 or not gamma_added:
+                if val_nll_cur < best_nll:
+                    print('new_best_maxvar:', val_nll_cur)
+                    best_nll = float(val_nll_cur)
+                    found_best = True
+
+                if found_best:
+                    best_logging = logging
+                    best_gamma = gamma
+                    best_epoch_iter = best_cur_epoch_iter
+                    best_gamma_model = copy.deepcopy(model_copy)
+
+                if params.gamma_cutoff:
+                    if not found_best:
+                        break
+
+            #model_copy = copy.deepcopy(zero_gamma_model)
+            #optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr/10., weight_decay=l2)
+
+    torch.cuda.empty_cache()
+    #print('point 3:', nvidia_smi())
+
+    if do_hyper_param_search:
+        data_split_rng = data_split_rng2
+        logging = best_logging
+
+        assert logging[0] is not None
+        assert logging[1] is not None
+        print('logging:', pprint.pformat(logging[1]))
+
+        assert best_epoch_iter is not None
+        assert best_gamma is not None
+        print('best gamma:', best_gamma)
+
+    if not do_combine_train_val_training:
+        assert best_gamma_model is not None
+    elif params.hyper_search_choose_type != params.final_train_choose_type:
+        assert False, "for paper we aren't doing this option"
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        logging, data_split_rng2 = train_ensemble(
                 params,
                 train_batch_size,
                 train_epochs,
-                [train_X, train_Y, X, Y],
+                data,
                 model_copy,
                 optim,
-                choose_type=params.hyper_search_choose_type,
+                choose_type=params.final_train_choose_type,
                 unseen_reg=unseen_reg,
                 gamma=gamma,
                 normalize_fn=normalize_fn,
@@ -1459,102 +1680,64 @@ def image_hyper_param_train(
                 ood_val_frac=params.ood_val_frac,
                 sample_uniform_fn=sample_uniform_fn,
                 ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                num_epoch_iters=num_epoch_iters,
+                unseen_idx=unseen_idx,
                 )
-        torch.cuda.empty_cache()
-        best_cur_epoch_iter = logging[1]['best']['epoch_iter']
+    else:
+        zero_gamma_model = None
+        if report_zero_gamma:
+            if best_gamma != 0.0:
+                zero_gamma_model = copy.deepcopy(model)
 
-        found_best = False
-        val_nll_cur = logging[1]['best']['nll']
-        if gamma == 0.0:
-            zero_gamma_best_epoch_iter = best_cur_epoch_iter
-            zero_gamma_nll = float(val_nll_cur)
-            zero_gamma_model = copy.deepcopy(model_copy)
-
-        if gamma > 0.0 or not gamma_added:
-            if val_nll_cur < best_nll:
-                print('new_best_maxvar:', val_nll_cur)
-                best_nll = float(val_nll_cur)
-                found_best = True
-
-            if found_best:
-                best_logging = logging
-                best_gamma = gamma
-                best_epoch_iter = best_cur_epoch_iter
-                best_gamma_model = copy.deepcopy(model_copy)
-
-            if params.gamma_cutoff:
-                if not found_best:
-                    break
-
-        #model_copy = copy.deepcopy(zero_gamma_model)
-        #optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr/10., weight_decay=l2)
-
-    del optim
-    torch.cuda.empty_cache()
-    #print('point 3:', nvidia_smi())
-
-    data_split_rng = data_split_rng2
-    logging = best_logging
-
-    assert logging[0] is not None
-    assert logging[1] is not None
-    print('logging:', pprint.pformat(logging[1]))
-
-    assert best_epoch_iter is not None
-    assert best_gamma is not None
-    print('best gamma:', best_gamma)
-
-    """
-    zero_gamma_model = None
-    if report_zero_gamma:
-        if best_gamma != 0.0:
-            zero_gamma_model = copy.deepcopy(model)
-
-    assert best_epoch_iter >= 0
-    print('combine_train_val')
-    optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-    #print('point 4:', nvidia_smi())
-    _, _ = train_ensemble_image(
-            params,
-            train_batch_size,
-            train_epochs, 
-            [train_X, train_Y, X, Y],
-            model,
-            optim,
-            choose_type=params.final_train_choose_type,
-            unseen_reg=unseen_reg,
-            gamma=best_gamma,
-            normalize_fn=normalize_fn,
-            num_epoch_iters=best_epoch_iter+1,
-            sample_uniform_fn=sample_uniform_fn,
-            ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-            )
-    torch.cuda.empty_cache()
-
-    if zero_gamma_model is not None:
-        assert best_gamma != 0.0
-        assert zero_gamma_best_epoch_iter >= 0
-        optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
-        _, _ = train_ensemble_image(
-                params, 
+        assert num_epoch_iters is not None or best_epoch_iter >= 0
+        print('combine_train_val')
+        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
+        #print('point 4:', nvidia_smi())
+        logging2, _ = train_ensemble(
+                params,
                 train_batch_size,
                 train_epochs, 
-                [train_X, train_Y, X, Y],
-                zero_gamma_model,
+                data,
+                model,
                 optim,
                 choose_type=params.final_train_choose_type,
-                unseen_reg="normal",
-                gamma=0.0,
+                unseen_reg=unseen_reg,
+                gamma=best_gamma,
                 normalize_fn=normalize_fn,
-                num_epoch_iters=zero_gamma_best_epoch_iter+1,
-                sample_uniform_fn=None,
+                num_epoch_iters=best_epoch_iter+1 if num_epoch_iters is None else num_epoch_iters,
+                sample_uniform_fn=sample_uniform_fn,
                 ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                unseen_idx=unseen_idx,
                 )
         torch.cuda.empty_cache()
+        best_gamma_model = model
+        if logging is None:
+            logging2 = logging
 
-    #print('point 5:', nvidia_smi())
-    print('combine_train_val done')
-    """
+        if zero_gamma_model is not None:
+            assert best_gamma != 0.0
+            assert zero_gamma_best_epoch_iter >= 0
+            optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
+            _, _ = train_ensemble(
+                    params, 
+                    train_batch_size,
+                    train_epochs, 
+                    data,
+                    zero_gamma_model,
+                    optim,
+                    choose_type=params.final_train_choose_type,
+                    unseen_reg="normal",
+                    gamma=0.0,
+                    normalize_fn=normalize_fn,
+                    num_epoch_iters=zero_gamma_best_epoch_iter+1,
+                    sample_uniform_fn=None,
+                    ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
+                    unseen_idx=unseen_idx,
+                    )
+            torch.cuda.empty_cache()
+
+        #print('point 5:', nvidia_smi())
+        print('combine_train_val done')
 
     return logging, best_gamma, data_split_rng, zero_gamma_model, best_gamma_model
 
@@ -1581,79 +1764,7 @@ def one_hot_list_to_number(inputs, data=None):
 
 
 
-def image_hyper_param_train2(
-    params,
-    model,
-    data,
-    stage,
-    gammas,
-    unseen_reg,
-    data_split_rng,
-    predict_info_models=None,
-    sample_uniform_fn=None,
-    report_zero_gamma=True,
-):
-    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
-    logging, best_gamma, data_split_rng = hyper_param_train(
-            params,
-            model,
-            data,
-            stage,
-            [0.0],
-            "normal",
-            data_split_rng,
-            None,
-            None,
-            normalize_fn=normalize_fn,
-            )
-
-    zero_gamma_model = None
-    if unseen_reg != "normal":
-        assert sample_uniform_fn is not None
-        model.freeze_conv()
-        train_X, train_Y, X, Y = data
-        with torch.no_grad():
-            train_X_emb = model.conv_forward(train_X, batch_size=params.re_train_batch_size)
-
-        if report_zero_gamma:
-            logging, best_gamma, data_split_rng, zero_gamma_fc_layer = hyper_param_train(
-                params,
-                model.fc_layers,
-                [train_X_emb, train_Y, X, Y],
-                stage,
-                gammas,
-                unseen_reg,
-                data_split_rng,
-                None,
-                sample_uniform_fn,
-                normalize_fn=normalize_fn,
-                report_zero_gamma_model=report_zero_gamma,
-                )
-            if zero_gamma_fc_layer is None:
-                zero_gamma_fc_layer = model.fc_layers
-            def zero_gamma_model(x):
-                with torch.no_grad():
-                    x_emb = model.conv_forward(x, batch_size=params.re_train_batch_size)
-                    return zero_gamma_fc_layer(x_emb)
-        else:
-            logging, best_gamma, data_split_rng = hyper_param_train(
-                params,
-                model.fc_layers,
-                [train_X_emb, train_Y, X, Y],
-                stage,
-                gammas,
-                unseen_reg,
-                data_split_rng,
-                None,
-                sample_uniform_fn,
-                normalize_fn=normalize_fn,
-                report_zero_gamma_model=report_zero_gamma,
-                )
-        model.unfreeze_conv()
-
-    return logging, best_gamma, data_split_rng, zero_gamma_model
-
-def hyper_param_train(
+def hyper_param_train2(
     params,
     model,
     data,
@@ -1665,7 +1776,10 @@ def hyper_param_train(
     sample_uniform_fn=None,
     normalize_fn=None,
     report_zero_gamma_model=False,
+    num_epoch_iters=None,
+    unseen_idx=None,
 ):
+    regression = params.num_acks == 0
     best_nll = float('inf')
     best_kt_corr = -2.
     best_measure = None
@@ -1686,7 +1800,6 @@ def hyper_param_train(
         gammas = [0.0] + gammas
         zero_gamma_added = True
 
-    train_X, train_Y, X, Y = data
     best_epoch_iter = None
     for gamma in gammas:
         with torch.no_grad():
@@ -1702,7 +1815,7 @@ def hyper_param_train(
                     params,
                     train_batch_size,
                     train_epochs, 
-                    [train_X, train_Y, X, Y],
+                    data,
                     model_copy,
                     optim,
                     choose_type=params.hyper_search_choose_type,
@@ -1715,6 +1828,8 @@ def hyper_param_train(
                     data_split_rng=data_split_rng2,
                     ood_val_frac=params.ood_val_frac,
                     sample_uniform_fn=sample_uniform_fn,
+                    num_epoch_iters=num_epoch_iters,
+                    unseen_idx=unseen_idx,
                     )
             torch.cuda.empty_cache()
             #print('point 2:', nvidia_smi())
@@ -1766,7 +1881,9 @@ def hyper_param_train(
     assert best_gamma is not None
     print('best gamma:', best_gamma)
 
-    if params.combine_train_val:
+    train_X, train_Y, val_X, val_Y, X, Y = data
+
+    if params.combine_train_val and (not regression) and (val_X is None) and (num_epoch_iters is None):
         if report_zero_gamma_model:
             if best_gamma != 0.0:
                 zero_gamma_model = copy.deepcopy(model)
@@ -1779,7 +1896,7 @@ def hyper_param_train(
                 params, 
                 train_batch_size,
                 train_epochs, 
-                [train_X, train_Y, X, Y],
+                data,
                 model,
                 optim,
                 choose_type=params.final_train_choose_type,
@@ -1789,6 +1906,7 @@ def hyper_param_train(
                 num_epoch_iters=best_epoch_iter+1,
                 predict_info_models=predict_info_models,
                 sample_uniform_fn=sample_uniform_fn,
+                unseen_idx=unseen_idx,
                 )
         torch.cuda.empty_cache()
 
@@ -1800,7 +1918,7 @@ def hyper_param_train(
                     params, 
                     train_batch_size,
                     train_epochs, 
-                    [train_X, train_Y, X, Y],
+                    data,
                     zero_gamma_model,
                     optim,
                     choose_type=params.final_train_choose_type,
@@ -1810,6 +1928,7 @@ def hyper_param_train(
                     num_epoch_iters=zero_gamma_best_epoch_iter+1,
                     predict_info_models=None,
                     sample_uniform_fn=None,
+                    unseen_idx=unseen_idx,
                     )
             torch.cuda.empty_cache()
 
@@ -1822,7 +1941,7 @@ def hyper_param_train(
                 params,
                 train_batch_size,
                 train_epochs, 
-                [train_X, train_Y, X, Y],
+                data,
                 model,
                 optim,
                 choose_type=params.final_train_choose_type,
@@ -1835,6 +1954,7 @@ def hyper_param_train(
                 data_split_rng=data_split_rng2,
                 ood_val_frac=params.ood_val_frac,
                 sample_uniform_fn=sample_uniform_fn,
+                unseen_idx=unseen_idx,
                 )
     else:
         assert False, "for paper we aren't doing this option"

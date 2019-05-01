@@ -38,6 +38,7 @@
 --re_train_l2 0.01
 --early_stopping 10
 --take_log True
+--fixed_noise_std 0.
 
 --unseen_reg normal
 --gammas 0.0 1.0 5.0 10.0 20.0 50.0
@@ -51,8 +52,8 @@
 --ack_batch_size 100
 --num_acks 10
 
---single_gaussian_test_nll False
---report_metric_train_std True
+--single_gaussian_test_nll True
+--report_metric_train_std False
 --empirical_stat std
 --empirical_diversity_only False
 --empirical_stat_val_fraction 0.2

@@ -1,9 +1,11 @@
 
 --project dna_binding
 --mode bayes_opt
+
+--progress_bar True
 --seed 1
---model_init_seed 1
---data_split_seed 1
+--model_init_seed -1
+--data_split_seed -1
 --device cuda
 --clean True
 --log_all_train_iter False
@@ -21,9 +23,10 @@
 --init_train_num_epochs 200
 --init_train_lr 0.01
 --init_train_batch_size 128
---re_train_num_epochs 200
---re_train_lr 0.01
---re_train_batch_size 128
+--re_train_num_epochs -1
+--re_train_lr -1
+--re_train_batch_size -1
+--held_out_val 0
 --val_frac 0.1
 --ood_val_frac 0.1
 --num_train_val_splits 1
@@ -35,9 +38,10 @@
 --separate_mean_var False
 --output_noise_dist_fn Normal
 --init_train_l2 0.01
---re_train_l2 0.01
+--re_train_l2 -1
 --early_stopping 10
 --take_log True
+--fixed_noise_std -1
 
 --unseen_reg normal
 --gammas 1.0 5.0 10.0 20.0
@@ -52,7 +56,6 @@
 --num_acks 30
 
 --single_gaussian_test_nll True
---report_metric_train_std False
 --empirical_stat std
 --empirical_stat_val_fraction 0.1
 --ucb_ekb_weighting 0.5
@@ -87,3 +90,7 @@
 --ood_pred_epoch_iter 100
 --ood_pred_batch_size 1000
 --stdout_file stdout
+
+--bayesian_ensemble False
+--bayesian_theta_prior_mu 0
+--bayesian_theta_prior_std 1

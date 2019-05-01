@@ -83,7 +83,7 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
                     for stat in stats_to_extract:
                         if stat not in checkpoint:
                             continue
-                        if not read_all_train_iter and stat == 'logging':
+                        if not read_all_train_iter and stat == 'logging' and checkpoint[stat] is not None:
                             checkpoint[stat][0] = None
                         stats[-1][filename][batch_size][-1][stat] = checkpoint[stat]
 

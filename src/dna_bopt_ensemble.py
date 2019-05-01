@@ -42,15 +42,30 @@ from deep_ensemble_sid import NNEnsemble, ResnetEnsemble, ResnetEnsemble2
 
 torch.backends.cudnn.deterministic = True
 
-print('PARAMS:')
-for k, v in vars(params).items():
-    print(k, v)
 do_model_hparam_search = len(params.gammas) > 1
 
 if params.device != "cpu":
     print("Running on GPU " + str(gpu_id))
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 params.device = device
+
+# set data split seed to model seed if data split seed is -1
+if params.model_init_seed == -1:
+    params.model_init_seed = params.seed
+if params.data_split_seed == -1:
+    params.data_split_seed = params.model_init_seed
+if params.re_train_num_epochs == -1:
+    params.re_train_num_epochs = params.init_train_num_epochs
+if params.re_train_lr < 0:
+    params.re_train_lr = params.init_train_lr
+if params.re_train_batch_size == -1:
+    params.re_train_batch_size = params.init_train_batch_size
+if params.re_train_l2 < 0:
+    params.re_train_l2 = params.init_train_l2
+
+print('PARAMS:')
+for k, v in vars(params).items():
+    print(k, v)
 
 np.random.seed(params.seed)
 torch.manual_seed(params.seed)
@@ -153,14 +168,17 @@ for task_iter in range(len(task_name)):
     indices = indices[sort_idx]
 
     # reading data
-    train_idx, _, test_idx, data_split_rng = utils.train_val_test_split(
+    train_idx, val_idx, test_idx, data_split_rng = utils.train_val_test_split(
             indices, 
-            split=[params.init_train_examples, 0],
+            split=[params.init_train_examples, params.held_out_val],
             rng=data_split_rng,
             )
 
     train_inputs = inputs[train_idx]
     train_labels = labels[train_idx]
+
+    val_inputs = inputs[val_idx]
+    val_labels = labels[val_idx]
 
     test_idx = test_idx[:params.num_test_points]
     test_inputs = inputs[test_idx]
@@ -174,6 +192,12 @@ for task_iter in range(len(task_name)):
     train_X_init = torch.FloatTensor(train_inputs).to(device)
     train_Y_cur = torch.FloatTensor(train_labels).to(device)
 
+    val_X = None
+    val_Y = None
+    if params.held_out_val > 0:
+        val_X = torch.FloatTensor(val_inputs).to(device)
+        val_Y = torch.FloatTensor(val_labels).to(device)
+
     cur_rng = ops.get_rng_state()
     ops.set_rng_state(ensemble_init_rng)
 
@@ -185,29 +209,23 @@ for task_iter in range(len(task_name)):
                 sigmoid_coeff=params.sigmoid_coeff, 
                 device=params.device,
                 separate_mean_var=params.separate_mean_var,
+                mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
+                std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
                 )
     elif params.project in ["wiki", "imdb"]:
-        if params.ensemble_type == "fc":
-            init_model = ResnetEnsemble2(
-                    params,
-                    params.num_models, 
-                    inputs.shape[1], 
-                    depth=params.resnet_depth,
-                    widen_factor=params.resnet_width_factor,
-                    n_hidden=params.num_hidden,
-                    dropout_factor=params.resnet_dropout,
-                    ).to(params.device)
-        elif params.ensemble == "all":
-            init_model = NNEnsemble.get_model_resnet(
-                    inputs.shape[1], 
-                    params.num_models, 
-                    params.resnet_depth,
-                    params.resnet_width_factor,
-                    params.resnet_dropout,
-                    device=params.device,
-                    )
-        else:
-            assert False, params.ensemble_type + " not implemented"
+        init_model = ResnetEnsemble2(
+                params,
+                params.num_models, 
+                inputs.shape[1], 
+                depth=params.resnet_depth,
+                widen_factor=params.resnet_width_factor,
+                n_hidden=params.num_hidden,
+                dropout_factor=params.resnet_dropout,
+                device=params.device,
+                mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
+                std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
+                ).to(params.device)
+    untrained_model = copy.deepcopy(init_model)
 
     ensemble_init_rng = ops.get_rng_state()
     ops.set_rng_state(cur_rng)
@@ -250,8 +268,13 @@ for task_iter in range(len(task_name)):
                     return out
             elif params.sampling_space == "unseen_ind":
                 def sample_uniform_fn(batch_size, sampling_info=None):
+                    ood_sampling_rng = sampling_info['ood_sampling_rng']
+                    cur_rng = ops.get_rng_state()
+                    ops.set_rng_state(ood_sampling_rng)
                     idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
-                    random.shuffle(idx)
+                    np.random.shuffle(idx)
+                    sampling_info['ood_sampling_rng'] = ops.get_rng_state()
+                    ops.set_rng_state(cur_rng)
                     out = X[idx[:batch_size]]
                     return out
             elif params.sampling_space == "input" and params.sampling_dist == "uniform":
@@ -317,10 +340,10 @@ for task_iter in range(len(task_name)):
 
         zero_gamma_model = None
         if params.project in ['imdb', 'wiki']:
-            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.image_hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
-                [train_X_init, train_Y_cur, X, Y],
+                [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
                 "init",
                 params.gammas,
                 params.unseen_reg,
@@ -329,12 +352,13 @@ for task_iter in range(len(task_name)):
                 sample_uniform_fn=sample_uniform_fn,
                 report_zero_gamma=params.report_zero_gamma,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 )
         else:
-            logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
-                [train_X_init, train_Y_cur, X, Y],
+                [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
                 "init",
                 params.gammas,
                 params.unseen_reg,
@@ -342,11 +366,15 @@ for task_iter in range(len(task_name)):
                 predict_info_models=predict_info_models if params.predict_mi else None,
                 sample_uniform_fn=sample_uniform_fn,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 )
         torch.cuda.empty_cache()
         #print('point 6:', nvidia_smi())
 
-        cur_rmse = logging[1]['val']['rmse']
+        if logging is not None and logging[1] is not None and 'val' in logging[1] and 'rmse' in logging[1]['val']:
+            cur_rmse = logging[1]['val']['rmse']
+        else:
+            cur_rmse = None
 
     with torch.no_grad():
         init_model.eval()
@@ -444,7 +472,7 @@ for task_iter in range(len(task_name)):
                 else:
                     zero_gamma_ood_pred_stats = ood_pred_stats
 
-        if not params.log_all_train_iter:
+        if logging is not None and not params.log_all_train_iter:
             logging[0] = None
 
         to_save_dict = {
@@ -474,7 +502,7 @@ for task_iter in range(len(task_name)):
         torch.save(to_save_dict, init_model_path)
 
     with open(file_output_dir + "/stats.txt", 'w' if params.clean else 'a', buffering=1) as main_f:
-        if not loaded:
+        if not loaded and logging is not None:
             main_f.write(pprint.pformat(logging[1]) + "\n")
 
         for ack_batch_size in [params.ack_batch_size]:
@@ -493,11 +521,10 @@ for task_iter in range(len(task_name)):
             idx_at_each_iter = [train_idx.tolist()]
 
             train_X_cur = train_X_init.clone()
-            train_Y_cur = train_Y_cur.clone()
 
             cur_model = copy.deepcopy(init_model)
 
-            skip_idx_cur = set(train_idx.tolist() + test_idx.tolist())
+            skip_idx_cur = set(train_idx.tolist() + test_idx.tolist() + val_idx.tolist())
             train_idx_cur = set(train_idx.tolist())
             ack_all_cur = set()
 
@@ -612,6 +639,7 @@ for task_iter in range(len(task_name)):
                                     ack_batch_size,
                                     skip_idx_cur,
                                     dbopt.train_ensemble,
+                                    normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                                     )
                         elif "_ucb" in params.ack_fun:
                             cur_ack_idx = bopt.get_noninfo_ack(
@@ -763,87 +791,33 @@ for task_iter in range(len(task_name)):
                     #print('er_labels', labels[cur_ack_idx])
                     #print('ack_labels', labels[cur_ack_idx].max(), labels[cur_ack_idx].min(), labels[cur_ack_idx].mean())
 
-                    assert len(skip_idx_cur) == int(params.init_train_examples + len(test_idx)) + expected_num_points, str(len(skip_idx_cur)) + " == " + str(int(params.init_train_examples + len(test_idx)) + expected_num_points)
+                    assert len(skip_idx_cur) == int(params.init_train_examples + len(test_idx) + len(val_idx)) + expected_num_points, str(len(skip_idx_cur)) + " == " + str(int(params.init_train_examples + len(test_idx) + len(val_idx)) + expected_num_points)
 
                     new_idx = list(train_idx_cur)
                     random.shuffle(new_idx)
                     new_idx = torch.LongTensor(new_idx)
 
-                    train_X_cur = X.new_tensor(X[new_idx]).detach()
-                    train_Y_cur = Y.new_tensor(Y[new_idx]).detach()
+                    train_X_cur = X[new_idx].clone().detach()
+                    train_Y_cur = Y[new_idx].clone().detach()
 
                     print("train_X_cur.shape", train_X_cur.shape)
                     
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
 
-                    ensemble_init_rng = dbopt.reinit_model(
+                    ensemble_init_rng, cur_model = dbopt.reinit_model(
                         params,
-                        init_model,
+                        untrained_model,
                         cur_model,
                         ensemble_init_rng
                         )
-                    if params.project in ['imdb', 'wiki']:
-                        if params.sampling_dist == "ood":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                idx = [i for i in range(ood_X.shape[0])]
-                                random.shuffle(idx)
-                                out = ood_X[idx[:batch_size]]
-                                return out
-                        elif params.sampling_dist == "unseen_ind":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                idx = list(set(range(X.shape[0])).difference(set(train_idx.tolist() + test_idx.tolist())))
-                                random.shuffle(idx)
-                                out = X[idx[:batch_size]]
-                                return out
-                        elif params.sampling_dist in ["uniform_input", "uniform_input_to_fc"]:
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                out = dbopt.image_sample_uniform(batch_size)
-                                return out
-                        elif params.sampling_dist == "uniform_fc_input":
-                            def sample_uniform_fn(batch_size, sampling_info=None):
-                                fc_input_size = cur_model.fc_input_size()
-                                dist = tdist.uniform.Uniform(torch.tensor(0.0), torch.tensor(1.0))
-                                out = dist.sample(sample_shape=(torch.Size([batch_size, fc_input_size])))
-                                return out.to(params.device)
-                        elif params.sampling_dist == "uniform_bb": # bb = bounding box
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                max_px = sampling_info['max_px']
-                                min_px = sampling_info['min_px']
-                                u = tdist.Uniform(min_px, max_px)
-                                return u.sample(sample_shape=torch.Size([batch_size])).view([batch_size]+list(X.shape[1:])).to(params.device)
-                        elif params.sampling_dist == "pom_fc_input": # pom = product of marginals
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                hist = sampling_info['hist']
-                                out = []
-                                for i_model in range(len(hist)):
-                                    out += [ [] ]
-                                    for i_point in range(len(hist[i_model])):
-                                        n = len(hist[i_model][i_point][0])
-                                        idx = np.random.choice(n, size=batch_size, p=hist[i_model][i_point][0])
-                                        low = hist[i_model][i_point][1][idx]
-                                        high = hist[i_model][i_point][1][idx+1]
-                                        out[-1] += [torch.from_numpy(np.random.uniform(low=low, high=high).astype(np.float32)).to(params.device)]
-                                    out[-1] = torch.stack(out[-1], dim=0).transpose(0, 1)
-                                return torch.stack(out, dim=0)
-                        elif params.sampling_dist == "bb_fc_input": # pom = product of marginals
-                            def sample_uniform_fn(batch_size, sampling_info):
-                                max_val = sampling_info['max_val']
-                                min_val = sampling_info['min_val']
-                                out = []
-                                for i in range(len(max_val)):
-                                    u = tdist.uniform.Uniform(min_val[i], max_val[i])
-                                    out += [u.sample(sample_shape=torch.Size([batch_size]))]
-                                return torch.stack(out, dim=0)
-                        else:
-                            assert False, params.sampling_dist + " not implemented"
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_gamma_model, _ = dbopt.image_hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
-                            [train_X_cur, train_Y_cur, X, Y],
+                            [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
                             "re",
                             params.gammas,
                             params.unseen_reg,
@@ -851,12 +825,14 @@ for task_iter in range(len(task_name)):
                             predict_info_models=predict_info_models if params.predict_mi else None,
                             sample_uniform_fn=sample_uniform_fn,
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
+                            unseen_idx=unseen_idx,
                             )
                     else:
-                        logging, best_gamma, data_split_rng = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
-                            [train_X_cur, train_Y_cur, X, Y],
+                            [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
                             "re",
                             params.gammas,
                             params.unseen_reg,
@@ -864,11 +840,16 @@ for task_iter in range(len(task_name)):
                             predict_info_models=predict_info_models if params.predict_mi else None,
                             sample_uniform_fn=sample_uniform_fn,
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
+                            num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
+                            unseen_idx=unseen_idx,
                             )
                     torch.cuda.empty_cache()
                     #print('point 7:', nvidia_smi())
 
-                    cur_rmse = logging[1]['val']['rmse']
+                    if logging is not None and logging[1] is not None and 'val' in logging[1] and 'rmse' in logging[1]['val']:
+                        cur_rmse = logging[1]['val']['rmse']
+                    else:
+                        cur_rmse = None
 
                     with torch.no_grad():
                         cur_model.eval()
@@ -970,7 +951,7 @@ for task_iter in range(len(task_name)):
                     ack_labels = labels[ack_array]
 
                     to_save_dict = {
-                            #'model_state_dict': cur_model.state_dict(), 
+                            'model_state_dict': cur_model.state_dict(), 
                             'logging': logging,
                             'best_gamma': best_gamma,
                             'ack_idx': torch.from_numpy(ack_array),
@@ -999,7 +980,7 @@ for task_iter in range(len(task_name)):
                         print(s)
                         f.write(s + "\n")
 
-                        if not params.log_all_train_iter:
+                        if logging is not None and not params.log_all_train_iter:
                             logging[0] = None
 
                         best_so_far_idx = ack_array[ack_labels.argmax()]
