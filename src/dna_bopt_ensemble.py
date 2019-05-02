@@ -243,6 +243,9 @@ for task_iter in range(len(task_name)):
                 params.predict_nll,
                 ).to(params.device)
 
+    skip_idx = set(train_idx.tolist() + test_idx.tolist() + val_idx.tolist())
+    unseen_idx = set(range(Y.shape[0])).difference(skip_idx)
+
     init_model_path = file_output_dir + "/init_model.pth"
     loaded = False
 
@@ -353,6 +356,7 @@ for task_iter in range(len(task_name)):
                 report_zero_gamma=params.report_zero_gamma,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
+                unseen_idx=unseen_idx,
                 )
         else:
             logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
@@ -367,6 +371,7 @@ for task_iter in range(len(task_name)):
                 sample_uniform_fn=sample_uniform_fn,
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
+                unseen_idx=unseen_idx,
                 )
         torch.cuda.empty_cache()
         #print('point 6:', nvidia_smi())
@@ -922,6 +927,8 @@ for task_iter in range(len(task_name)):
                                 true_ack_stats = empirical_stat_fn(post_ack_preds[:, idx_to_monitor], None)
                                 true_ack_stats -= old_ack_stats
 
+                                true_ack_stats = true_ack_stats.cpu()
+                                guess_ack_stats = guess_ack_stats.cpu()
                                 p1 = pearsonr(true_ack_stats, guess_ack_stats)[0]
                                 kt = kendalltau(true_ack_stats, guess_ack_stats)[0]
 

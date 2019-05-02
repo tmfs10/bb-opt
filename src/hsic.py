@@ -349,7 +349,6 @@ def sum_pairwise_hsic(kernels):
     # sum over all dimensions is 1/n^2 sum_{i, j, a, b} K[a, b, i] K[a, b, j]
     return torch.einsum("abi,abj->", (centered_kernels, centered_kernels)) / n ** 2
 
-
 def precompute_batch_hsic_stats(
     preds: Union[torch.Tensor, Sequence[torch.Tensor]],
     batch: Optional[Sequence[int]] = None,
@@ -627,3 +626,42 @@ def hsic_xy_parallel(kernel_x, kernel_y, biased=False, center_x=False, normalize
         return main_xy / torch.sqrt(main_xx * main_yy)
     else:
         return main_xy / (n * (n - 3))
+
+def pairwise_hsic(
+    kernels, 
+    include_self=False, 
+    biased=True, 
+    normalized=False,
+):
+    """Sum of estimators of pairwise independence.
+    kernels should be shape (n, n, d) when testing
+    among d variables with n paired samples.
+
+    If include_self = False, don't include terms comparing a variable to itself.
+    """
+    shp = kernels.shape
+    assert len(shp) == 3
+    assert shp[0] == shp[1], "%s == %s" % (str(shp[0]), str(shp[1]))
+
+    n = torch.tensor(shp[0], dtype=kernels.dtype)
+    d = torch.tensor(shp[2], dtype=kernels.dtype)
+
+    if not biased:
+        raise NotImplementedError("haven't implemented unbiased here yet")
+
+    cent = center_kernel(kernels)
+    # HSIC^2 on dims (i, j) is  1/n^2 sum_{a, b} K[a, b, i] K[a, b, j]
+
+    if not normalized:
+        # sum over dimensions is 1/n^2 sum_{i, j, a, b} K[a, b, i] K[a, b, j]
+        s = torch.einsum('abi,abj->ij', cent, cent)
+        return s / n**2
+    else:
+        hsics = torch.einsum('abi,abj->ij', cent, cent)
+        norms = torch.sqrt(torch.max(torch.diag(hsics), torch.tensor(1e-8, device=hsics.device)))
+        # numerator is n^2 * hsics, each denom term is n * the norms; cancels
+        normed = hsics / torch.unsqueeze(norms, 0) / torch.unsqueeze(norms, 1)
+        diag = torch.ones_like(torch.diag(normed))
+        ops.set_diagonal(normed, diag)
+
+        return normed

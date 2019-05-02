@@ -155,8 +155,9 @@ def add_parse_args(parser):
     parser.add_argument('--bayesian_theta_prior_mu', type=float)
     parser.add_argument('--bayesian_theta_prior_std', type=float)
 
-    # infomax update
-    parser.add_argument('--infomax_update_weight', type=float)
+    # infomax loss
+    parser.add_argument('--infomax_npoints', type=int)
+    parser.add_argument('--infomax_weight', type=float)
 
 
 def add_parse_args_nongrad(parser):
