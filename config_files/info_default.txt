@@ -6,6 +6,8 @@
 --compare_w_old False
 --pred_weighting 0
 --divide_by_std False
---measure er_condense
+--measure mves
+--num_diversity 10
+--ack_fun info
 --num_models 50
 --hsic_kernel_fn mixrbf_kernels

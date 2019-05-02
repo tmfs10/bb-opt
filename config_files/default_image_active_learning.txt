@@ -93,6 +93,9 @@
 
 --predict_ood False
 
---bayesian_ensemble False
+--infomax_weight 0
+--infomax_npoints 0
+
+--bayesian_ensemble True
 --bayesian_theta_prior_mu 0
 --bayesian_theta_prior_std 1

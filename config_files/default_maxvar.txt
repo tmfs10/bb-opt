@@ -32,6 +32,7 @@
 --num_train_val_splits 1
 --combine_train_val True
 --gamma_cutoff False
+--fixed_num_epoch_iters 100
 
 --num_hidden 100
 --sigmoid_coeff 1.0
@@ -90,6 +91,9 @@
 --ood_pred_epoch_iter 100
 --ood_pred_batch_size 1000
 --stdout_file stdout
+
+--infomax_weight 20
+--infomax_npoints 100
 
 --bayesian_ensemble False
 --bayesian_theta_prior_mu 0

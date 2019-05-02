@@ -3,6 +3,8 @@ import numpy as np
 from scipy.stats import kendalltau
 
 import hsic
+import random
+import torch.nn.functional as F
 import torch
 import torch.nn as nn
 import math
@@ -30,7 +32,7 @@ from deep_ensemble_sid import (
 def nvidia_smi():
     return gpu_utils.utils.nvidia_smi().split("\n")[4]
 
-def dna_sample_uniform(out_size):
+def dna_sample_uniform(out_size, sampling_info=None):
     z = np.zeros((8*out_size,4))
     z[range(8*out_size),np.random.randint(4,size=8*out_size)] = 1
     out_data = torch.from_numpy(z).view((-1,32)).float().cuda()
@@ -670,30 +672,6 @@ def make_batches(
     return num_batches, batches
 
 
-def info_max_loss(
-    params,
-    X,
-    unseen_idx,
-    old_model,
-    cur_model,
-    n_points=100,
-):
-    unseen_idx = random.sample(unseen_idx, n_points)
-    X = X[unseen_idx]
-    old_preds, _ = old_model(X) # (num ensemble members, num points)
-    cur_preds, _ = cur_model(X)
-    kernel_fn = getattr(hsic, "dimwise_" + params.hsic_kernel_fn)
-
-    old_kernels = kernel_fn(old_preds)
-    cur_kernels = kernel_fn(cur_preds)
-
-    old_kernels = old_kernels.permute([2, 0, 1])
-    cur_kernels = cur_kernels.permute([2, 0, 1])
-
-    old_hsic = torch.mean(hsic_xy_parallel(old_kernels, cur_kernels, normalized=params.normalize_hsic))
-    return total_hsic
-
-
 def record_stats_ensemble(
     params,
     model,
@@ -1119,6 +1097,37 @@ def knn_density_max(train_x, x, k=5):
 
         return dist_sort
 
+def info_max_loss(
+    params,
+    X,
+    unseen_idx,
+    old_model,
+    cur_model,
+):
+    n_points = params.infomax_npoints
+    assert n_points > 0
+    unseen_idx = random.sample(unseen_idx, n_points)
+    X = X[unseen_idx]
+    old_preds, _ = old_model(X) # (num ensemble members, num points)
+    cur_preds, _ = cur_model(X)
+
+    old_dist_matrix = hsic.sqdist(old_preds)
+    cur_dist_matrix = hsic.sqdist(cur_preds)
+
+    kernel_fn = getattr(hsic, params.hsic_kernel_fn)
+
+    old_kernels = kernel_fn(old_dist_matrix) # (num ensemble members, num ensemble members, num points)
+    cur_kernels = kernel_fn(cur_dist_matrix)
+
+    old_hsic_matrix = hsic.pairwise_hsic(old_kernels, include_self=False, normalized=True)
+    cur_hsic_matrix = hsic.pairwise_hsic(cur_kernels, include_self=False, normalized=True)
+
+    diff_hsic_matrix = cur_hsic_matrix-old_hsic_matrix
+    penalty_matrix = -torch.tril(F.logsigmoid(diff_hsic_matrix*10), diagonal=-1)
+
+    return penalty_matrix.mean()
+
+
 def train_ensemble(
     params,
     batch_size,
@@ -1145,6 +1154,9 @@ def train_ensemble(
     unseen_idx=None,
 ):
     with torch.no_grad():
+        old_model_ensemble = None
+        if params.infomax_weight > ops._eps:
+            old_model_ensemble = copy.deepcopy(model_ensemble)
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
         adv_train = adv_epsilon > 1e-9
@@ -1298,6 +1310,15 @@ def train_ensemble(
 
             loss = nll
             loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
+
+            if old_model_ensemble is not None:
+                loss += params.infomax_weight * info_max_loss(
+                        params,
+                        X,
+                        unseen_idx,
+                        old_model_ensemble,
+                        model_ensemble,
+                        )
 
             optim.zero_grad()
             if unseen_reg != "normal" and gamma > 0.0:
