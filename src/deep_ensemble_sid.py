@@ -33,13 +33,22 @@ def sample_uniform(out_size):
 
 class NN(torch.nn.Module):
     def __init__(self, 
-            n_inputs: int, 
-            n_hidden: int, 
-            min_variance: float = 1e-5,
-            sigmoid_coeff: float = 1.,
+            n_inputs, 
+            n_hidden, 
+            min_variance=1e-5,
+            sigmoid_coeff=1.,
             separate_mean_var=False,
+            fixed_noise_std=None,
             ):
         super().__init__()
+        if fixed_noise_std is not None:
+            assert fixed_noise_std > 0
+            separate_mean_var = True
+
+        self.max_var = 0.1
+        self.separate_mean_var = separate_mean_var
+        self.fixed_noise_std = fixed_noise_std
+
         if separate_mean_var:
             self.hidden = [Linear(n_inputs, n_hidden), Linear(n_inputs, n_hidden)]
             self.output = [Linear(n_hidden, 1), Linear(n_hidden, 1)]
@@ -61,6 +70,9 @@ class NN(torch.nn.Module):
         #self.pred_var_out = nn.Softplus()
         self.pred_var_out = torch.sigmoid
 
+    def set_fixed_noise_std(self, fixed_noise_std):
+        self.fixed_noise_std = fixed_noise_std
+
     def forward(self, x):
         hidden = []
         output = []
@@ -76,13 +88,13 @@ class NN(torch.nn.Module):
                 mean = torch.sigmoid(output[0][:, 0])*self.sigmoid_coeff
             else:
                 mean = output[:, 0]
-            variance = self.pred_var_out(output[0][:, 1])*0.1+self.min_variance
+            variance = self.pred_var_out(output[0][:, 1])*self.max_var+self.min_variance
         else:
             if self.sigmoid_coeff > 0:
                 mean = torch.sigmoid(output[0])*self.sigmoid_coeff
             else:
                 mean = output[0]
-            variance = self.pred_var_out(output[1])*0.1+self.min_variance
+            variance = torch.ones(x.shape[0], device=x.device)*(self.fixed_noise_std**2)*1./self.max_var + self.min_variance
 
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean.view(-1), variance.view(-1)
@@ -100,15 +112,26 @@ class NN2(torch.nn.Module):
 			min_variance: float = 1e-5,
             sigmoid_coeff: float = 1.,
             separate_mean_var=False,
+            fixed_noise_std=None,
 			):
         super().__init__()
+        assert not separate_mean_var
         self.hidden1 = Linear(n_inputs, n_hidden)
         self.hidden2 = Linear(n_hidden, n_hidden)
-        self.output = Linear(n_hidden, 2)
+
+        if fixed_noise_std is not None:
+            self.output = Linear(n_hidden, 2)
+        else:
+            self.output = Linear(n_hidden, 1)
         self.non_linearity = non_linearity()
         self.dropout = Dropout(0.5)
         self.min_variance = min_variance
         self.sigmoid_coeff = sigmoid_coeff
+        self.fixed_noise_std = fixed_noise_std
+        self.maxvar = 0.1
+
+    def set_fixed_noise_std(self, fixed_noise_std):
+        self.fixed_noise_std = fixed_noise_std
 
     def forward(self, x):
         hidden1 = self.non_linearity(self.hidden1(x))
@@ -119,9 +142,10 @@ class NN2(torch.nn.Module):
             mean = torch.sigmoid(output[:,0])*self.sigmoid_coeff
         else:
             mean = output[:,0]
-        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
-        #mean = output[:, 0]
-        #variance = self.softplus(output[:, 1]) + self.min_variance
+        if self.fixed_noise_std is None:
+            variance = torch.sigmoid(output[:,1])*self.max_var+self.min_variance
+        else:
+            variance = torch.ones(x.shape[0], device=x.device)*(self.fixed_noise_std**2)*1./self.max_var + self.min_variance
         return mean, variance
 
     def reset_parameters(self):
@@ -170,7 +194,7 @@ class RandomNN(torch.nn.Module):
         hidden2 = self.non_linearity(self.hidden2(hidden1))
         dropout2 = self.dropout(hidden2)
         output = self.output(dropout2)
-        mean =torch.sigmoid(output[:,0])*self.c[0]
+        mean = torch.sigmoid(output[:,0])*self.c[0]
         variance =torch.sigmoid(output[:,1])*self.c[1]+self.min_variance
         return mean, variance
 
@@ -231,6 +255,10 @@ class NNEnsemble(torch.nn.Module):
         if mu_prior is not None:
             self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models] 
             self.generate_new_anchors()
+
+    def set_fixed_noise_std(self, fixed_noise_std):
+        for nn in self.models:
+            nn.set_fixed_noise_std(fixed_noise_std)
 
     def generate_new_anchors(self):
         with torch.no_grad():
@@ -325,11 +353,8 @@ class NNEnsemble(torch.nn.Module):
         labels, 
         means, 
         variances, 
-        custom_std=None,
         return_mse=False,
     ):
-        if custom_std is not None:
-            variances = torch.tensor(custom_std**2).cuda()
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
@@ -353,7 +378,7 @@ class NNEnsemble(torch.nn.Module):
         return negative_log_likelihood
 
     def report_metric(
-        labels, means, variances, custom_std=None, return_mse=False
+        labels, means, variances, return_mse=False
     ):
         num_samples = means.shape[0]
 
@@ -362,10 +387,7 @@ class NNEnsemble(torch.nn.Module):
 
         m, v = bopt.combine_means_variances(means, variances)
         mse_m = ((labels - m) ** 2).detach()
-        #if custom_std is None:
-        #    d = tdist.Normal(m, torch.sqrt(v))
-        #else:
-        #    d = tdist.Normal(m, custom_std)
+        #d = tdist.Normal(m, torch.sqrt(v))
         #negative_log_likelihood2 = -d.log_prob(labels).mean().detach()
         negative_log_likelihood2 = bopt.get_nll(means, torch.sqrt(variances), labels, tdist.Normal, single_gaussian=True).mean().detach()
 
@@ -400,6 +422,7 @@ class NNEnsemble(torch.nn.Module):
         separate_mean_var = False,
         mu_prior=None,
         std_prior=None,
+        fixed_noise_std=None,
     ):
         assert not extra_random, "Not implemented"
 
@@ -409,6 +432,7 @@ class NNEnsemble(torch.nn.Module):
                     "n_hidden": n_hidden, 
                     "sigmoid_coeff": sigmoid_coeff, 
                     "separate_mean_var": separate_mean_var,
+                    "fixed_noise_std": fixed_noise_std,
                    }
             if single_layer:
                 model = cls(
@@ -714,12 +738,14 @@ class ResnetEnsemble(torch.nn.Module):
         assert params.ensemble_type == "fc", params.ensemble_type
 
         self.conv_model = Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True)
+
         self.fc_layers = NNEnsemble.get_model(
                 self.conv_model.nStages[3],
                 n_models,
                 n_hidden,
                 device=params.device,
                 extra_random=False,
+                fixed_noise_std=None if params.fixed_noise_std <= 0 else params.fixed_noise_std,
                 )
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model.parameters()))
@@ -731,6 +757,11 @@ class ResnetEnsemble(torch.nn.Module):
         if mu_prior is not None:
             self.anchor_models = [copy.deepcopy(model) for model in self.fc_layers.models] 
             self.generate_new_anchors()
+
+        self.fixed_noise_std = fixed_noise_std
+
+    def set_fixed_noise_std(self, fixed_noise_std):
+        self.fc_layers.set_fixed_noise_std(fixed_noise_std)
 
     def generate_new_anchors(self):
         for model in self.anchor_models:
@@ -807,24 +838,21 @@ class ResnetEnsemble(torch.nn.Module):
         labels, 
         means, 
         variances, 
-        custom_std=None,
         return_mse=False,
     ):
         return NNEnsemble.compute_negative_log_likelihood(
                 labels,
                 means,
                 variances,
-                custom_std,
                 return_mse
                 )
 
     @staticmethod
-    def report_metric(labels, means, variances, custom_std=None, return_mse=False):
+    def report_metric(labels, means, variances, return_mse=False):
         return NNEnsemble.fc_layers(
                 labels,
                 means,
                 variances,
-                custom_std,
                 return_mse
                 )
 
@@ -846,7 +874,11 @@ class ResnetEnsemble2(torch.nn.Module):
         assert params.ensemble_type == "fc", params.ensemble_type
 
         self.conv_model = nn.ModuleList([Wide_ResNet(depth, widen_factor, dropout_factor, fc_sampling=True, do_batch_norm=params.resnet_do_batch_norm) for i in range(n_models)])
-        self.fc_layers = nn.ModuleList([NN(self.conv_model[0].nStages[3], n_hidden) for i in range(n_models)])
+        conv_output_size = self.conv_model[0].nStages[3]
+        if params.fixed_noise_std <= 0:
+            self.fc_layers = nn.ModuleList([NN(conv_output_size, n_hidden) for i in range(n_models)])
+        else:
+            self.fc_layers = nn.ModuleList([NN(conv_output_size, n_hidden, fixed_noise_std=params.fixed_noise_std) for i in range(n_models)])
 
         print('num resnet params:', sum(p.numel() for p in self.conv_model[0].parameters()) * n_models)
         print('num fc ensemble params:', sum(p.numel() for p in self.fc_layers[0].parameters()) * n_models)
@@ -857,6 +889,10 @@ class ResnetEnsemble2(torch.nn.Module):
         if mu_prior is not None:
             self.anchor_models = [[copy.deepcopy(self.conv_model[i]).to(device), copy.deepcopy(self.fc_layers[i]).to(device)] for i in range(n_models)] 
             self.generate_new_anchors()
+
+    def set_fixed_noise_std(self, fixed_noise_std):
+        for nn in self.fc_layers:
+            nn.set_fixed_noise_std(fixed_noise_std)
 
     def generate_new_anchors(self):
         with torch.no_grad():
@@ -984,23 +1020,20 @@ class ResnetEnsemble2(torch.nn.Module):
         labels, 
         means, 
         variances, 
-        custom_std=None,
         return_mse=False,
     ):
         return NNEnsemble.compute_negative_log_likelihood(
                 labels,
                 means,
                 variances,
-                custom_std,
                 return_mse,
                 )
 
     @staticmethod
-    def report_metric(labels, means, variances, custom_std=None, return_mse=False):
+    def report_metric(labels, means, variances, return_mse=False):
         return NNEnsemble.fc_layers(
                 labels,
                 means,
                 variances,
-                custom_std,
                 return_mse
                 )

@@ -2629,7 +2629,7 @@ def get_info_ack(
                 #true_labels=labels, 
                 greedy_ordering=params.mves_greedy, 
                 pred_weighting=params.pred_weighting, 
-                normalize=True, 
+                normalize=params.normalize_hsic, 
                 divide_by_std=params.divide_by_std, 
                 opt_weighting=None,
                 min_hsic_increase=params.min_hsic_increase,

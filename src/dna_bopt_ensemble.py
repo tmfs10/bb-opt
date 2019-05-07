@@ -8,10 +8,7 @@ sys.path.append('/cluster/sj1/bb_opt/src')
 
 parser = argparse.ArgumentParser()
 parsing.add_parse_args(parser)
-parsing.add_parse_args_nongrad(parser)
-parsing.add_parse_args_ensemble(parser)
 parsing.add_parse_args_wrongness(parser)
-parsing.add_parse_imdbwiki_args(parser)
 
 params = parsing.parse_args(parser)
 
@@ -343,7 +340,7 @@ for task_iter in range(len(task_name)):
 
         zero_gamma_model = None
         if params.project in ['imdb', 'wiki']:
-            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -359,7 +356,7 @@ for task_iter in range(len(task_name)):
                 unseen_idx=unseen_idx,
                 )
         else:
-            logging, best_gamma, data_split_rng, zero_gamma_model, init_model = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -383,17 +380,22 @@ for task_iter in range(len(task_name)):
 
     with torch.no_grad():
         init_model.eval()
+        if params.mse_mode:
+            init_model.set_fixed_noise_std(cur_rmse)
+            if zero_gamma_model is not None:
+                assert zero_logging is not None
+                zero_gamma_model.set_fixed_noise_std(zero_logging[1]['val']['rmse'])
+
         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
                 init_model, 
                 X, 
                 params.re_train_batch_size,
                 progress_bar=params.progress_bar,
                 ) # (num_candidate_points, num_samples)
-        if params.unseen_reg != "normal":
-            if zero_gamma_model is not None:
-                zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
-                zero_gamma_pred_means = zero_gamma_pred_means.detach()
-                zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
+        if zero_gamma_model is not None:
+            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
+            zero_gamma_pred_means = zero_gamma_pred_means.detach()
+            zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
 
         ind_top_ood_pred_stats = bopt.get_ind_top_ood_pred_stats(
                 pre_ack_pred_means,
@@ -418,7 +420,7 @@ for task_iter in range(len(task_name)):
                 )
         print('test_pred_stats:', pprint.pformat(test_pred_stats))
 
-        if params.unseen_reg != "normal" and params.report_zero_gamma:
+        if params.report_zero_gamma:
             if zero_gamma_model is not None:
                 zero_gamma_test_pred_stats = bopt.get_pred_stats(
                         zero_gamma_pred_means[:, test_idx],
@@ -463,7 +465,7 @@ for task_iter in range(len(task_name)):
                     train_Y=train_Y_cur,
                     )
             print('ood_pred_stats:', pprint.pformat(ood_pred_stats))
-            if params.unseen_reg != "normal" and params.report_zero_gamma:
+            if params.report_zero_gamma:
                 if zero_gamma_model is not None:
                     zero_gamma_ood_pred_stats = bopt.get_pred_stats(
                             zero_gamma_ood_preds_means,
@@ -490,7 +492,7 @@ for task_iter in range(len(task_name)):
             'ood_pred_stats': ood_pred_stats,
             'test_pred_stats': test_pred_stats,
             }
-        if params.report_zero_gamma and params.unseen_reg != "normal":
+        if params.report_zero_gamma:
             to_save_dict['zero_gamma_test_pred_stats'] = zero_gamma_test_pred_stats
             to_save_dict['zero_gamma_ood_pred_stats'] = zero_gamma_ood_pred_stats
 
@@ -819,7 +821,7 @@ for task_iter in range(len(task_name)):
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -834,7 +836,7 @@ for task_iter in range(len(task_name)):
                             unseen_idx=unseen_idx,
                             )
                     else:
-                        logging, best_gamma, data_split_rng, zero_gamma_model, cur_model = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -858,6 +860,12 @@ for task_iter in range(len(task_name)):
 
                     with torch.no_grad():
                         cur_model.eval()
+                        if params.mse_mode:
+                            cur_model.set_fixed_noise_std(cur_rmse)
+                            if zero_gamma_model is not None:
+                                assert zero_logging is not None
+                                zero_gamma_model.set_fixed_noise_std(zero_logging[1]['val']['rmse'])
+
                         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
                         pre_ack_pred_means = pre_ack_pred_means.detach()
                         pre_ack_pred_vars = pre_ack_pred_vars.detach()

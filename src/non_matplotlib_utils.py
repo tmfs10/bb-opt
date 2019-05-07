@@ -123,6 +123,29 @@ def jointplot(
     return ax
 
 
+def dfs_exhaustive_search(branching_values):
+    branching_indices = [0]*branching_values
+    m = len(branching_values)
+    assert m == len(branching_indices)
+
+    while branching_indices[0] != len(branching_values[0]):
+        values = [branching_values[branching_indices[i]] for i in range(m)]
+        carry = True
+        for i in reversed(range(m)):
+            n = len(branching_values[i])
+            if carry:
+                branching_indices[i] += 1
+                assert branching_indices[i] <= n
+                if branching_indices[i] < n:
+                    carry = False
+                else:
+                    branching_indices[i] = 0
+            else:
+                break
+        yield values
+
+
+
 def collated_expand(X, num_samples):
     X = X.unsqueeze(1)
     X = X.repeat([1] + [num_samples] + [1] * (len(X.shape) - 2)).view(
@@ -283,4 +306,3 @@ def load_data_wiki_sid(
     inputs = np.moveaxis(image, -1, 1)
 
     return inputs, labels, gender
-
