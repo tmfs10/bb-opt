@@ -32,7 +32,7 @@
 --num_train_val_splits 1
 --combine_train_val True
 --gamma_cutoff False
---fixed_num_epoch_iters 100
+--fixed_num_epoch_iters 0
 --report_zero_gamma False
 
 --num_hidden 100
@@ -94,7 +94,7 @@
 --ood_pred_batch_size 1000
 --stdout_file stdout
 
---infotype hsic
+--infotype corr
 --infomax_weight 0
 --infomax_npoints 0
 

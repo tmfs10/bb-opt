@@ -1237,8 +1237,11 @@ def acquire_batch_mves_sid(
         assert best_idx_dist_matrix is not None
         assert best_idx is not None
         best_hsic_vec += [best_hsic]
-        if len(best_hsic_vec) > 1 and best_hsic_vec[-1] < best_hsic_vec[-2]+min_hsic_increase:
-            break
+        percentage_hsic_increase = True
+        if len(best_hsic_vec) > 1:
+            target_hsic_improvement = best_hsic_vec[-2]*(1.+min_hsic_increase) if percentage_hsic_increase else best_hsic_vec[-2]+min_hsic_increase
+            if best_hsic_vec[-1] < target_hsic_improvement:
+                break
 
         batch_dist_matrix = best_idx_dist_matrix
         best_hsic_overall = best_hsic
@@ -2517,10 +2520,9 @@ def get_noninfo_ack(
                 device=params.device)
     elif "pdts" in ack_fun:
         cur_ack_idx = set()
-        er_sortidx = np.argsort(er)
         sorted_preds_idx = []
         for i in range(preds.shape[0]):
-            sorted_preds_idx += [np.argsort(preds[i].numpy())]
+            sorted_preds_idx += [np.argsort(preds[i].cpu().numpy())[::-1]]
         sorted_preds_idx = np.array(sorted_preds_idx)
         if "density" in ack_fun:
             counts = np.zeros(sorted_preds_idx.shape[1])
@@ -2537,11 +2539,13 @@ def get_noninfo_ack(
                 if len(cur_ack_idx) >= ack_batch_size:
                     break
         else:
-            assert ack_fun == "pdts", ack_fun
-            for i_model in range(sorted_preds_idx.shape[0]):
+            assert ack_fun == "pdts_ucb", ack_fun
+            indices = [i for i in range(sorted_preds_idx.shape[0])]
+            random.shuffle(indices)
+            for i_model in indices:
                 for idx in sorted_preds_idx[i_model]:
                     idx2 = int(idx)
-                    if idx2 not in cur_ack_idx:
+                    if idx2 not in cur_ack_idx and idx2 not in skip_idx:
                         cur_ack_idx.update({idx2})
                         break
                 if len(cur_ack_idx) >= ack_batch_size:
