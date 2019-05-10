@@ -11,12 +11,13 @@
 --log_all_train_iter False
 --reset_model_every_iter True
 --ack_model_init_mode finetune
---ack_change_stat_logging True
+--ack_change_stat_logging False
 --ack_hsic_stat_logging False
 --empirical_ack_change_stat_logging False
 
 --num_ood_to_eval 0 
 --num_ind_to_eval 0 
+--num_test_points 0
 
 --exclude_top 0.1
 --init_train_examples 200
@@ -104,3 +105,8 @@
 
 --pairwise_corr_diversity False
 --pairwise_corr_diversity_mean_weighted False
+
+--loss_fn nll
+
+--bottom_skip_frac 0.
+--batch_fill ucb

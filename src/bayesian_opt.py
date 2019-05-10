@@ -2493,7 +2493,13 @@ def get_noninfo_ack(
         assert params.num_diversity >= 1
         cur_ack_idx = []
         num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
-        for idx in er_sortidx[::-1]:
+        if params.bottom_skip_frac > 0.:
+            num_points = er_sortidx.shape[0]
+            selection_points = er_sortidx[-int((1-params.bottom_skip_frac)*num_points):]
+            np.random.shuffle(selection_points)
+        else:
+            selection_points = er_sortidx[::-1]
+        for idx in selection_points:
             if idx not in skip_idx:
                 cur_ack_idx += [idx]
             if len(cur_ack_idx) >= num_to_select:
@@ -2542,9 +2548,14 @@ def get_noninfo_ack(
             assert ack_fun == "pdts_ucb", ack_fun
             indices = [i for i in range(sorted_preds_idx.shape[0])]
             random.shuffle(indices)
+            if params.bottom_skip_frac > 0.:
+                num_points = er_sortidx.shape[0]
+                selection_points = set(er_sortidx[-int((1-params.bottom_skip_frac)*num_points):].tolist())
             for i_model in indices:
                 for idx in sorted_preds_idx[i_model]:
                     idx2 = int(idx)
+                    if params.bottom_skip_frac > 0. and idx2 not in selection_points:
+                        continue
                     if idx2 not in cur_ack_idx and idx2 not in skip_idx:
                         cur_ack_idx.update({idx2})
                         break
@@ -2560,7 +2571,7 @@ def get_noninfo_ack(
 
 def get_info_ack(
     params, 
-    preds, 
+    preds, # (num_ensemble, num_points)
     ack_batch_size,
     skip_idx,
     labels,
@@ -2576,7 +2587,6 @@ def get_info_ack(
         
         top_k = params.num_diversity
 
-        sorted_preds_idx = torch.sort(preds)[1].cpu().numpy()
         #f.write('diversity\t' + str(len(set(sorted_preds_idx[:, -top_k:].flatten()))) + "\n")
         sorted_preds = torch.sort(preds, dim=1)[0]    
         #best_pred = preds.max(dim=1)[0].view(-1)
@@ -2615,6 +2625,34 @@ def get_info_ack(
             er_sortidx = np.argsort(er)
             er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
             best_pred = sorted_preds[:, -top_k:]
+        elif params.measure == 'corr':
+            best_pred = sorted_preds[:, -top_k:]
+            er_sortidx = np.argsort(er)
+            num_points = er_sortidx.shape[0]
+            selection_points = er_sortidx[-int((1-params.bottom_skip_frac)*num_points):]
+            num_points = selection_points.shape[0]
+            batch_size = params.mves_compute_batch_size
+
+            corr = torch.zeros(num_points)
+
+            for bi in range(num_points//batch_size+1):
+                bs = bi*batch_size
+                be = min((bi+1)*batch_size, num_points)
+                points = selection_points[bs:be]
+                cross_corr_matrix = ops.cross_corrcoef(best_pred, preds[:, points])
+                corr[bs:be] = cross_corr_matrix.mean(0)
+
+            corr_sortidx = np.argsort(corr.cpu().numpy())[::-1]
+            ack_idx = []
+            for idx in corr_sortidx:
+                if idx in skip_idx:
+                    continue
+                if idx in ack_idx:
+                    continue
+                ack_idx += [idx]
+                if len(ack_idx) >= ack_batch_size:
+                    break
+            return ack_idx
         else:
             assert False
 
@@ -2622,12 +2660,18 @@ def get_info_ack(
         #f.write('best_pred.shape\t' + str(best_pred.shape))
 
         print('best_pred:', best_pred.mean(0).mean(), best_pred.std(0).mean())
+        if params.bottom_skip_frac > ops._eps:
+            num_points = er_sortidx.shape[0]
+            bottom_points = er_sortidx[:int(params.bottom_skip_frac*num_points)]
+            hsic_skip_idx = skip_idx.union(bottom_points.tolist())
+        else:
+            hsic_skip_idx = skip_idx
 
         condense_idx, best_hsic = acquire_batch_mves_sid(
                 params,
                 best_pred, 
                 preds, 
-                skip_idx, 
+                hsic_skip_idx,
                 params.mves_compute_batch_size, 
                 ack_batch_size, 
                 #true_labels=labels, 
@@ -2640,23 +2684,41 @@ def get_info_ack(
                 double=True,
                 )
 
-        print('er_idx', er_idx)
-        print('condense_idx', condense_idx)
+        #print('er_idx', er_idx)
+        print('len(condense_idx)', len(condense_idx))
         print('intersection size', len(set(condense_idx).intersection(set(er_idx.tolist()))))
 
-        if len(condense_idx) < ack_batch_size:
-            for idx in er_idx[::-1]:
-                idx = int(idx)
-                if len(condense_idx) >= ack_batch_size:
+        if params.batch_fill == "ucb":
+            if len(condense_idx) < ack_batch_size:
+                for idx in er_idx[::-1]:
+                    idx = int(idx)
+                    if len(condense_idx) >= ack_batch_size:
+                        break
+                    if idx in condense_idx and idx not in skip_idx:
+                        continue
+                    condense_idx += [idx]
+        elif params.batch_fill == "pdts":
+            sorted_preds_idx = torch.sort(preds, dim=-1, descending=True)[1].cpu().numpy()
+            indices = [i for i in range(sorted_preds_idx.shape[0])]
+            fill_idx = set()
+            for i in range(sorted_preds_idx.shape[1]):
+                if len(fill_idx)+len(condense_idx) >= ack_batch_size:
                     break
-                if idx in condense_idx and idx not in skip_idx:
-                    continue
-                condense_idx += [idx]
-        assert len(condense_idx) == ack_batch_size
+                for i_model in indices:
+                    idx = int(sorted_preds_idx[i_model][i])
+                    if idx not in fill_idx and idx not in condense_idx and idx not in skip_idx:
+                        fill_idx.update({idx})
+                        break
+                    if len(fill_idx)+len(condense_idx) >= ack_batch_size:
+                        break
+            condense_idx += list(fill_idx)
+        else:
+            assert False, params.batch_fill + " batch_fill not implemented"
+        assert len(condense_idx) == ack_batch_size, len(condense_idx)
         assert len(set(condense_idx)) == ack_batch_size
 
-        print('er_labels', labels[er_idx])
-        print('mves_labels', labels[list(condense_idx)])
+        #print('er_labels', labels[er_idx])
+        #print('mves_labels', labels[list(condense_idx)])
 
         print('best_hsic\t' + str(best_hsic))
 

@@ -98,7 +98,7 @@
 --infomax_weight 0
 --infomax_npoints 0
 
---bayesian_ensemble True
+--bayesian_ensemble False
 --bayesian_theta_prior_mu 0
 --bayesian_theta_prior_std 1
 
@@ -106,3 +106,7 @@
 
 --pairwise_corr_diversity False
 --pairwise_corr_diversity_mean_weighted True
+
+--loss_fn nll
+
+--bottom_skip_frac 0.

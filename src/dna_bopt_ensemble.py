@@ -28,6 +28,7 @@ import torch.distributions as tdist
 import numpy as np
 from scipy.stats import kendalltau, pearsonr
 import dna_bopt as dbopt
+import chemvae_bopt as cbopt
 import bayesian_opt as bopt
 import active_learning as al
 import pandas as pd
@@ -84,6 +85,9 @@ if params.project == 'dna_binding':
 elif params.project in ['imdb', 'wiki']:
     task_name += [params.project]
     sample_uniform_fn = dbopt.image_sample_uniform
+elif params.project == 'chemvae':
+    task_name += [params.project]
+    sample_uniform_fn = None
 
 if params.stdout_file != "stdout":
     orig_stdout = sys.stdout
@@ -112,6 +116,14 @@ for task_iter in range(len(task_name)):
     if params.project == 'dna_binding':
         inputs = np.load(params.data_dir + "/" + task_name[task_iter] + "/inputs.npy").astype(np.float32)
         labels = np.load(params.data_dir + "/" + task_name[task_iter] + "/labels.npy").astype(np.float32)
+        if params.take_log:
+            labels = np.log(labels)
+
+        X = torch.tensor(inputs, device=device)
+        Y = torch.tensor(labels, device=device)
+    elif params/project == 'chemvae':
+        inputs = np.load(params.data_dir + "/chemvae_inputs.npy").astype(np.float32)
+        labels = np.load(params.data_dir + "/chemvae_labels.npy").astype(np.float32)
         if params.take_log:
             labels = np.log(labels)
 
@@ -146,6 +158,8 @@ for task_iter in range(len(task_name)):
 
         ood_X = torch.tensor(ood_inputs, device=device)
         ood_Y = torch.tensor(ood_labels, device=device)
+    else:
+        assert False, params.project + " is an unknown project"
 
     # file output dir
     file_output_dir = params.output_dir + "/" + task_name[task_iter]
@@ -380,12 +394,6 @@ for task_iter in range(len(task_name)):
 
     with torch.no_grad():
         init_model.eval()
-        if params.mse_mode:
-            init_model.set_fixed_noise_std(cur_rmse)
-            if zero_gamma_model is not None:
-                assert zero_logging is not None
-                zero_gamma_model.set_fixed_noise_std(zero_logging[1]['val']['rmse'])
-
         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
                 init_model, 
                 X, 
@@ -860,12 +868,6 @@ for task_iter in range(len(task_name)):
 
                     with torch.no_grad():
                         cur_model.eval()
-                        if params.mse_mode:
-                            cur_model.set_fixed_noise_std(cur_rmse)
-                            if zero_gamma_model is not None:
-                                assert zero_logging is not None
-                                zero_gamma_model.set_fixed_noise_std(zero_logging[1]['val']['rmse'])
-
                         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
                         pre_ack_pred_means = pre_ack_pred_means.detach()
                         pre_ack_pred_vars = pre_ack_pred_vars.detach()

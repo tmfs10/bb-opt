@@ -53,7 +53,7 @@ class PropertyPredictor(nn.Module):
         self.params = params
         activation = get_activation(params.prop_activation)
 
-        num_inputs = params.prop_pred_num_input_features + params.prop_pred_num_random_inputs
+        num_inputs = params.prop_pred_num_input_feature
         net = [nn.Linear(num_inputs, params.prop_pred_num_hidden), activation()]
         if params.prop_pred_dropout > 0:
             net += [nn.Dropout(params.prop_pred_dropout)]
@@ -75,8 +75,7 @@ class PropertyPredictor(nn.Module):
         net += [nn.Linear(num_inputs, 1)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z):
-        x = torch.cat([x, z], dim=1)
+    def forward(self, x):
         for h in self.net:
             x = h(x)
         return x

@@ -11,3 +11,5 @@
 --ack_fun info
 --num_models 20
 --hsic_kernel_fn mixrbf_kernels
+--bottom_skip_frac 0.
+--batch_fill ucb

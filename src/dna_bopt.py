@@ -702,9 +702,11 @@ def choose_best_model(
         choose_type,
         nll_criterion,
         kt_corr,
+        rmse,
         best_measure,
         best_nll,
         best_kt_corr,
+        best_rmse,
         train_mean_of_means,
         val_mean_of_means,
         val_Y,
@@ -722,6 +724,11 @@ def choose_best_model(
             if "kt_corr" in choose_type:
                 best_found = True
                 best_measure = best_kt_corr
+        if rmse < best_rmse:
+            best_rmse = rmse
+            if "rmse" in choose_type:
+                best_found = True
+                best_measure = best_rmse
         if "classify" in choose_type:
             kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
             mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
@@ -735,8 +742,10 @@ def choose_best_model(
             if best_measure is None or best_measure < measure:
                 best_measure = measure
                 best_found = True
+    else:
+        assert False, choose_type + " not implemented"
 
-    return best_found, best_nll, best_kt_corr, best_measure
+    return best_found, best_nll, best_kt_corr, best_rmse, best_measure
 
 
 def knn_density(train_x, x, k=5, true_max=False):
@@ -968,6 +977,7 @@ def train_ensemble(
         best_nll = float('inf')
         best_epoch_iter = -1
         best_kt_corr = -2.
+        best_rmse = float('inf')
         best_measure = None
         best_model = None
         best_optim = None
@@ -1027,13 +1037,18 @@ def train_ensemble(
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            nll = model_ensemble.compute_negative_log_likelihood(
-                    bY,
-                    means, 
-                    variances,
-                    return_mse=False)
-
-            loss = nll
+            if params.loss_fn == "nll":
+                nll = model_ensemble.compute_negative_log_likelihood(
+                        bY,
+                        means, 
+                        variances,
+                        return_mse=False)
+                loss = nll
+            elif params.loss_fn == "mse":
+                mse = (bY - means) ** 2
+                loss = mse
+            else:
+                assert False, params.loss_fn + " not implemented"
             loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             if old_model_ensemble is not None:
@@ -1179,13 +1194,15 @@ def train_ensemble(
 
             if num_epoch_iters is None:
                 assert val_X is not None
-                best_found, best_nll, best_kt_corr, best_measure = choose_best_model(
+                best_found, best_nll, best_kt_corr, best_rmse, best_measure = choose_best_model(
                         choose_type,
                         nll_criterion,
                         val_kt_corr,
+                        val_rmse,
                         best_measure,
                         best_nll,
                         best_kt_corr,
+                        best_rmse,
                         train_mean_of_means,
                         val_mean_of_means,
                         val_Y,
