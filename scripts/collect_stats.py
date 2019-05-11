@@ -282,8 +282,12 @@ def prop_test(
             continue
 
         if paired_test:
-            if len(stat[0]) != len(stat[1]):
+            min_len = min(len(stat[0]), len(stat[1]))
+            print('Warning diff lengths:', len(stat[0]), len(stat[1]))
+            if min_len == 0:
                 continue
+            stat[0] = stat[0][:min_len]
+            stat[1] = stat[1][:min_len]
             assert len(stat[0]) == len(stat[1]), "%s == %s" % (len(stat[0]), len(stat[1]))
             ret = ttest_rel(stat[0], stat[1])
         else:

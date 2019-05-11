@@ -2482,6 +2482,7 @@ def get_noninfo_ack(
     preds, 
     ack_batch_size,
     skip_idx,
+    best_so_far=None,
     ack_iter_info=dict(),
 ):
     with torch.no_grad():
@@ -2515,6 +2516,17 @@ def get_noninfo_ack(
             temp = utils.randint(num_to_select, ack_batch_size)
             cur_ack_idx = np.array(cur_ack_idx)[temp].tolist()
         assert len(cur_ack_idx) == ack_batch_size
+    elif "ei" in ack_fun:
+        assert best_so_far is not None
+        cur_ack_idx = []
+        ei = torch.max(preds-best_so_far, torch.tensor(0., device=preds.device)).mean(dim=0).view(-1).cpu().numpy()
+        print('best_so_far ei', best_so_far.item(), ei.max())
+        ei_sortidx = np.argsort(ei)
+        for idx in ei_sortidx[::-1]:
+            if len(cur_ack_idx) >= ack_batch_size:
+                break
+            if idx not in skip_idx:
+                cur_ack_idx += [idx]
     elif "hsic" in ack_fun:
         num_to_select = int(math.ceil(ack_batch_size * params.num_diversity))
         cur_ack_idx = er_diversity_selection_hsic(

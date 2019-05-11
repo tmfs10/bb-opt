@@ -682,6 +682,7 @@ for task_iter in range(len(task_name)):
                                     ack_batch_size,
                                     skip_idx_cur,
                                     ack_iter_info=ack_iter_info,
+                                    best_so_far=train_Y_cur.max(),
                                     )
                         else:
                             assert False, params.ack_fun + " not implemented"
@@ -1026,6 +1027,7 @@ for task_iter in range(len(task_name)):
                             ir_rel_opt_value = idx_to_rel_opt_value[ir_sortidx[-1]]
 
                         print('best so far:', labels[best_so_far_idx])
+                        print('regret:', ack_rel_opt_value, ir_rel_opt_value)
                         temp = {
                             'ack_rel_opt_value': ack_rel_opt_value,
                             'ir_batch_cur': torch.from_numpy(ir),
