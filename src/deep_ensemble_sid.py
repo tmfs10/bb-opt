@@ -21,6 +21,7 @@ from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, 
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.networks.wide_resnet_sid import Wide_ResNet
 import bayesian_opt as bopt
+import sys
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -32,6 +33,29 @@ def sample_uniform(out_size):
     return out_data
 
 class NN(torch.nn.Module):
+    """
+    Single-layer MLP that predicts a Gaussian for each point.
+    """
+
+    def __init__(self, n_inputs: int, n_hidden: int, min_variance: float = 1e-5):
+        super().__init__()
+        self.hidden = Linear(n_inputs, n_hidden)
+        self.output = Linear(n_hidden, 2)
+        self.non_linearity = ReLU()
+        self.softplus = Softplus()
+        self.min_variance = min_variance
+
+    def forward(self, x):
+        hidden = self.non_linearity(self.hidden(x))
+        output = self.output(hidden)
+        mean =torch.sigmoid(output[:,0])
+        variance =torch.sigmoid(output[:,1])*0.1+self.min_variance
+        #variance =torch.sigmoid(output[:,1])*0.01+self.min_variance
+        #mean = output[:, 0]
+        #variance = self.softplus(output[:, 1]) + self.min_variance
+        return mean, variance
+
+class NN_bk(torch.nn.Module):
     def __init__(self, 
             n_inputs: int, 
             n_hidden: int, 
@@ -195,7 +219,7 @@ class NNEnsemble(torch.nn.Module):
         n_models,
         model_generator,
         model_kwargs_generator,
-        device='cuda',
+        device=None,
         adversarial_epsilon=None,
         mu_prior=None,
         std_prior=None,
@@ -224,12 +248,11 @@ class NNEnsemble(torch.nn.Module):
             ]
         )
         self.adversarial_epsilon = adversarial_epsilon
-
         self.mu_prior = mu_prior
         self.std_prior = std_prior
         self.anchor_models = []
         if mu_prior is not None:
-            self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models] 
+            self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models]
             self.generate_new_anchors()
 
     def generate_new_anchors(self):
@@ -256,13 +279,13 @@ class NNEnsemble(torch.nn.Module):
             for j in range(n_params):
                 l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
-        return torch.sum(torch.tensor(l2))
+        return torch.sum(torch.tensor(l2).cuda())
 
     def reset_parameters(self):
         for model in self.models:
             model.reset_parameters()
 
-    def forward(self, x, individual_predictions: bool = True, all_pairs: bool = True):
+    def forward_old(self, x, individual_predictions: bool = True, all_pairs: bool = True):
         if not all_pairs:
             N = x.shape[0]
             m = len(self.models)
@@ -285,6 +308,25 @@ class NNEnsemble(torch.nn.Module):
             variances = torch.cat(variances, dim=0)
 
             return means, variances
+    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True):
+        if y is not None and self.adversarial_epsilon is not None:
+            x.requires_grad_()
+            means, variances = self(x)
+            negative_log_likelihood = self.compute_negative_log_likelihood(
+                y, means, variances
+            )
+
+            grad = torch.autograd.grad(
+                negative_log_likelihood, x, retain_graph=optimizer is not None
+            )[0]
+            x = x.detach() + self.adversarial_epsilon * torch.sign(grad)
+
+            if optimizer:
+                # then do a backward pass on x as well as returning the prediction
+                # for x_adv to do a pass on that
+                negative_log_likelihood.backward()
+                optimizer.step()
+                optimizer.zero_grad()
 
         means, variances = list(zip(*[self.models[i](x) for i in range(self.n_models)]))
         means, variances = torch.stack(means), torch.stack(variances)
@@ -333,7 +375,7 @@ class NNEnsemble(torch.nn.Module):
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
-
+        print(negative_log_likelihood,file=sys.stderr) 
         if return_mse:
             mse = mse.mean(dim=-1).mean()
             return negative_log_likelihood, mse
@@ -373,6 +415,24 @@ class NNEnsemble(torch.nn.Module):
             return negative_log_likelihood1, negative_log_likelihood2, mse_m.mean()
         return negative_log_likelihood1, negative_log_likelihood2
 
+    def report_metric_sb(
+        labels, means, variances, custom_std=None, return_mse: bool = False
+    ):  
+        if custom_std is not None:
+            variances = torch.tensor(custom_std**2).cuda()
+        m = means.mean(dim=0)
+        v = (variances + means ** 2).mean(dim=0)-m ** 2
+        mse_m= (labels - m) ** 2
+        mse = (labels - means) ** 2
+        negative_log_likelihood1 = 0.5 * (torch.log(variances) + mse / variances)
+        negative_log_likelihood1 = negative_log_likelihood1.mean(dim=-1).mean()
+        negative_log_likelihood2 = 0.5*(torch.log(v)+ mse_m/v)
+        negative_log_likelihood2 = negative_log_likelihood2.mean()
+
+        if return_mse:
+            return negative_log_likelihood1,negative_log_likelihood2, mse_m.mean()
+        return negative_log_likelihood1,negative_log_likelihood2
+
     @staticmethod
     def compute_weighted_nll(labels, means, variances, return_mse: bool = False):
         mse = (labels - means) ** 2
@@ -389,10 +449,11 @@ class NNEnsemble(torch.nn.Module):
     def get_model(
         cls,
         n_inputs: int,
+        batch_size: int = 200,
         n_models: int = 5,
         n_hidden: int = 100,
         adversarial_epsilon: Optional = None,
-        device='cuda',
+        device=None,
         nonlinearity_names: Sequence[str] = None,
         extra_random: bool = False,
         single_layer:bool = True,
@@ -401,14 +462,14 @@ class NNEnsemble(torch.nn.Module):
         mu_prior=None,
         std_prior=None,
     ):
+        device = device or "cpu"
         assert not extra_random, "Not implemented"
-
         if not extra_random:
             model_kwargs = {
                     "n_inputs": n_inputs, 
                     "n_hidden": n_hidden, 
-                    "sigmoid_coeff": sigmoid_coeff, 
-                    "separate_mean_var": separate_mean_var,
+                    #"sigmoid_coeff": sigmoid_coeff, 
+                    #"separate_mean_var": separate_mean_var,
                    }
             if single_layer:
                 model = cls(

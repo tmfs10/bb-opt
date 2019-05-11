@@ -251,6 +251,12 @@ class NNEnsemble(BOModel, torch.nn.Module):
         return mean, variance
 
 #    def reset()
+    def compute_negative_correlation(means):
+        m=means.mean(dim=0)
+        diff=means-m
+        cov=torch.mm(diff,diff.t())/means.size()[1]
+        mask = cov * (1-torch.eye(means.size()[0]))
+        return mask.sum()
 
     def compute_ind_negative_log_likelihood(
         labels, means, variances, return_mse: bool = False
