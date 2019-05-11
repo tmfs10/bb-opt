@@ -275,16 +275,18 @@ def ensemble_forward(model, X, batch_size, jupyter=False, progress_bar=True):
 
     out_means = []
     out_vars = []
-    for bi in progress:
-        bs = batches[bi]
-        be = batches[bi+1]
-        bN = be-bs
-        if bN <= 0:
-            continue
+    with torch.no_grad():
+        for bi in progress:
+            bs = batches[bi]
+            be = batches[bi+1]
+            bN = be-bs
+            if bN <= 0:
+                continue
 
-        out = model(X[bs:be])
-        out_means += [out[0].transpose(0, 1)]
-        out_vars += [out[1].transpose(0, 1)]
+            out = model(X[bs:be])
+            torch.cuda.empty_cache()
+            out_means += [out[0].transpose(0, 1)]
+            out_vars += [out[1].transpose(0, 1)]
 
     out_means = torch.cat(out_means, dim=0).transpose(0, 1)
     out_vars = torch.cat(out_vars, dim=0).transpose(0, 1)

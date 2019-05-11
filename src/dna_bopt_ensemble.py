@@ -121,7 +121,7 @@ for task_iter in range(len(task_name)):
 
         X = torch.tensor(inputs, device=device)
         Y = torch.tensor(labels, device=device)
-    elif params/project == 'chemvae':
+    elif params.project == 'chemvae':
         inputs = np.load(params.data_dir + "/chemvae_inputs.npy").astype(np.float32)
         labels = np.load(params.data_dir + "/chemvae_labels.npy").astype(np.float32)
         if params.take_log:
@@ -223,6 +223,18 @@ for task_iter in range(len(task_name)):
                 mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
                 std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
                 )
+    elif params.project == "chemvae":
+        model_kwargs = {
+                "params": params, 
+                "num_inputs": inputs.shape[1],
+               }
+        init_model = NNEnsemble(
+                params.num_models,
+                cbopt.PropertyPredictor,
+                model_kwargs,
+                device=params.device,
+                )
+        init_model = init_model.to(params.device)
     elif params.project in ["wiki", "imdb"]:
         init_model = ResnetEnsemble2(
                 params,
@@ -236,6 +248,8 @@ for task_iter in range(len(task_name)):
                 mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
                 std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
                 ).to(params.device)
+    else:
+        assert False, params.project + " project not implemented"
     untrained_model = copy.deepcopy(init_model)
 
     ensemble_init_rng = ops.get_rng_state()
@@ -397,11 +411,15 @@ for task_iter in range(len(task_name)):
         pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
                 init_model, 
                 X, 
-                params.re_train_batch_size,
+                params.ensemble_forward_batch_size,
                 progress_bar=params.progress_bar,
                 ) # (num_candidate_points, num_samples)
         if zero_gamma_model is not None:
-            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(zero_gamma_model, X, params.re_train_batch_size)
+            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(
+                    zero_gamma_model, 
+                    X, 
+                    params.ensemble_forward_batch_size
+                    )
             zero_gamma_pred_means = zero_gamma_pred_means.detach()
             zero_gamma_pred_vars = zero_gamma_pred_vars.detach()
 
@@ -451,7 +469,7 @@ for task_iter in range(len(task_name)):
             ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(
                     init_model, 
                     ood_X, 
-                    params.init_train_batch_size,
+                    params.ensemble_forward_batch_size,
                     progress_bar=params.progress_bar,
                     ) # (num_candidate_points, num_samples)
 
@@ -459,7 +477,7 @@ for task_iter in range(len(task_name)):
                 zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(
                         zero_gamma_model, 
                         ood_X, 
-                        params.init_train_batch_size
+                        params.ensemble_forward_batch_size
                         )
                 zero_gamma_ood_preds_means = zero_gamma_ood_preds_means.detach()
                 zero_gamma_ood_preds_vars = zero_gamma_ood_preds_vars.detach()
@@ -868,7 +886,7 @@ for task_iter in range(len(task_name)):
 
                     with torch.no_grad():
                         cur_model.eval()
-                        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.re_train_batch_size) # (num_candidate_points, num_samples)
+                        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
                         pre_ack_pred_means = pre_ack_pred_means.detach()
                         pre_ack_pred_vars = pre_ack_pred_vars.detach()
                         assert pre_ack_pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_pred_means.shape), str(Y.shape))
@@ -903,7 +921,7 @@ for task_iter in range(len(task_name)):
                         if ood_inputs is not None:
                             assert ood_labels is not None
                             assert ood_inputs.shape[0] == ood_labels.shape[0]
-                            ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.init_train_batch_size) # (num_candidate_points, num_samples)
+                            ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
                             ood_pred_stats = bopt.get_pred_stats(
                                     ood_preds_means,
                                     torch.sqrt(ood_preds_vars),
@@ -984,6 +1002,7 @@ for task_iter in range(len(task_name)):
                     # inference regret computation using retrained ensemble
                     if params.mode == "bayes_opt":
                         s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
+                                params,
                                 cur_model,
                                 X,
                                 labels,

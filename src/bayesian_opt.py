@@ -6,6 +6,7 @@ import sys
 import numpy as np
 import math
 import pandas as pd
+from deep_ensemble_sid import ensemble_forward
 from sklearn.model_selection import train_test_split
 from scipy.stats import kendalltau, pearsonr
 from rdkit.Chem import MolFromSmiles
@@ -1989,13 +1990,19 @@ def get_ind_top_ood_pred_stats(
     return stats
 
 def compute_ir_regret_ensemble(
+        params,
         model_ensemble,
         X,
         Y,
         ack_all,
         ack_batch_size,
 ):
-    preds, _ = model_ensemble(X) # (num_candidate_points, num_samples)
+    preds, _ = ensemble_forward(
+            model_ensemble, 
+            X, 
+            params.ensemble_forward_batch_size,
+            progress_bar=params.progress_bar,
+            ) # (num_candidate_points, num_samples)
     preds = preds.detach()
     ei = preds.mean(dim=0).view(-1).cpu().numpy()
     ei_sortidx = np.argsort(ei)[-50:]
@@ -2524,6 +2531,34 @@ def get_noninfo_ack(
                 skip_idx, 
                 num_ucb=num_to_select,
                 device=params.device)
+    elif "er_pdts" in ack_fun:
+        cur_ack_idx = set()
+        sorted_preds_idx = []
+        for i in range(preds.shape[0]):
+            sorted_preds_idx += [np.argsort(preds[i].cpu().numpy())[::-1]]
+        sorted_preds_idx = np.array(sorted_preds_idx)
+        indices = [i for i in range(sorted_preds_idx.shape[0])]
+        random.shuffle(indices)
+        if params.bottom_skip_frac > 0.:
+            num_points = er_sortidx.shape[0]
+            selection_points = set(er_sortidx[-int((1-params.bottom_skip_frac)*num_points):].tolist())
+        for i_model in indices:
+            for idx in sorted_preds_idx[i_model]:
+                idx2 = int(idx)
+                if params.bottom_skip_frac > 0. and idx2 not in selection_points:
+                    continue
+                if idx2 not in cur_ack_idx and idx2 not in skip_idx:
+                    cur_ack_idx.update({idx2})
+                    break
+            if len(cur_ack_idx) >= ack_batch_size-params.num_diversity:
+                break
+        for idx in er_sortidx[::-1]:
+            if len(cur_ack_idx) >= ack_batch_size:
+                break
+            if idx in cur_ack_idx or idx in skip_idx:
+                continue
+            cur_ack_idx.update({idx})
+        cur_ack_idx = list(cur_ack_idx)
     elif "pdts" in ack_fun:
         cur_ack_idx = set()
         sorted_preds_idx = []

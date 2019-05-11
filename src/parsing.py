@@ -118,6 +118,7 @@ def add_parse_args(parser):
     parser.add_argument('--empirical_stat_val_fraction', type=float)
     parser.add_argument('--report_zero_gamma', type=str2bool)
     parser.add_argument('--loss_fn', type=verify_loss_fn)
+    parser.add_argument('--ensemble_forward_batch_size', type=int)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -227,6 +228,14 @@ def add_parse_args(parser):
     # ensemble args
     parser.add_argument('--num_models', type=int, help='number of models in ensemble')
     parser.add_argument('--adv_epsilon', type=float, help='adversarial epsilon')
+
+    # chemvae args
+    parser.add_argument('--chemvae_prop_activation', type=str)
+    parser.add_argument('--chemvae_prop_pred_num_hidden', type=int)
+    parser.add_argument('--chemvae_prop_pred_dropout', type=float01)
+    parser.add_argument('--chemvae_prop_pred_depth', type=int)
+    parser.add_argument('--chemvae_prop_pred_growth_factor', type=float)
+    parser.add_argument('--chemvae_prop_batchnorm', type=str2bool)
 
 def add_parse_args_wrongness(parser):
     parser.add_argument('--predict_ood', type=str2bool)

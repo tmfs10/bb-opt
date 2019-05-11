@@ -17,6 +17,7 @@ from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
 import torch.distributions as tdist
 from itertools import cycle
+from tqdm import tnrange, trange
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.networks.wide_resnet_sid import Wide_ResNet
@@ -30,6 +31,41 @@ def sample_uniform(out_size):
     z[range(8*out_size),np.random.randint(4,size=8*out_size)] = 1
     out_data = torch.from_numpy(z).view((-1,32)).float().cuda()
     return out_data
+
+def ensemble_forward(model, X, batch_size, jupyter=False, progress_bar=True):
+    N = X.shape[0]
+    num_batches = N//batch_size+1
+    batches = [i*batch_size  for i in range(num_batches)] + [N]
+
+    if progress_bar:
+        if jupyter:
+            progress = tnrange(num_batches)
+        else:
+            progress = trange(num_batches)
+        progress.set_description(f"ens_for")
+    else:
+        progress = range(num_batches)
+
+    out_means = []
+    out_vars = []
+    with torch.no_grad():
+        for bi in progress:
+            bs = batches[bi]
+            be = batches[bi+1]
+            bN = be-bs
+            if bN <= 0:
+                continue
+
+            out = model(X[bs:be])
+            torch.cuda.empty_cache()
+            out_means += [out[0].transpose(0, 1)]
+            out_vars += [out[1].transpose(0, 1)]
+
+    out_means = torch.cat(out_means, dim=0).transpose(0, 1)
+    out_vars = torch.cat(out_vars, dim=0).transpose(0, 1)
+
+    return out_means.contiguous(), out_vars.contiguous()
+
 
 class NN(torch.nn.Module):
     def __init__(self, 
