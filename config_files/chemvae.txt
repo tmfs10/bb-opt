@@ -1,0 +1,13 @@
+
+--project chemvae
+--take_log False
+
+--mves_compute_batch_size 3000
+--ensemble_forward_batch_size 1000
+
+--chemvae_prop_activation relu
+--chemvae_prop_pred_num_hidden 67
+--chemvae_prop_pred_dropout 0.15694573998898703
+--chemvae_prop_pred_depth 3
+--chemvae_prop_pred_growth_factor 0.99028340731314179
+--chemvae_prop_batchnorm True

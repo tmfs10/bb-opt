@@ -39,12 +39,20 @@ def verify_model_update_mode(mode):
             ]
     return mode
 
+def verify_loss_fn(loss):
+    loss = loss.lower().strip()
+    assert loss in [
+            "nll",
+            "mse",
+            ]
+    return loss
+
 
 def verify_choose_type(choose_type):
     choose_type = [k.lower() for k in choose_type.split(',')]
     #assert len(choose_type) == 3, choose_type
     assert choose_type[0] in ["val", "train", "last"], choose_type
-    assert choose_type[1] in ["nll", "kt_corr", "classify", "bopt"], choose_type
+    assert choose_type[1] in ["nll", "kt_corr", "classify", "bopt", "rmse"], choose_type
     assert choose_type[2] in ["ind", "ood"], choose_type
     return choose_type
 
@@ -109,6 +117,8 @@ def add_parse_args(parser):
     parser.add_argument('--empirical_diversity_only', type=str2bool)
     parser.add_argument('--empirical_stat_val_fraction', type=float)
     parser.add_argument('--report_zero_gamma', type=str2bool)
+    parser.add_argument('--loss_fn', type=verify_loss_fn)
+    parser.add_argument('--ensemble_forward_batch_size', type=int)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -138,10 +148,6 @@ def add_parse_args(parser):
     parser.add_argument('--suffix', type=str)
     parser.add_argument('--num_test_tfs', type=int)
 
-    # bopt params
-    parser.add_argument('--ack_batch_size', type=int)
-    parser.add_argument('--num_acks', type=int)
-
     # predictor params
     parser.add_argument('--predict_mi', type=str2bool)
     parser.add_argument('--predict_stddev', type=str2bool)
@@ -156,11 +162,22 @@ def add_parse_args(parser):
     parser.add_argument('--bayesian_theta_prior_std', type=float)
 
     # infomax loss
+    parser.add_argument('--infotype', type=str)
     parser.add_argument('--infomax_npoints', type=int)
     parser.add_argument('--infomax_weight', type=float)
 
+    # pairwise_corr_diversity loss
+    parser.add_argument('--pairwise_corr_diversity', type=str2bool)
+    parser.add_argument('--pairwise_corr_diversity_mean_weighted', type=str2bool)
 
-def add_parse_args_nongrad(parser):
+    # b-opt
+    parser.add_argument('--ack_batch_size', type=int)
+    parser.add_argument('--num_acks', type=int)
+    parser.add_argument('--measure', type=strlower, help="mves/ei_mves_mix/ei_condense/ei_pdts_mix/cma_es")
+    parser.add_argument('--normalize_hsic', type=str2bool)
+    parser.add_argument('--hsic_kernel_fn', type=str)
+
+    # b-opt/al non-grad args
     parser.add_argument('--ack_fun', type=strlower, 
             help="none/hsic/detk/pdts_ucb/var")
     parser.add_argument('--ucb', type=float, help="stddev coeff")
@@ -177,6 +194,7 @@ def add_parse_args_nongrad(parser):
     parser.add_argument('--langevin_lr', type=float)
     parser.add_argument('--langevin_beta', type=float, help="inverse temp")
 
+    # info ack args
     parser.add_argument('--mves_greedy', type=str2bool, 
             help="use only first HSIC ordering, not sequential")
     parser.add_argument('--compare_w_old', type=str2bool, help="Build batch with replacement")
@@ -184,40 +202,40 @@ def add_parse_args_nongrad(parser):
             help="weight hsic; 1 - multiply by batch ei, 2 - add batch ei and multiply batch ei std")
     parser.add_argument('--divide_by_std', type=str2bool, 
             help="divide normalized hsic by hsic stddev")
-    parser.add_argument('--measure', type=strlower, 
-            help="mves/ei_mves_mix/ei_condense/ei_pdts_mix/cma_es")
     parser.add_argument('--mves_compute_batch_size', type=int)
-    parser.add_argument('--hsic_kernel_fn', type=str)
     parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
-    parser.add_argument('--normalize_hsic', type=str2bool)
+    parser.add_argument('--bottom_skip_frac', type=float01)
+    parser.add_argument('--batch_fill', type=str)
 
-
-def add_parse_imdbwiki_args(parser):
+    # imdbwiki args
     parser.add_argument('--resnet_depth', type=int)
     parser.add_argument('--resnet_width_factor', type=int)
     parser.add_argument('--resnet_dropout', type=float)
     parser.add_argument('--train_gender', type=int) # 0 female, 1 male, 2 both
     parser.add_argument('--resnet_do_batch_norm', type=str2bool)
 
-
-def add_parse_args_grad(parser):
+    # b-opt grad search args
     parser.add_argument('--input_opt_lr', type=float)
     parser.add_argument('--input_opt_num_iter', type=int)
     parser.add_argument('--hsic_opt_lr', type=float)
     parser.add_argument('--hsic_opt_num_iter', type=int)
-    parser.add_argument('--normalize_hsic', type=str2bool)
     parser.add_argument('--ack_num_model_samples', type=int)
-    parser.add_argument('--measure', type=strlower)
-    parser.add_argument('--hsic_kernel_fn', type=str)
     parser.add_argument('--hsic_diversity_lambda', type=float)
     parser.add_argument('--sparse_hsic_penalty', type=float)
     parser.add_argument('--sparse_hsic_threshold', type=float)
     parser.add_argument('--hsic_condense_penalty', type=float, nargs=2)
 
-
-def add_parse_args_ensemble(parser):
+    # ensemble args
     parser.add_argument('--num_models', type=int, help='number of models in ensemble')
     parser.add_argument('--adv_epsilon', type=float, help='adversarial epsilon')
+
+    # chemvae args
+    parser.add_argument('--chemvae_prop_activation', type=str)
+    parser.add_argument('--chemvae_prop_pred_num_hidden', type=int)
+    parser.add_argument('--chemvae_prop_pred_dropout', type=float01)
+    parser.add_argument('--chemvae_prop_pred_depth', type=int)
+    parser.add_argument('--chemvae_prop_pred_growth_factor', type=float)
+    parser.add_argument('--chemvae_prop_batchnorm', type=str2bool)
 
 def add_parse_args_wrongness(parser):
     parser.add_argument('--predict_ood', type=str2bool)
@@ -244,6 +262,4 @@ def parse_args(parser):
             continue
         args_dict[k] = v
 
-    if args.unseen_reg == "normal":
-        args.gammas = [0.0]
     return args

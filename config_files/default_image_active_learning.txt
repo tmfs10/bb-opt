@@ -39,6 +39,7 @@
 --num_train_val_splits 1
 --combine_train_val True
 --gamma_cutoff False
+--mse_mode False
 
 --resnet_depth 4
 --resnet_width_factor 2
@@ -93,9 +94,19 @@
 
 --predict_ood False
 
+--infotype corr
 --infomax_weight 0
 --infomax_npoints 0
 
---bayesian_ensemble True
+--bayesian_ensemble False
 --bayesian_theta_prior_mu 0
 --bayesian_theta_prior_std 1
+
+--hsic_kernel_fn mixrbf_kernels
+
+--pairwise_corr_diversity False
+--pairwise_corr_diversity_mean_weighted True
+
+--loss_fn nll
+
+--bottom_skip_frac 0.

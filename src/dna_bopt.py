@@ -275,16 +275,18 @@ def ensemble_forward(model, X, batch_size, jupyter=False, progress_bar=True):
 
     out_means = []
     out_vars = []
-    for bi in progress:
-        bs = batches[bi]
-        be = batches[bi+1]
-        bN = be-bs
-        if bN <= 0:
-            continue
+    with torch.no_grad():
+        for bi in progress:
+            bs = batches[bi]
+            be = batches[bi+1]
+            bN = be-bs
+            if bN <= 0:
+                continue
 
-        out = model(X[bs:be])
-        out_means += [out[0].transpose(0, 1)]
-        out_vars += [out[1].transpose(0, 1)]
+            out = model(X[bs:be])
+            torch.cuda.empty_cache()
+            out_means += [out[0].transpose(0, 1)]
+            out_vars += [out[1].transpose(0, 1)]
 
     out_means = torch.cat(out_means, dim=0).transpose(0, 1)
     out_vars = torch.cat(out_vars, dim=0).transpose(0, 1)
@@ -678,36 +680,35 @@ def record_stats_ensemble(
     X,
     Y,
 ):
-    means, variances = model(X)
-    means = means.detach()
-    variances = variances.detach()
+    with torch.no_grad():
+        means, variances = model(X)
+        means = means.detach()
+        variances = variances.detach()
 
-    custom_std = None
-    if params.fixed_noise_std > ops._eps:
-        custom_std = params.fixed_noise_std
+        nll1, nll2 = NNEnsemble.report_metric(
+                Y,
+                means,
+                variances,
+                return_mse=False)
+        se = (means.mean(dim=0)-Y)**2
+        rmse = torch.sqrt(torch.mean(se)).detach().item()
+        std = means.std(0).mean().detach().item()
+        mean_of_means = means.mean(dim=0).detach()
+        assert mean_of_means.shape == Y.shape, "%s == %s" % (mean_of_means.shape, Y.shape)
+        kt_corr = kendalltau(mean_of_means.cpu(), Y.cpu())[0]
 
-    nll1, nll2 = NNEnsemble.report_metric(
-            Y,
-            means,
-            variances,
-            custom_std=custom_std,
-            return_mse=False)
-    rmse = torch.sqrt(torch.mean((means.mean(dim=0)-Y)**2)).detach().item()
-    std = means.std(0).mean().detach().item()
-    mean_of_means = means.mean(dim=0).detach()
-    assert mean_of_means.shape == Y.shape, "%s == %s" % (mean_of_means.shape, Y.shape)
-    kt_corr = kendalltau(mean_of_means.cpu(), Y.cpu())[0]
-
-    return rmse, std, kt_corr, nll1.item(), nll2.item(), mean_of_means
+        return rmse, std, kt_corr, nll1.item(), nll2.item(), mean_of_means
 
 
 def choose_best_model(
         choose_type,
         nll_criterion,
         kt_corr,
+        rmse,
         best_measure,
         best_nll,
         best_kt_corr,
+        best_rmse,
         train_mean_of_means,
         val_mean_of_means,
         val_Y,
@@ -725,6 +726,11 @@ def choose_best_model(
             if "kt_corr" in choose_type:
                 best_found = True
                 best_measure = best_kt_corr
+        if rmse < best_rmse:
+            best_rmse = rmse
+            if "rmse" in choose_type:
+                best_found = True
+                best_measure = best_rmse
         if "classify" in choose_type:
             kt_labels = [0]*train_mean_of_means.shape[0] + [1]*val_mean_of_means.shape[0]
             mean_preds = torch.cat([train_mean_of_means, val_mean_of_means], dim=0)
@@ -738,330 +744,10 @@ def choose_best_model(
             if best_measure is None or best_measure < measure:
                 best_measure = measure
                 best_found = True
-
-    return best_found, best_nll, best_kt_corr, best_measure
-
-
-def train_ensemble2(
-    params,
-    batch_size,
-    num_epochs,
-    data,
-    model_ensemble,
-    optim,
-    choose_type,
-    unseen_reg="normal",
-    gamma=0.0,
-    normalize_fn=None,
-    num_epoch_iters=None,
-    val_frac=0.1,
-    early_stopping=10,
-    adv_alpha=1.0,
-    adv_epsilon=0.0,
-    predict_info_models=None,
-    hsic_custom_kernel=None,
-    data_split_rng=None,
-    jupyter=False,
-    ood_val_frac=0.0,
-    sample_uniform_fn=None,
-    unseen_idx=None,
-):
-    with torch.no_grad():
-        do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
-
-        adv_train = adv_epsilon > 1e-9
-        train_X, train_Y, val_X, val_Y, X, Y = data
-        assert val_X is None
-        N = train_X.shape[0]
-        assert val_frac >= 0.01
-        assert val_frac <= 0.9
-
-        if num_epoch_iters is not None:
-            assert num_epoch_iters > 0
-        elif val_X is None:
-            train_X, train_Y, val_X, val_Y = make_validation_set(
-                    data, 
-                    choose_type,
-                    num_epoch_iters,
-                    val_frac,
-                    ood_val_frac,
-                    data_split_rng,
-                    )
-
-        train_Y, val_Y = normalize_for_training(
-                normalize_fn,
-                train_Y,
-                val_Y,
-                num_epoch_iters,
-                )
-
-        train_baseline_rmse, val_baseline_rmse, val_baseline_nll = compute_single_gaussian_baseline(train_Y)
-
-        N = train_X.shape[0]
-        print("training:")
-        print("%d num_train" % (N))
-        print(str(batch_size) + " batch_size")
-        print(str(num_epochs) + " num_epochs")
-        print(str(gamma) + " gamma")
-
-        num_batches = N//batch_size+1
-        batches = [i*batch_size  for i in range(num_batches)] + [N]
-
-        train_kt_corrs = []
-        val_kt_corrs = []
-        train_nlls = []
-        val_nlls = [[], []]
-        val_rmses = []
-        train_rmses = []
-        train_std = []
-        val_std = []
-        best_val_indv_rmse = None
-
-        if progress_bar:
-            if jupyter:
-                progress = tnrange(num_epochs)
-            else:
-                progress = trange(num_epochs)
-        else:
-            progress = range(num_epochs)
-
-        best_nll = float('inf')
-        best_epoch_iter = -1
-        best_kt_corr = -2.
-        best_measure = None
-        best_model = None
-        best_optim = None
-
-        time_since_last_best_epoch = 0
-        logging = None
-
-    #print('point a0:', nvidia_smi())
-    for epoch_iter in progress:
-        if num_epoch_iters is not None and epoch_iter >= num_epoch_iters:
-            break
-        time_since_last_best_epoch += 1
-        model_ensemble.train()
-        for bi in range(num_batches):
-            bs = batches[bi]
-            be = batches[bi+1]
-            bN = be-bs
-            if bN <= 0:
-                continue
-
-            sampling_info = {}
-            with torch.no_grad():
-                bX = train_X[bs:be].detach()
-                bY = train_Y[bs:be].detach()
-
-                if params.unseen_reg != "normal" and params.sampling_dist == "uniform_bb":
-                    temp = bX.view(bX.shape[0], -1)
-                    min_px = temp.min(dim=0)[0]
-                    max_px = temp.max(dim=0)[0]
-                    sampling_info['min_px'] = min_px
-                    sampling_info['max_px'] = max_px
-
-            ood_data_batch_size = int(math.ceil(bN*params.ood_data_batch_factor))
-
-            #print('point a1:', nvidia_smi())
-            assert params.sampling_dist != "pom_fc_input"
-            means, variances = model_ensemble(bX)
-
-            optim.zero_grad()
-            assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            #print('point a2:', nvidia_smi())
-            nll = model_ensemble.compute_negative_log_likelihood(
-                    bY,
-                    means, 
-                    variances,
-                    custom_std=params.fixed_noise_std if params.fixed_noise_std > ops._eps else None,
-                    return_mse=False)
-            #print('point a3:', nvidia_smi())
-
-            loss = nll
-            loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
-
-            if unseen_reg != "normal" and gamma > 0.0:
-                out_data = sample_uniform_fn(ood_data_batch_size)
-                if params.langevin_sampling and gamma > 0.0:
-                    assert False, "not doing this for paper"
-                    model_ensemble.eval()
-                    num_features = out_data.shape[1]
-                    #xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
-                    #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                    out_data = langevin_sampling(
-                            params,
-                            out_data,
-                            langevin_mod_loss(model_ensemble, unseen_reg),
-                            )
-                    #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                    #print('std after:', means_o.std(dim=0).mean().item())
-                    model_ensemble.train()
-                means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-
-                loss += unseen_data_loss(
-                        means_o,
-                        variances_o,
-                        unseen_reg,
-                        gamma,
-                        means=means,
-                        )
-
-            if predict_info_models is not None:
-                s_idx = predict_info_models.sample_points(params.num_predict_sample_points)
-                with torch.no_grad():
-                    predictor_preds, _ = model_ensemble(X[s_idx])
-                old_stats = collect_stats_to_predict(
-                        params,
-                        Y[s_idx],
-                        predictor_preds,
-                        )
-
-                loss += old_stats['hsic']
-
-            optim.zero_grad()
-            loss.backward()
-            optim.step()
-            torch.cuda.empty_cache()
-            #print('point a4:', nvidia_smi())
-
-            if predict_info_models is not None:
-                for i in range(150):
-                    predict_info_models.optim.zero_grad()
-                    predictor_loss = predict_info_loss(
-                            params,
-                            model_ensemble,
-                            predict_info_models,
-                            bX,
-                            X[s_idx],
-                            Y[s_idx],
-                            old_stats,
-                            )
-                    predictor_loss.backward()
-                    predict_info_models.optim.step()
-
-        model_ensemble.eval()
-
-        with torch.no_grad():
-
-            train_rmse, train_std, train_kt_corr, _, _, train_mean_of_means = record_stats_ensemble(params, model_ensemble, train_X, train_Y)
-            train_rmses += [train_rmse]
-            train_std += [train_std]
-            train_kt_corrs += [train_kt_corr]
-            
-            if num_epoch_iters is None:
-                val_rmse, val_std, val_kt_corr, val_nll1, val_nll2, val_mean_of_means = record_stats_ensemble(params, model_ensemble, val_X, val_Y)
-                val_rmses += [val_rmse]
-                val_std += [val_std]
-                val_kt_corrs += [val_kt_corr]
-                val_nlls[0] += [val_nll1]
-                val_nlls[1] += [val_nll2]
-
-                nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
-
-                best_found, best_nll, best_kt_corr, best_measure = choose_best_model(
-                        choose_type,
-                        nll_criterion,
-                        val_kt_corr,
-                        best_measure,
-                        best_nll,
-                        best_kt_corr,
-                        train_mean_of_means,
-                        val_mean_of_means,
-                        val_Y,
-                        )
-
-                if best_found:
-                    time_since_last_best_epoch = 0
-                    best_epoch_iter = epoch_iter
-                    best_model = copy.deepcopy(model_ensemble.state_dict())
-
-                if params.progress_bar:
-                    progress.set_description(f"Corr: {val_kt_corr:.3f}")
-
-                if early_stopping > 0 and do_early_stopping and time_since_last_best_epoch > early_stopping:
-                    assert epoch_iter >= early_stopping
-                    break
-
-    if do_early_stopping and (num_epoch_iters is None):
-        if best_model is not None:
-            model_ensemble.load_state_dict(best_model)
-        else:
-            assert num_epochs == 0
-
-    if num_epochs == 0:
-        kt_corrs = [-1]
-        train_nlls = [-1]
-        train_rmses = [-1]
-        train_std = [-1]
-        val_kt_corrs = [-1]
-        val_nlls = [[-1], [-1]]
-        val_rmses = [-1]
-        val_std = [-1]
-
-    if num_epoch_iters is None:
-        print ('best_nll:', best_nll)
     else:
-        print ('end_nll:', float(val_nlls[1][-1]))
+        assert False, choose_type + " not implemented"
 
-    if num_epoch_iters is None:
-        logging =  [
-                {
-                'train' : {
-                    #'kt_corr': kt_corrs,
-                    #'nll': train_nlls,
-                    #'rmse': train_rmses,
-                    #'std': train_std,
-                    },
-                'val' : {
-                    'kt_corr': val_kt_corrs,
-                    'nll1': val_nlls[0],
-                    'nll2': val_nlls[1],
-                    'rmse': val_rmses,
-                    'std': val_std,
-                    },
-                'baseline': {
-                    'nll': val_baseline_nll,
-                    'rmse': val_baseline_rmse,
-                    'train_rmse': train_baseline_rmse,
-                    },
-                'best': {
-                    'nll': best_nll,
-                    'kt_corr': best_kt_corr,
-                    'epoch_iter': best_epoch_iter,
-                    'indv_rmse': best_val_indv_rmse,
-                    'measure': best_measure,
-                    },
-                },
-                {
-                'train' : {
-                    'kt_corr': float(kt_corrs[best_epoch_iter]),
-                    'nll': float(train_nlls[best_epoch_iter]),
-                    'rmse': float(train_rmses[best_epoch_iter]),
-                    'std': float(train_std[best_epoch_iter]),
-                    },
-                'val' : {
-                    'kt_corr': float(val_kt_corrs[best_epoch_iter]),
-                    'nll1': float(val_nlls[0][best_epoch_iter]),
-                    'nll2': float(val_nlls[1][best_epoch_iter]),
-                    'rmse': float(val_rmses[best_epoch_iter]),
-                    'std': float(val_std[best_epoch_iter]),
-                    },
-                'baseline': {
-                    'nll': val_baseline_nll,
-                    'rmse': val_baseline_rmse,
-                    'train_rmse': train_baseline_rmse,
-                    },
-                'best': {
-                    'nll': best_nll,
-                    'kt_corr': best_kt_corr,
-                    'epoch_iter': best_epoch_iter,
-                    'indv_rmse': best_val_indv_rmse,
-                    'measure': best_measure,
-                    },
-                },
-        ]
-
-    return logging, data_split_rng
+    return best_found, best_nll, best_kt_corr, best_rmse, best_measure
 
 
 def knn_density(train_x, x, k=5, true_max=False):
@@ -1097,7 +783,7 @@ def knn_density_max(train_x, x, k=5):
 
         return dist_sort
 
-def info_max_loss(
+def hsic_max_loss(
     params,
     X,
     unseen_idx,
@@ -1124,8 +810,59 @@ def info_max_loss(
 
     diff_hsic_matrix = cur_hsic_matrix-old_hsic_matrix
     penalty_matrix = -torch.tril(F.logsigmoid(diff_hsic_matrix*10), diagonal=-1)
+    loss = penalty_matrix.mean()
+    #print('hsic_max_loss', loss.item(), diff_hsic_matrix.mean().item())
 
-    return penalty_matrix.mean()
+    return loss
+
+
+def corr_max_loss(
+    params,
+    X,
+    unseen_idx,
+    old_model,
+    cur_model,
+):
+    n_points = params.infomax_npoints
+    assert n_points > 0
+    unseen_idx = random.sample(unseen_idx, n_points)
+    X = X[unseen_idx]
+    old_preds, _ = old_model(X) # (num ensemble members, num points)
+    cur_preds, _ = cur_model(X)
+
+    old_corr_matrix = ops.corrcoef(old_preds.transpose(0, 1))
+    cur_corr_matrix = ops.corrcoef(cur_preds.transpose(0, 1))
+
+    diff_corr_matrix = cur_corr_matrix-old_corr_matrix
+    penalty_matrix = -torch.tril(F.logsigmoid(diff_corr_matrix*100), diagonal=-1)
+    loss = penalty_matrix.mean()
+
+    return loss
+
+
+def pairwise_corr_diversity(
+    params,
+    means_o,
+):
+    means_o = means_o.transpose(0, 1)
+    corr = ops.corrcoef(means_o)
+    if params.pairwise_corr_diversity_mean_weighted:
+        means_en = means_o.mean(1)
+        means_en_product = means_en.unsqueeze(0) * means_en.unsqueeze(1)
+        corr = means_en_product * corr
+    return corr.mean()
+
+
+def pairwise_hsic_diversity(
+    params,
+    means_o,
+):
+    dist_matrix = hsic.sqdist(means_o)
+    kernel_fn = getattr(hsic, params.hsic_kernel_fn)
+
+    kernels = kernel_fn(dist_matrix) # (num ensemble members, num ensemble members, num points)
+    hsic_matrix = hsic.pairwise_hsic(kernels, include_self=False, normalized=True)
+    return hsic_matrix.mean()
 
 
 def train_ensemble(
@@ -1242,6 +979,7 @@ def train_ensemble(
         best_nll = float('inf')
         best_epoch_iter = -1
         best_kt_corr = -2.
+        best_rmse = float('inf')
         best_measure = None
         best_model = None
         best_optim = None
@@ -1301,18 +1039,23 @@ def train_ensemble(
 
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
-            nll = model_ensemble.compute_negative_log_likelihood(
-                    bY,
-                    means, 
-                    variances,
-                    custom_std=params.fixed_noise_std if params.fixed_noise_std > ops._eps else None,
-                    return_mse=False)
-
-            loss = nll
+            if params.loss_fn == "nll":
+                nll = model_ensemble.compute_negative_log_likelihood(
+                        bY,
+                        means, 
+                        variances,
+                        return_mse=False)
+                loss = nll
+            elif params.loss_fn == "mse":
+                mse = (bY - means) ** 2
+                loss = mse
+            else:
+                assert False, params.loss_fn + " not implemented"
             loss += model_ensemble.bayesian_ensemble_loss(params.fixed_noise_std)/bN
 
             if old_model_ensemble is not None:
-                loss += params.infomax_weight * info_max_loss(
+                info_fn = globals()[params.infotype + '_max_loss']
+                loss += params.infomax_weight * info_fn(
                         params,
                         X,
                         unseen_idx,
@@ -1321,7 +1064,7 @@ def train_ensemble(
                         )
 
             optim.zero_grad()
-            if unseen_reg != "normal" and gamma > 0.0:
+            if (unseen_reg != "normal" or params.pairwise_corr_diversity) and gamma > 0.0:
                 if isinstance(model_ensemble, ResnetEnsemble2):
                     model_ensemble.freeze_conv()
 
@@ -1376,14 +1119,23 @@ def train_ensemble(
                 else:
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
 
-                ood_loss = unseen_data_loss(
-                        means_o,
-                        variances_o,
-                        unseen_reg,
-                        gamma,
-                        means=means,
-                        o_weighting=weighting
-                        )
+                if params.pairwise_corr_diversity:
+                    ood_loss = gamma * pairwise_corr_diversity(
+                            params,
+                            means_o,
+                            )
+                elif params.unseen_reg != "normal":
+                    ood_loss = unseen_data_loss(
+                            means_o,
+                            variances_o,
+                            unseen_reg,
+                            gamma,
+                            means=means,
+                            o_weighting=weighting
+                            )
+
+                else:
+                    assert False, "Not implemented"
 
                 if isinstance(model_ensemble, ResnetEnsemble2):
                     ood_loss.backward(retain_graph=True)
@@ -1444,13 +1196,15 @@ def train_ensemble(
 
             if num_epoch_iters is None:
                 assert val_X is not None
-                best_found, best_nll, best_kt_corr, best_measure = choose_best_model(
+                best_found, best_nll, best_kt_corr, best_rmse, best_measure = choose_best_model(
                         choose_type,
                         nll_criterion,
                         val_kt_corr,
+                        val_rmse,
                         best_measure,
                         best_nll,
                         best_kt_corr,
+                        best_rmse,
                         train_mean_of_means,
                         val_mean_of_means,
                         val_Y,
@@ -1570,7 +1324,7 @@ def hyper_param_train(
 ):
     gamma_added = False
     regression = params.num_acks == 0
-    if unseen_reg == "normal":
+    if unseen_reg == "normal" and not params.pairwise_corr_diversity:
         gammas = [0.0]
     if report_zero_gamma and 0.0 not in gammas:
         gammas = [0.0] + gammas
@@ -1587,6 +1341,7 @@ def hyper_param_train(
 
     best_nll = float('inf')
     best_logging = None
+    zero_logging = None
 
     zero_gamma_nll = None
     zero_gamma_best_epoch_iter = None
@@ -1644,6 +1399,7 @@ def hyper_param_train(
                 zero_gamma_best_epoch_iter = best_cur_epoch_iter
                 zero_gamma_nll = float(val_nll_cur)
                 zero_gamma_model = copy.deepcopy(model_copy)
+                zero_logging = logging
 
             if gamma > 0.0 or not gamma_added:
                 if val_nll_cur < best_nll:
@@ -1739,7 +1495,7 @@ def hyper_param_train(
             assert best_gamma != 0.0
             assert zero_gamma_best_epoch_iter >= 0
             optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
-            _, _ = train_ensemble(
+            zero_logging, _ = train_ensemble(
                     params, 
                     train_batch_size,
                     train_epochs, 
@@ -1760,7 +1516,7 @@ def hyper_param_train(
         #print('point 5:', nvidia_smi())
         print('combine_train_val done')
 
-    return logging, best_gamma, data_split_rng, zero_gamma_model, best_gamma_model
+    return logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, best_gamma_model
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3
@@ -1784,208 +1540,6 @@ def one_hot_list_to_number(inputs, data=None):
     return data, data_dict
 
 
-
-def hyper_param_train2(
-    params,
-    model,
-    data,
-    stage,
-    gammas,
-    unseen_reg,
-    data_split_rng,
-    predict_info_models=None,
-    sample_uniform_fn=None,
-    normalize_fn=None,
-    report_zero_gamma_model=False,
-    num_epoch_iters=None,
-    unseen_idx=None,
-):
-    regression = params.num_acks == 0
-    best_nll = float('inf')
-    best_kt_corr = -2.
-    best_measure = None
-    best_model = None
-    best_optim = None
-    best_logging = None
-    best_gamma = None
-
-    train_batch_size = getattr(params, stage + "_train_batch_size")
-    train_epochs = getattr(params, stage + "_train_num_epochs")
-    lr = getattr(params, stage + "_train_lr")
-    l2 = getattr(params, stage + "_train_l2")
-
-    zero_gamma_best_epoch_iter = None
-    zero_gamma_model = None
-    zero_gamma_added = False
-    if report_zero_gamma_model and 0.0 not in gammas:
-        gammas = [0.0] + gammas
-        zero_gamma_added = True
-
-    best_epoch_iter = None
-    for gamma in gammas:
-        with torch.no_grad():
-            model_copy = copy.deepcopy(model)
-        if predict_info_models is not None:
-            predict_info_models.init_opt(params, train_idx, X.shape[0])
-        data_split_rng2 = copy.deepcopy(data_split_rng)
-        best_cur_epoch_iter = []
-        for split_iter in range(params.num_train_val_splits):
-            optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
-            #print('point 1:', nvidia_smi())
-            logging, data_split_rng2 = train_ensemble(
-                    params,
-                    train_batch_size,
-                    train_epochs, 
-                    data,
-                    model_copy,
-                    optim,
-                    choose_type=params.hyper_search_choose_type,
-                    unseen_reg=unseen_reg,
-                    gamma=gamma,
-                    normalize_fn=normalize_fn,
-                    val_frac=params.val_frac,
-                    early_stopping=params.early_stopping,
-                    predict_info_models=predict_info_models,
-                    data_split_rng=data_split_rng2,
-                    ood_val_frac=params.ood_val_frac,
-                    sample_uniform_fn=sample_uniform_fn,
-                    num_epoch_iters=num_epoch_iters,
-                    unseen_idx=unseen_idx,
-                    )
-            torch.cuda.empty_cache()
-            #print('point 2:', nvidia_smi())
-            best_cur_epoch_iter += [logging[1]['best']['epoch_iter']]
-            #print('best_epoch:', logging[1]['best']['epoch_iter'])
-
-        with torch.no_grad():
-            best_cur_epoch_iter = int(math.ceil(sum(best_cur_epoch_iter)/float(len(best_cur_epoch_iter))))
-            if gamma == 0.0:
-                zero_gamma_best_epoch_iter = best_cur_epoch_iter
-                if zero_gamma_added:
-                    continue
-
-            found_best = False
-            val_nll_cur = logging[1]['best']['nll']
-            val_kt_corr_cur = logging[1]['best']['kt_corr'] 
-            val_best_measure = logging[1]['best']['measure']
-
-            if "nll" in params.hyper_search_choose_type and val_nll_cur < best_nll:
-                best_nll = val_nll_cur
-                found_best = True
-            elif "kt_corr" in params.hyper_search_choose_type and val_kt_corr_cur > best_kt_corr:
-                best_kt_corr = val_kt_corr_cur
-                found_best = True
-            elif ("classify" in params.hyper_search_choose_type or "bopt" in params.hyper_search_choose_type) and (best_measure is None or val_best_measure > best_measure):
-                best_measure = val_best_measure
-                found_best = True
-
-            if params.gamma_cutoff:
-                if not found_best:
-                    break
-            if found_best:
-                best_logging = logging
-                best_gamma = gamma
-                best_epoch_iter = best_cur_epoch_iter
-
-    del optim
-    torch.cuda.empty_cache()
-    #print('point 3:', nvidia_smi())
-
-    data_split_rng = data_split_rng2
-    logging = best_logging
-
-    assert logging[0] is not None
-    assert logging[1] is not None
-    print('logging:', pprint.pformat(logging[1]))
-
-    assert best_epoch_iter is not None
-    assert best_gamma is not None
-    print('best gamma:', best_gamma)
-
-    train_X, train_Y, val_X, val_Y, X, Y = data
-
-    if params.combine_train_val and (not regression) and (val_X is None) and (num_epoch_iters is None):
-        if report_zero_gamma_model:
-            if best_gamma != 0.0:
-                zero_gamma_model = copy.deepcopy(model)
-
-        assert best_epoch_iter >= 0
-        print('combine_train_val')
-        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-        #print('point 4:', nvidia_smi())
-        _, _ = train_ensemble(
-                params, 
-                train_batch_size,
-                train_epochs, 
-                data,
-                model,
-                optim,
-                choose_type=params.final_train_choose_type,
-                unseen_reg=unseen_reg,
-                gamma=best_gamma,
-                normalize_fn=normalize_fn,
-                num_epoch_iters=best_epoch_iter+1,
-                predict_info_models=predict_info_models,
-                sample_uniform_fn=sample_uniform_fn,
-                unseen_idx=unseen_idx,
-                )
-        torch.cuda.empty_cache()
-
-        if report_zero_gamma_model and zero_gamma_model is not None:
-            assert best_gamma != 0.0
-            assert zero_gamma_best_epoch_iter >= 0
-            optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
-            _, _ = train_ensemble(
-                    params, 
-                    train_batch_size,
-                    train_epochs, 
-                    data,
-                    zero_gamma_model,
-                    optim,
-                    choose_type=params.final_train_choose_type,
-                    unseen_reg="normal",
-                    gamma=0.0,
-                    normalize_fn=normalize_fn,
-                    num_epoch_iters=zero_gamma_best_epoch_iter+1,
-                    predict_info_models=None,
-                    sample_uniform_fn=None,
-                    unseen_idx=unseen_idx,
-                    )
-            torch.cuda.empty_cache()
-
-        #print('point 5:', nvidia_smi())
-        print('combine_train_val done')
-    elif params.hyper_search_choose_type != params.final_train_choose_type:
-        assert False, "for paper we aren't doing this option"
-        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-        logging, data_split_rng2 = train_ensemble(
-                params,
-                train_batch_size,
-                train_epochs, 
-                data,
-                model,
-                optim,
-                choose_type=params.final_train_choose_type,
-                unseen_reg=unseen_reg,
-                gamma=best_gamma,
-                normalize_fn=normalize_fn,
-                val_frac=params.val_frac,
-                early_stopping=params.early_stopping,
-                predict_info_models=predict_info_models,
-                data_split_rng=data_split_rng2,
-                ood_val_frac=params.ood_val_frac,
-                sample_uniform_fn=sample_uniform_fn,
-                unseen_idx=unseen_idx,
-                )
-    else:
-        assert False, "for paper we aren't doing this option"
-        assert best_model is not None
-        model = best_model
-
-    if report_zero_gamma_model:
-        return logging, best_gamma, data_split_rng, zero_gamma_model
-    else:
-        return logging, best_gamma, data_split_rng
 
 def one_hot_list_to_number(inputs, data=None):
     assert len(inputs.shape) >= 3

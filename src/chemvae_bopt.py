@@ -48,118 +48,45 @@ class PropertyPredictorPaper(nn.Module):
 
 class PropertyPredictor(nn.Module):
 
-    def __init__(self, params):
+    def __init__(
+            self, 
+            params,
+            num_inputs, 
+            ):
         super(PropertyPredictor, self).__init__()
         self.params = params
-        activation = get_activation(params.prop_activation)
+        activation = get_activation(params.chemvae_prop_activation)
 
-        num_inputs = params.prop_pred_num_input_features + params.prop_pred_num_random_inputs
-        net = [nn.Linear(num_inputs, params.prop_pred_num_hidden), activation()]
-        if params.prop_pred_dropout > 0:
-            net += [nn.Dropout(params.prop_pred_dropout)]
+        net = [nn.Linear(num_inputs, params.chemvae_prop_pred_num_hidden), activation()]
+        if params.chemvae_prop_pred_dropout > 0:
+            net += [nn.Dropout(params.chemvae_prop_pred_dropout)]
 
-        if params.prop_pred_depth > 1:
-            num_inputs = params.prop_pred_num_hidden
-            for p_i in range(1, params.prop_pred_depth):
-                num_outputs = int(params.prop_pred_num_hidden * (params.prop_pred_growth_factor**p_i))
+        if params.chemvae_prop_pred_depth > 1:
+            num_inputs = params.chemvae_prop_pred_num_hidden
+            for p_i in range(1, params.chemvae_prop_pred_depth):
+                num_outputs = int(params.chemvae_prop_pred_num_hidden * (params.chemvae_prop_pred_growth_factor**p_i))
                 prop_mid = nn.Linear(num_inputs, num_outputs)
 
                 net += [prop_mid, activation()]
-                if params.prop_pred_dropout > 0:
-                    net += [nn.Dropout(params.prop_pred_dropout)]
-                if params.prop_batchnorm:
+                if params.chemvae_prop_pred_dropout > 0:
+                    net += [nn.Dropout(params.chemvae_prop_pred_dropout)]
+                if params.chemvae_prop_batchnorm:
                     net += [nn.BatchNorm1d(num_outputs)]
 
                 num_inputs = num_outputs
 
-        net += [nn.Linear(num_inputs, 1)]
+        net += [nn.Linear(num_inputs, 2)]
         self.net = nn.ModuleList(net)
 
-    def forward(self, x, z):
-        x = torch.cat([x, z], dim=1)
+    def forward(self, x):
         for h in self.net:
             x = h(x)
-        return x
+        means = x[:, 0]
+        variances = torch.sigmoid(x[:, 1])
+        return means, variances
 
     def input_shape(self):
-        return [self.params.prop_pred_num_input_features]
-
-
-def train(
-        params,
-        batch_size,
-        lr,
-        num_epochs,
-        hsic_lambda,
-        num_latent_samples,
-        data,
-        model,
-        qz,
-        e_dist,
-):
-    losses = []
-    kl_losses = []
-    hsic_losses = []
-
-    corrs = []
-    val_corrs = []
-
-    train_X, train_Y, val_X, val_Y = data
-
-    N = train_X.shape[0]
-    print("training:")
-    print(str(N) + " samples")
-    print(str(batch_size) + " batch_size")
-    print(str(num_epochs) + " num_epochs")
-
-    model_parameters = []
-    for m in [model, qz]:
-        model_parameters += list(m.parameters())
-    batches, optim = reparam.init_train(batch_size, lr, model_parameters, train_X, train_Y)
-    num_batches = len(batches)-1
-    print(str(num_batches) + " num_batches")
-
-    progress = tnrange(num_epochs)
-
-    for epoch_iter in progress:
-        for bi in range(num_batches):
-            bs = batches[bi]
-            be = batches[bi+1]
-            bN = be-bs
-            if bN <= 0:
-                continue
-
-            bX = train_X[bs:be]
-            bY = train_Y[bs:be]
-
-            for k in range(1):
-                e = reparam.generate_prior_samples(num_latent_samples, e_dist)
-                loss, log_prob_loss, kl_loss, hsic_loss, _, _ = reparam.compute_loss(params, batch_size, num_latent_samples, bX, bY, model, qz, e, hsic_lambda=hsic_lambda)
-
-                losses += [log_prob_loss]
-                kl_losses += [kl_loss]
-                hsic_losses += [hsic_loss]
-
-                optim.zero_grad()
-                loss.backward()
-                optim.step()
-
-        e = reparam.generate_prior_samples(num_latent_samples, e_dist)
-        preds = reparam.predict(train_X, model, qz, e)[:, :, 0].mean(1)
-        assert preds.shape == train_Y.shape, str(preds.shape) + " == " + str(train_Y.shape)
-
-        corrs.append(kendalltau(preds, train_Y)[0])
-
-        preds = reparam.predict(val_X, model, qz, e)[:, :, 0].mean(1)
-        assert preds.shape == val_Y.shape
-
-        val_corr = kendalltau(preds, val_Y)[0]
-
-        val_corrs.append(val_corr)
-        progress.set_description(f"Corr: {val_corr:.3f}")
-        progress.set_postfix({'hsic_loss' : hsic_losses[-1], 'kl_loss' : kl_losses[-1], 'log_prob_loss' : losses[-1], 'train_corr' : corrs[-1]})
-
-    return [losses, kl_losses, hsic_losses, corrs, val_corrs], optim
+        return [self.params.chemvae_prop_pred_num_input_features]
 
 
 def z_to_smiles(vae, z, decode_attempts=1000, noise_norm=1.0):

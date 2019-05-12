@@ -129,6 +129,7 @@ randint = non_matplotlib_utils.randint
 make_contiguous_idx = non_matplotlib_utils.make_contiguous_idx
 cumsub = non_matplotlib_utils.cumsub
 sqdist = non_matplotlib_utils.sqdist
+dfs_exhaustive_search = non_matplotlib_utils.dfs_exhaustive_search
 
 def jointplot(
     x,

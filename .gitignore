@@ -26,6 +26,7 @@ log/
 *.swo
 output_*
 chemical_vae
+plots
 
 # Do not include automake output
 autoscan.log

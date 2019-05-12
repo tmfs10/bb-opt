@@ -8,12 +8,13 @@ import seaborn as sns
 from scipy.stats import ttest_ind, ttest_rel, combine_pvalues
 
 
-def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False, mode="al"):
+def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_all_train_iter=False, mode="al", filenames_to_extract=None):
     if mode == "bayes_opt":
         stats_to_extract = [
                 'logging',
                 'ack_idx',
                 'ack_labels',
+                'idx_at_each_iter',
                 'ack_rel_opt_value',
                 'best_hsic',
                 'ir_batch_cur',
@@ -33,6 +34,7 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
         stats_to_extract = [
                 'logging',
                 'ack_idx',
+                'idx_at_each_iter',
                 'ack_labels',
                 'best_hsic',
                 'corr_stats',
@@ -55,6 +57,9 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
 
         stats += [{}]
         for filename in os.listdir(dirpath):
+            if filenames_to_extract is not None and filename not in filenames_to_extract:
+                continue
+
             filepath = dirpath + "/" + filename
             if not os.path.isdir(filepath):
                 continue
@@ -153,7 +158,7 @@ def plot_data_vs_ack_iter(
                 cur_stats = stats[filename][batch_size]
                 try:
                     cur_points = []
-                    start = 0
+                    start = 1
                     end = num_acks
                     if modd:
                         start = 1
@@ -162,6 +167,7 @@ def plot_data_vs_ack_iter(
                         cur_points += [data_extractor_fn(cur_stats[ack_iter], filename)]
                 except Exception as e:
                     print(ack_iter, i_sample)
+                    print(e)
                 #cur_points = cur_points + [cur_points[-1]]*(num_acks-len(cur_stats))
                 cur_points = np.array(cur_points)
                 if mode == 'no_avg':
@@ -181,6 +187,63 @@ def plot_data_vs_ack_iter(
             plt.legend(legend, loc=legend_loc)
         if save_path is not None:
             plt.savefig(save_path + "/" + title2.lower() + ".png", bbox_inches="tight")
+
+
+def uniform_baseline(
+    factor,
+    tf_labels,
+    batch_size,
+    filenames,
+    data_extractor_fn,
+    arrs,
+    exp,
+    ack_iter,
+    pval_threshold=0.05,
+):
+    count = 0
+    total = 0
+    print('comparing', arrs[exp][1])
+    pval_list = [[], []]
+    for filename in filenames:
+        stat = [[], []]
+        i=1
+        if len(arrs[exp][0]) == 0:
+            break
+        for stats in arrs[exp][0]:
+            if filename not in stats:
+                continue
+            if batch_size not in stats[filename]:
+                continue
+            cur_stats = stats[filename][batch_size]
+            if len(cur_stats) <= ack_iter:
+                continue
+            if exp == "ensemble7/o_none_ucb_maxvar_inverse_g000510204080_":
+                stat[i] += [data_extractor_fn(cur_stats[ack_iter+1], filename)]
+            else:
+                stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
+        if len(stat[1]) == 0:
+            continue
+        num_points = batch_size*(ack_iter+1)+len(cur_stats[ack_iter]['idx_at_each_iter'][0])
+        stat[0] += [np.exp(np.random.choice(tf_labels[filename], size=num_points*factor, replace=False).max()) for i in range(len(stat[1]))]
+
+        ret = ttest_ind(stat[0], stat[1], equal_var=False)
+        std = [np.std(stat[0]), np.std(stat[1])]
+        score = ret[0]
+        pval = ret[1]
+        if pval <= pval_threshold:
+            m = [np.mean(stat[0]), np.mean(stat[1])]
+            c = 1 if m[1] > m[0] else 0
+            count += c
+            total += 1
+            if c == 1:
+                pval_list[1] += [pval]
+            else:
+                pval_list[0] += [pval]
+            print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
+
+    print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
+    print('count: %d/%d' % (count, total))
+
 
 
 def prop_test(
@@ -216,11 +279,15 @@ def prop_test(
                 else:
                     stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
         if len(stat[0]) == 0 or len(stat[1]) == 0:
-            break
+            continue
 
         if paired_test:
-            if len(stat[0]) != len(stat[1]):
+            min_len = min(len(stat[0]), len(stat[1]))
+            print('Warning diff lengths:', len(stat[0]), len(stat[1]))
+            if min_len == 0:
                 continue
+            stat[0] = stat[0][:min_len]
+            stat[1] = stat[1][:min_len]
             assert len(stat[0]) == len(stat[1]), "%s == %s" % (len(stat[0]), len(stat[1]))
             ret = ttest_rel(stat[0], stat[1])
         else:
