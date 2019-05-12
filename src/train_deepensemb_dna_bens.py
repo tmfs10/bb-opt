@@ -56,10 +56,16 @@ if __name__ == "__main__":
 	args = parse_args()
 	#gpu_id = gpu_init()
 	torch.cuda.set_device(args.gpu)
-	if args.adverse_eps:
-		model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps,args.std))
+	if args.aleatoric=='homo':
+		if args.adverse_eps:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps,args.std))
+		else:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.std))
 	else:
-		model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.std))
+		if args.adverse_eps:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps))
+		else:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden))
 	print(model_path)
 	if exists(model_path.replace(".pth", ".txt")):
 		a=pd.read_csv(model_path.replace(".pth", ".txt"))
@@ -129,7 +135,7 @@ if __name__ == "__main__":
 			elif args.loss_type=="normal":
 				loss=lossterm#negative_log_likelihood
 			elif args.loss_type=="normal+at":
-				means_adv, variances_adv = model(inputs,labels)
+				means_adv, variances_adv = model(inputs,labels,custom_std=args.std if args.aleatoric=='homo' else None)
 				negative_log_likelihood_adv, mse_adv = NNEnsemble.compute_negative_log_likelihood(labels, means_adv, variances_adv,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
 				if args.aleatoric=='homo':
 					lossterm2=mse_adv
@@ -161,7 +167,7 @@ if __name__ == "__main__":
 			elif args.loss_type=='nc':
 				nc= NNEnsemble.compute_negative_correlation(means)
 				loss=lossterm+args.hyper*nc
-				train_newloss.append(var.item())
+				train_newloss.append(nc.item())
 			elif args.loss_type=='bayes':
 				#loss=negative_log_likelihood+model.bayesian_ensemble_loss(data_noise=torch.tensor(args.std).to(device))/inputs.shape[0]
 				loss=lossterm+model.bayesian_ensemble_loss(data_noise=torch.tensor(args.std).to(device))/inputs.shape[0]
@@ -172,7 +178,7 @@ if __name__ == "__main__":
 		with torch.no_grad():
 			means, variances = model(data.train.inputs)
 			#out_size=int(data.train.inputs.shape[0]*args.sample_size)
-			negative_log_likelihood1,negative_log_likelihood2, mse = NNEnsemble.report_metric_sb(data.train.labels, means,variances,custom_std=args.std if args.aleatoric=='homo' else None,return_mse=True)
+			negative_log_likelihood1,negative_log_likelihood2, mse = NNEnsemble.report_metric(data.train.labels, means,variances,custom_std=args.std if args.aleatoric=='homo' else None,return_mse=True)
 			loss=negative_log_likelihood1
 			var=(means.var(dim=0).mean())
 			myhist['train_var'].append(var.item())
@@ -183,19 +189,19 @@ if __name__ == "__main__":
 			means, variances = model(data.test.inputs)
 			var=(means.var(dim=0).mean())
 			myhist['test_var'].append(var.item())
-			negative_log_likelihood1,negative_log_likelihood2,mse = NNEnsemble.report_metric_sb(data.test.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
+			negative_log_likelihood1,negative_log_likelihood2,mse = NNEnsemble.report_metric(data.test.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
 			myhist['test_nll_mix'].append(negative_log_likelihood1.item())
 			myhist['test_nll'].append(negative_log_likelihood2.item())
 			myhist['test_mse'].append(mse.item())
 			means, variances = model(data.top.inputs)
 			var=(means.var(dim=0).mean())
 			myhist['top_var'].append(var.item())
-			negative_log_likelihood1,negative_log_likelihood2,mse = NNEnsemble.report_metric_sb(data.top.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
+			negative_log_likelihood1,negative_log_likelihood2,mse = NNEnsemble.report_metric(data.top.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
 			myhist['top_nll_mix'].append(negative_log_likelihood1.item())
 			myhist['top_nll'].append(negative_log_likelihood2.item())
 			myhist['top_mse'].append(mse.item())
 			means, variances = model(data.val.inputs)
-			negative_log_likelihood1,negative_log_likelihood2, mse = NNEnsemble.report_metric_sb(data.val.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
+			negative_log_likelihood1,negative_log_likelihood2, mse = NNEnsemble.report_metric(data.val.labels, means, variances,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True)
 			myhist['val_nll_mix'].append(negative_log_likelihood1.item())
 			myhist['val_nll'].append(negative_log_likelihood2.item())
 			myhist['val_mse'].append(mse.item())

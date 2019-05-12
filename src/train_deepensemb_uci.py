@@ -58,10 +58,17 @@ if __name__ == "__main__":
 	args = parse_args()
 	#gpu_id = gpu_init()
 	torch.cuda.set_device(args.gpu)
-	if args.adverse_eps:
-		model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps,args.std))
-	else:   
-		model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.std))
+	if args.aleatoric=='homo':
+		if args.adverse_eps:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps,args.std))
+		else:   
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}-{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.std))
+	else:
+		if args.adverse_eps:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps))
+		else:
+			model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden))
+
 	#model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset,args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps if args.adverse_eps else 0.0))
 	print(model_path)
 	if exists(model_path.replace(".pth", ".txt")):
@@ -92,7 +99,10 @@ if __name__ == "__main__":
 	train_loader = DataLoader(TensorDataset(data.train.inputs, data.train.labels),batch_size=batch_size,shuffle=True)
 	n_models = args.ensem_size
 	adversarial_epsilon = args.adverse_eps
-	model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device,extra_random=args.extra_random,single_layer=(args.single_layer=='Y'))
+	if args.loss_type=='bayes':
+		model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device,extra_random=args.extra_random,single_layer=(args.single_layer=='Y'))
+	else:
+		model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device=device,extra_random=args.extra_random,single_layer=(args.single_layer=='Y'))
 	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
 	myhist={'train_nll':[],'train_nll_mix':[],'train_mse':[],'train_loss':[],'train_var':[],'test_nll':[],'test_nll_mix':[],'test_mse':[],'test_var':[],'val_nll':[],'val_nll_mix':[],'val_mse':[],'top_nll':[],'top_nll_mix':[],'top_mse':[],'top_var':[]}
 	min_loss= float("inf")
@@ -112,53 +122,63 @@ if __name__ == "__main__":
 			means, variances = model(inputs)
 			if args.aleatoric=='homo':
 				negative_log_likelihood, mse = NNEnsemble.compute_negative_log_likelihood(labels, means, variances,custom_std=args.std,return_mse=True)
+				lossterm=mse
 			else:   
 				negative_log_likelihood, mse = NNEnsemble.compute_negative_log_likelihood(labels, means, variances,return_mse=True)
+				lossterm=negative_log_likelihood
 			#negative_log_likelihood, mse = NNEnsemble.compute_negative_log_likelihood(labels, means, variances, return_mse=True)
 			if args.loss_type=="maxvar":
 				out_data = sample_uniform(out_size,min_val,max_val)
 				means_o, variances_o = model(out_data)
 				var=(means_o.var(dim=0).mean())
-				loss=negative_log_likelihood-args.hyper*var
+				loss=lossterm-args.hyper*var
 				train_newloss.append(var.item())
 			elif args.loss_type=="defmean":
 				out_data = sample_uniform(out_size,min_val,max_val)
 				means_o, variances_o = model(out_data)
 				nll=NNEnsemble.compute_negative_log_likelihood(default_mean,means_o,variances_o,custom_std=args.std if args.aleatoric=='homo' else None)
-				loss=negative_log_likelihood+args.hyper*nll
+				loss=lossterm+args.hyper*nll
 				train_newloss.append(nll.item())
 			elif args.loss_type=="normal":
-				loss=negative_log_likelihood
+				loss=lossterm
 			elif args.loss_type=="normal+at":
 				means_adv, variances_adv = model(inputs,labels)
 				negative_log_likelihood_adv, mse_adv = NNEnsemble.compute_negative_log_likelihood(labels, means_adv, variances_adv,custom_std=args.std if args.aleatoric=='homo' else None, return_mse=True) 
-				loss=negative_log_likelihood+negative_log_likelihood_adv
+				if args.aleatoric=='homo':
+					lossterm2=mse_adv
+				else:
+					lossterm2=negative_log_likelihood_adv
+				loss=lossterm+lossterm2
 			elif args.loss_type=="invar":
 				var=(means.var(dim=0).mean())
-				loss=negative_log_likelihood-args.hyper*var
+				loss=lossterm-args.hyper*var
 				train_newloss.append(var.item())
 			elif args.loss_type=="2var":
 				out_data = sample_uniform(out_size)
 				means_o, variances_o = model(out_data)
 				var=(0.5*means_o.var(dim=0).mean())+(0.5*means.var(dim=0).mean())
-				loss=negative_log_likelihood-args.hyper*var
+				loss=lossterm-args.hyper*var
 				train_newloss.append(var.item())
 			elif args.loss_type=='idvar':
 				out_data = sample_uniform(out_size,min_val,max_val)
 				means_o, variances_o = model(out_data)
 				var=((means_o.var(dim=0)*knn_density(inputs,out_data,5)).mean())
 				#var=((means_o.var(dim=0)*knn_density_max(inputs,out_data,5)).mean())
-				loss=negative_log_likelihood-args.hyper*var
+				loss=lossterm-args.hyper*var
 				train_newloss.append(var.item())
 			elif args.loss_type=='idvar-max':
 				out_data = sample_uniform(out_size,min_val,max_val)
 				means_o, variances_o = model(out_data)
 				var=((means_o.var(dim=0)*knn_density_max(inputs,out_data,5)).mean())
-				loss=negative_log_likelihood-args.hyper*var
+				loss=lossterm-args.hyper*var
 				train_newloss.append(var.item())
+			elif args.loss_type=='nc':
+				nc= NNEnsemble.compute_negative_correlation(means)
+				loss=lossterm+args.hyper*nc
+				train_newloss.append(nc.item())
 			elif args.loss_type=='bayes':
                                 #loss=negative_log_likelihood+model.bayesian_ensemble_loss(data_noise=torch.tensor(args.std).to(device))/inputs.shape[0]
-				loss=mse+model.bayesian_ensemble_loss(data_noise=torch.tensor(args.std).to(device))/inputs.shape[0]
+				loss=lossterm+model.bayesian_ensemble_loss(data_noise=torch.tensor(args.std).to(device))/inputs.shape[0]
 				train_newloss.append(loss.item())
 
 			loss.backward()

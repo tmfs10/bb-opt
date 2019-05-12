@@ -361,6 +361,13 @@ class NNEnsemble(torch.nn.Module):
         mean = means.mean(dim=0)
         variance = (variances + means ** 2).mean(dim=0) - mean ** 2
         return mean, variance
+    
+    def compute_negative_correlation(means):
+        m=means.mean(dim=0)
+        diff=means-m
+        cov=torch.mm(diff,diff.t())/means.size()[1]
+        mask = cov * (1-torch.eye(means.size()[0]))
+        return mask.sum()
 
     @staticmethod
     def compute_negative_log_likelihood(
