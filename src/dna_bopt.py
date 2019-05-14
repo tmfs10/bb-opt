@@ -1047,7 +1047,7 @@ def train_ensemble(
                         return_mse=False)
                 loss = nll
             elif params.loss_fn == "mse":
-                mse = (bY - means) ** 2
+                mse = ((bY - means) ** 2).mean()
                 loss = mse
             else:
                 assert False, params.loss_fn + " not implemented"
@@ -1193,6 +1193,7 @@ def train_ensemble(
                 val_nlls[1] += [val_nll2]
 
                 nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
+                assert nll_criterion == nll_criterion
 
             if num_epoch_iters is None:
                 assert val_X is not None
@@ -1226,7 +1227,7 @@ def train_ensemble(
         if best_model is not None:
             model_ensemble.load_state_dict(best_model)
         else:
-            assert num_epochs == 0
+            assert num_epochs == 0 
 
     if num_epochs == 0:
         train_kt_corrs = [-1]
@@ -1330,7 +1331,7 @@ def hyper_param_train(
         gammas = [0.0] + gammas
         gamma_added = True
 
-    train_X, train_Y, val_X, val_Y, X, Y = data
+    train_X, train_Y, val_X, val_Y, _, _ = data
 
     do_hyper_param_search = len(gammas) > 1 or num_epoch_iters is None # search for gamma and/or early stopping point
     do_combine_train_val_training = params.combine_train_val and (val_X is None) and not regression 

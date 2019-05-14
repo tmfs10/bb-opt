@@ -130,6 +130,16 @@ def pearsonr(x, y):
     r_val = r_num / r_den
     return r_val
 
+def cov(x):
+    # calculate covariance matrix of rows
+    # (n, p) -> (n, n)
+    mean_x = x.mean(1, keepdim=True)
+    xm = x.sub(mean_x.expand_as(x))
+    c = xm.mm(xm.t())
+    c = c / (x.size(1) - 1)
+
+    return c
+
 def corrcoef(x):
     """
     Mimics `np.corrcoef`
@@ -156,11 +166,7 @@ def corrcoef(x):
         >>> np.allclose(np_corr, th_corr.numpy())
         # [out]: True
     """
-    # calculate covariance matrix of rows
-    mean_x = x.mean(1, keepdim=True)
-    xm = x.sub(mean_x.expand_as(x))
-    c = xm.mm(xm.t())
-    c = c / (x.size(1) - 1)
+    c = cov(x)
 
     # normalize covariance matrix
     d = torch.diag(c)
@@ -174,9 +180,10 @@ def corrcoef(x):
 
     return c
 
-def cross_corrcoef(x, y):
-    # x is (n, p), y is (n, q)
+def cross_cov(x, y):
+    # x is (n, p), y is (n, q) -> (p, q)
     # calculate covariance matrix of rows
+
     mean_x = x.mean(0, keepdim=True)
     mean_y = y.mean(0, keepdim=True)
     xm = x.sub(mean_x.expand_as(x))
@@ -184,6 +191,15 @@ def cross_corrcoef(x, y):
     c = xm.t().mm(ym)
     c = c / (x.size(0) - 1)
 
+    return c
+
+def cross_corrcoef(x, y):
+    # x is (n, p), y is (n, q) -> (p, q)
+    # calculate correlation matrix of rows
+
+    c = cross_cov(x, y)
+
+    # normalize
     x_std = x.std(0, keepdim=True).transpose(0, 1)
     y_std = y.std(0, keepdim=True)
     norm = x_std*y_std

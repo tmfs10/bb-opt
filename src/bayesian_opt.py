@@ -901,13 +901,11 @@ def er_diversity_selection_detk(
     params,
     preds, #(num_samples, num_candidate_points)
     skip_idx,
-    num_ucb=100,
-    device = 'cuda',
-    do_correlation=True,
+    ack_batch_size,
     add_I=True,
-    do_kernel=False,
 ):
-    ack_batch_size = params.ack_batch_size
+    assert False, "not implemented"
+    num_points = preds.shape[1]
 
     er = preds.mean(dim=0).view(-1)
     std = preds.std(dim=0).view(-1)
@@ -915,34 +913,20 @@ def er_diversity_selection_detk(
     er += params.ucb*std
     ucb = er
 
-    ucb_sortidx = torch.sort(ucb, descending=True)[1]
-    temp = []
-    for idx in ucb_sortidx:
-        if idx.item() not in skip_idx:
-            temp += [idx]
-        if len(temp) == num_ucb:
-            break
-    ucb_sortidx = torch.stack(temp) # len == m
-    ucb = ucb[ucb_sortidx]
-    ucb -= ucb.min()
-    ucb = ucb.cpu().numpy()
+    cur_ack_idx = [ucb.argmax().item()]
+    num_batches = num_points // params.mves_compute_batch_size + 1
 
-    if do_kernel:
-        preds = preds[:, ucb_sortidx]
-        kernel_fn = getattr(hsic, params.hsic_kernel_fn)
-        dist_matrix = hsic.sqdist(preds.transpose(0, 1).unsqueeze(1)) # (m, m, 1)
-        covar_matrix = kernel_fn(dist_matrix)[:, :, 0] # (m, m)
-    else:
-        preds = preds[:, ucb_sortidx]
-        covar_matrix = np.cov(preds)
-        covar_matrix = torch.FloatTensor(covar_matrix, device=device) # (num_candidate_points, num_candidate_points)
+    for acki in range(ack_batch_size-1):
+        cur_corr = ops.corrcoef(preds[:, cur_ack_idx])
+        for bi in range(len(batches)):
+            bs = batches[bi]
+            be = batches[be]
+            assert be > bs
 
-    if add_I:
-        covar_matrix += torch.eye(covar_matrix.shape[0])
-    if do_correlation:
-        variances = torch.diag(covar_matrix)
-        normalizer = torch.sqrt(variances.unsqueeze(0)*variances.unsqueeze(1))
-        covar_matrix /= normalizer
+            sim_matrix = ops.cross_corrcoef(preds[:, cur_ack_idx], preds[:, bs:be])
+
+            if add_I:
+                sim_matrix += torch.eye(sim_matrix.shape[0])
 
     chosen_orig_idx = [ucb_sortidx[0].item()]
     chosen_idx = [0]
@@ -1082,6 +1066,151 @@ def acquire_batch_self_hsic(
         batch_idx.update({best_idx})
 
     return batch_idx, best_hsic
+
+def acquire_batch_mves_sid_unnormalized(
+    params,
+    opt_values, # (num_samples, num_opt_values)
+    candidate_points_preds, # (num_samples, num_candidate_points)
+    skip_idx,
+    mves_compute_batch_size,
+    ack_batch_size,
+    greedy_ordering=False,
+    device : str = "cuda",
+    true_labels=None,
+    pred_weighting=False,
+    divide_by_std=False,
+    double=False,
+    opt_weighting=None,
+    min_hsic_increase=0.05,
+)-> torch.tensor:
+
+    opt_values = opt_values.to(device)
+
+    num_candidate_points = candidate_points_preds.shape[1]
+    num_samples = candidate_points_preds.shape[0]
+    min_pred = candidate_points_preds.min().to(device)
+    ei = candidate_points_preds.mean(dim=0).to(device)
+    ei = ei-ei.min()+0.1
+
+    if opt_values.ndimension() == 1:
+        opt_values.unsqueeze(-1)
+    assert opt_values.ndimension() == 2
+
+    if opt_weighting is None:
+        opt_dist_matrix = hsic.sqdist(opt_values.unsqueeze(1))
+    else:
+        assert len(opt_weighting.shape) == 1, opt_weighting.shape
+        opt_dist_matrix = hsic.sqdist(opt_values.unsqueeze(1), collect=False) # (n, n, 1, k)
+        opt_dist_matrix *= (opt_weighting**2).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
+    opt_kernel_matrix = getattr(hsic, params.hsic_kernel_fn)(opt_dist_matrix).detach()  # shape (n=num_samples, n, 1)
+
+    assert list(opt_kernel_matrix.shape) == [num_samples, num_samples, 1], str(opt_kernel_matrix.shape) + " == " + str([num_samples, num_samples, 1])
+    opt_kernel_matrix = opt_kernel_matrix.permute([2, 0, 1]).unsqueeze(-1) # (1, n, n, 1)
+
+    batch_idx = []
+    remaining_idx_set = set(range(num_candidate_points))
+    remaining_idx_set = remaining_idx_set.difference(skip_idx)
+    batch_dist_matrix = None # (num_samples, num_samples, 1)
+
+    regular_batch_opt_kernel_matrix = opt_kernel_matrix.repeat([mves_compute_batch_size, 1, 1, 1]) # (mves_compute_batch_size, n, n, 1)
+
+    best_hsic_vec = []
+    while len(batch_idx) < ack_batch_size:
+        #print("len(batch_idx):", len(batch_idx))
+        if len(batch_idx) > 0 and len(batch_idx) % 10 == 0 and type(true_labels) != type(None):
+            print(len(batch_idx), list(np.sort(true_labels[batch_idx])[-5:]))
+        best_idx = None
+        best_idx_dist_matrix = None
+        best_hsic = None
+
+        num_remaining = len(remaining_idx_set)
+        num_batches = num_remaining // mves_compute_batch_size + 1
+        remaining_idx = torch.tensor(list(remaining_idx_set), device=device)
+        idx_hsic_values = []
+
+        for bi in range(num_batches):
+            bs = bi*mves_compute_batch_size
+            be = min((bi+1)*mves_compute_batch_size, num_remaining)
+            cur_batch_size = be-bs
+            if cur_batch_size == 0:
+                continue
+            idx = remaining_idx[bs:be]
+
+            pred = candidate_points_preds[:, idx].to(device) # (num_samples, cur_batch_size)
+            dist_matrix = hsic.sqdist(pred) # (num_samples, num_samples, cur_batch_size) # not doing dimwise but doing hsic in || for multiple vars
+
+            if pred_weighting == 1:
+                predsqrt_matrix = pred-min_pred + 0.1
+                predsqrt_matrix = torch.sqrt(predsqrt_matrix.unsqueeze(0))*torch.sqrt(predsqrt_matrix.unsqueeze(1))
+                assert predsqrt_matrix.shape == dist_matrix.shape
+                dist_matrix /= predsqrt_matrix
+            elif pred_weighting == 2:
+                ei_batch = ei[idx].unsqueeze(0).unsqueeze(0)
+                assert ei_batch.shape[-1] == cur_batch_size
+                dist_matrix *= (ei_batch**2)
+
+            assert list(dist_matrix.shape) == [num_samples, num_samples, cur_batch_size], str(dist_matrix.shape) + " == " + str([num_samples, num_samples, cur_batch_size])
+
+            if batch_dist_matrix is not None:
+                dist_matrix += batch_dist_matrix # (n, n, m)
+
+            batch_kernel_matrix = getattr(hsic, params.hsic_kernel_fn)(dist_matrix).detach().permute([2, 0, 1]).unsqueeze(-1) # (m, n, n, 1)
+            assert list(batch_kernel_matrix.shape) == [cur_batch_size, num_samples, num_samples, 1], str(batch_kernel_matrix.shape) + " == " + str([cur_batch_size, num_samples, num_samples, 2])
+
+            assert ops.tensor_all(batch_kernel_matrix <= 1.+1e-5), batch_kernel_matrix.max().item()
+
+            if cur_batch_size == mves_compute_batch_size:
+                kernels = torch.cat([batch_kernel_matrix, regular_batch_opt_kernel_matrix], dim=-1)
+            else:
+                assert cur_batch_size < mves_compute_batch_size
+                last_batch_opt_kernel_matrix = regular_batch_opt_kernel_matrix[:cur_batch_size]
+                kernels = torch.cat([batch_kernel_matrix, last_batch_opt_kernel_matrix], dim=-1)
+
+            assert list(kernels.shape) == [cur_batch_size, num_samples, num_samples, 2], str(kernels.shape)
+
+            total_hsic = hsic.total_hsic_parallel(kernels)
+            assert list(total_hsic.shape) == [cur_batch_size], str(total_hsic.shape)
+
+            sorted_idx = total_hsic.cpu().numpy().argsort()
+            del kernels
+            gc.collect()
+            torch.cuda.empty_cache()
+            idx_hsic_values += [total_hsic.detach()]
+
+            best_cur_idx = sorted_idx[-1]
+
+            if best_idx is None or best_hsic < total_hsic[best_cur_idx]:
+                best_idx = idx[best_cur_idx].item()
+                best_idx_dist_matrix = dist_matrix[:, :, best_cur_idx:best_cur_idx+1].detach()
+                best_hsic = total_hsic[best_cur_idx].item()
+
+        if greedy_ordering:
+            break
+
+        assert best_hsic is not None
+        assert best_idx_dist_matrix is not None
+        assert best_idx is not None
+        best_hsic_vec += [best_hsic]
+        percentage_hsic_increase = True
+        if len(best_hsic_vec) > 1:
+            target_hsic_improvement = best_hsic_vec[-2]*(1.+min_hsic_increase) if percentage_hsic_increase else best_hsic_vec[-2]+min_hsic_increase
+            if best_hsic_vec[-1] < target_hsic_improvement:
+                break
+
+        batch_dist_matrix = best_idx_dist_matrix
+        best_hsic_overall = best_hsic
+        remaining_idx_set.remove(best_idx)
+        assert best_idx not in batch_idx
+        batch_idx += [best_idx]
+
+    if greedy_ordering:
+        idx_hsic_values = torch.cat(idx_hsic_values).cpu().numpy()
+        batch_idx = set(idx_hsic_values.argsort()[-ack_batch_size:].tolist())
+        best_hsic = idx_hsic_values[-1]
+
+    print('best_hsic_vec', best_hsic_vec)
+    return batch_idx, best_hsic
+
 
 
 
@@ -1296,14 +1425,16 @@ def acquire_batch_via_grad_er(
     return input_tensor.detach()
 
 
-def optimize_model_input(
+# maximize overall output mean
+def optimize_model_input_ucb(
     params,
     input_shape,
-    model_ensemble: Callable[[torch.tensor], torch.tensor],
+    model_ensemble,
+    num_points_to_optimize,
     seed=None,
-    hsic_diversity_lambda=0.,
-    normalize_hsic=False,
-    one_hot=True,
+    diversity_lambda=0.,
+    one_hot=False,
+    beta=0.,
 ):
     if seed is None:
         input_tensor = torch.randn([num_points_to_optimize] + input_shape, device=params.device, requires_grad=True)
@@ -1319,34 +1450,19 @@ def optimize_model_input(
     optim = torch.optim.Adam([input_tensor], lr=params.input_opt_lr)
     progress = tnrange(params.input_opt_num_iter)
     for step_iter in progress:
-        preds = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
+        preds, _ = model_ensemble(input_tensor) # (num_samples, ack_batch_size)
         assert preds.ndimension() == 2
 
+        #loss = -torch.mean(preds) - beta * preds.std(0).mean()
+        assert beta == 0., "beta > 0 not implemented atm"
         loss = -torch.mean(preds)
 
-        postfix = {'normal_loss' : loss.item()}
-        kernel_fn = getattr(hsic, 'dimwise_' + params.hsic_kernel_fn)
-        if hsic_diversity_lambda > 1e-9:
-            kernels = kernel_fn(preds)
-            total_hsic = hsic.total_hsic(kernels)
-
-            if normalize_hsic:
-                normalizer = hsic.total_hsic_parallel(kernels.permute(2, 0, 1).unsqueeze(-1).repeat([1, 1, 1, 2])).view(-1)
-                normalizer = torch.exp(normalizer.log().sum()*0.5)
-                total_hsic /= normalizer
-
-            loss += hsic_diversity_lambda*total_hsic
-            postfix['hsic_loss'] = total_hsic.item()
-            postfix['hsic_loss_real'] = (hsic_diversity_lambda*total_hsic).item()
-        else:
-            kernels = kernel_fn(preds)
-            total_hsic = hsic.total_hsic(kernels)
-            postfix['hsic_loss'] = total_hsic.item()
+        if diversity_lambda > ops._eps:
+            loss += -diversity_lambda * hsic.sqdist(input_tensor.unsqueeze(1)).mean()
 
         optim.zero_grad()
         loss.backward()
         optim.step()
-        progress.set_postfix(postfix)
 
     return input_tensor.detach(), preds.detach()
 
@@ -1354,17 +1470,15 @@ def optimize_model_input(
 def optimize_model_input_pdts(
     params,
     input_shape,
-    model_ensemble: Callable[[torch.tensor], torch.tensor],
-    num_points_to_optimize,
+    model_ensemble,
     seed=None,
-    one_hot=True,
+    one_hot=False,
     input_transform=lambda x : x,
     hsic_diversity_lambda=0,
     normalize_hsic=True,
     jupyter=False,
 ):
-    print("optimize_model_input_pdts, num_points_to_optimize:", num_points_to_optimize)
-    assert num_points_to_optimize > 1
+    num_points_to_optimize = model_ensemble.num_models()
     if seed is None:
         input_tensor = torch.randn([num_points_to_optimize] + input_shape, device=params.device, requires_grad=True)
     else:
@@ -1387,7 +1501,7 @@ def optimize_model_input_pdts(
             preds, _ = model_ensemble(input_tensor2) # (num_samples,)
             assert preds.ndimension() == 2
         else:
-            preds, _ = model_ensemble(input_tensor2) # (num_samples,)
+            preds, _ = model_ensemble(input_tensor2, all_pairs=False) # (num_samples,)
             #assert preds.ndimension() == 1
         #assert preds.shape[0] == num_points_to_optimize, str(preds.shape) + " == " + str(num_points_to_optimize)
 
@@ -1625,9 +1739,9 @@ def acquire_batch_via_grad_hsic2(
 
 def acquire_batch_via_grad_opt_location(
     params,
-    model_ensemble: Callable[[torch.tensor], torch.tensor],
-    input_shape: List[int],
-    opt_locations: torch.tensor, # (num_samples, num_features)
+    model_ensemble,
+    input_shape,
+    opt_locations, # (num_samples, num_features)
     ack_batch_size,
     device,
     hsic_condense_penalty,
@@ -1635,7 +1749,8 @@ def acquire_batch_via_grad_opt_location(
     do_mean=False,
     seed: torch.tensor = None,
     normalize_hsic=True,
-    one_hot=True,
+    one_hot=False,
+    min_hsic_increase=0.05,
     input_transform=lambda x : x,
     jupyter: bool = False,
 ):
@@ -1652,6 +1767,7 @@ def acquire_batch_via_grad_opt_location(
         batch_progress = tnrange(ack_batch_size)
     else:
         batch_progress = trange(ack_batch_size)
+
     for ack_iter in batch_progress:
         input_tensor = torch.zeros([ack_iter+1] + input_shape, device=device, requires_grad=True)
         with torch.no_grad():
@@ -1684,10 +1800,12 @@ def acquire_batch_via_grad_opt_location(
             loss.backward()
             optim.step()
         batch_progress.set_description("%1.5f, %1.5f" % (mean_pred.item(), hsic_loss))
-        if hsic_loss <= hsic_loss_so_far + 0.05:
+        percentage_hsic_increase = True
+        target_hsic_improvement = hsic_loss_so_far*(1.+min_hsic_increase) if percentage_hsic_increase else hsic_loss_so_far+min_hsic_increase
+        if hsic_loss <= target_hsic_improvement:
             break
         hsic_loss_so_far = hsic_loss
-        complete_input_tensor[:ack_iter+1, :, :] = input_tensor.detach()
+        complete_input_tensor[:ack_iter+1, :] = input_tensor.detach()
 
     return complete_input_tensor[:ack_iter].detach(), hsic_loss_so_far
 
@@ -1748,12 +1866,12 @@ def optimize_inputs(
         for i in range(len(bounds)):
             inputs.data[:, i].clamp_(*bounds[i])
 
-def get_pdts_idx(preds, ack_batch_size, density=False):
+def get_pdts_idx(preds, ack_batch_size, skip_idx=None, density=False):
     pdts_idx = set()
 
     sorted_preds_idx = []
     for i in range(preds.shape[0]):
-        sorted_preds_idx += [np.argsort(preds[i].numpy())]
+        sorted_preds_idx += [np.argsort(preds[i].cpu().numpy())[::-1]]
     sorted_preds_idx = np.array(sorted_preds_idx)
 
     if density:
@@ -1771,14 +1889,17 @@ def get_pdts_idx(preds, ack_batch_size, density=False):
             if len(pdts_idx) >= ack_batch_size:
                 break
     else:
-        for i_model in range(sorted_preds_idx.shape[0]):
-            for idx in sorted_preds_idx[i_model]:
-                idx2 = int(idx)
-                if idx2 not in pdts_idx:
-                    pdts_idx.update({idx2})
-                    break
+        indices = [i for i in range(sorted_preds_idx.shape[0])]
+        random.shuffle(indices)
+        for i in range(sorted_preds_idx.shape[1]):
             if len(pdts_idx) >= ack_batch_size:
                 break
+            for i_model in indices:
+                if len(pdts_idx) >= ack_batch_size:
+                    break
+                idx = int(sorted_preds_idx[i_model][i])
+                if skip_idx is not None and idx not in skip_idx:
+                    pdts_idx.update({idx})
 
     pdts_idx = list(pdts_idx)
     return pdts_idx
@@ -1989,6 +2110,26 @@ def get_ind_top_ood_pred_stats(
 
     return stats
 
+def compute_ir_regret_ensemble_grad(
+    params,
+    model_ensemble,
+    bb_fn,
+):
+    point_locs, point_preds = optimize_model_input_ucb(
+            params, 
+            model_ensemble.input_shape(),
+            model_ensemble,
+            num_points_to_optimize=1,
+            diversity_lambda=params.hsic_diversity_lambda,
+            beta=0.,
+            )
+
+
+    sort_idx = torch.sort(point_preds.mean(dim=0), descending=True)[1]
+    y = bb_fn(point_locs[sort_idx])
+
+    return y
+
 def compute_ir_regret_ensemble(
         params,
         model_ensemble,
@@ -2004,15 +2145,15 @@ def compute_ir_regret_ensemble(
             progress_bar=params.progress_bar,
             ) # (num_candidate_points, num_samples)
     preds = preds.detach()
-    ei = preds.mean(dim=0).view(-1).cpu().numpy()
-    ei_sortidx = np.argsort(ei)[-50:]
-    ack = list(ack_all.union(list(ei_sortidx)))
+    er = preds.mean(dim=0).view(-1).cpu().numpy()
+    er_sortidx = np.argsort(er)[-50:]
+    ack = list(ack_all.union(list(er_sortidx)))
     best_10 = np.sort(Y[ack])[-10:]
     best_batch_size = np.sort(Y[ack])[-ack_batch_size:]
 
     s = [best_10.mean(), best_10.max(), best_batch_size.mean(), best_batch_size.max()]
 
-    return s, ei, ei_sortidx
+    return s, er, er_sortidx
 
 def compute_idx_frac(ack_all, top_frac_idx):
     idx_frac = [len(ack_all.intersection(k))/len(k) for k in top_frac_idx]
@@ -2592,22 +2733,18 @@ def get_noninfo_ack(
                 if len(cur_ack_idx) >= ack_batch_size:
                     break
         else:
-            assert ack_fun == "pdts_ucb", ack_fun
+            assert "pdts_ucb" in ack_fun, ack_fun
             indices = [i for i in range(sorted_preds_idx.shape[0])]
             random.shuffle(indices)
-            if params.bottom_skip_frac > 0.:
-                num_points = er_sortidx.shape[0]
-                selection_points = set(er_sortidx[-int((1-params.bottom_skip_frac)*num_points):].tolist())
-            for i_model in indices:
-                for idx in sorted_preds_idx[i_model]:
-                    idx2 = int(idx)
-                    if params.bottom_skip_frac > 0. and idx2 not in selection_points:
-                        continue
-                    if idx2 not in cur_ack_idx and idx2 not in skip_idx:
-                        cur_ack_idx.update({idx2})
-                        break
+            for i in range(sorted_preds_idx.shape[1]):
                 if len(cur_ack_idx) >= ack_batch_size:
                     break
+                for i_model in indices:
+                    if len(cur_ack_idx) >= ack_batch_size:
+                        break
+                    idx = int(sorted_preds_idx[i_model][i])
+                    if idx not in cur_ack_idx and idx not in skip_idx:
+                        cur_ack_idx.update({idx})
         cur_ack_idx = list(cur_ack_idx)
     else:
         assert False, "Not implemented " + ack_fun
@@ -2628,6 +2765,8 @@ def get_info_ack(
         std = preds.std(dim=0).view(-1).cpu().numpy()
 
         er += params.ucb*std
+        er_sortidx = np.argsort(er)
+        er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
 
         if not params.compare_w_old:
             er[list(skip_idx)] = er.min()
@@ -2654,7 +2793,7 @@ def get_info_ack(
         elif params.measure == 'er_pdts_mix':
             print('er_pdts_mix')
             er_sortidx = np.argsort(er)
-            pdts_idx = bopt.get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True)
+            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True)
             print('pdts_idx:', pdts_idx)
             er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
             best_pred = torch.cat([preds[:, er_idx], preds[:, pdts_idx]], dim=-1)
@@ -2667,6 +2806,9 @@ def get_info_ack(
             best_pred = preds[:, indices[-10:]]
             er_sortidx = np.argsort(er)
             er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
+        elif params.measure == 'pdts_condense':
+            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size)
+            best_pred = preds[:, pdts_idx]
         elif params.measure == 'mves':
             print('mves')
             er_sortidx = np.argsort(er)
@@ -2747,17 +2889,17 @@ def get_info_ack(
         elif params.batch_fill == "pdts":
             sorted_preds_idx = torch.sort(preds, dim=-1, descending=True)[1].cpu().numpy()
             indices = [i for i in range(sorted_preds_idx.shape[0])]
+            random.shuffle(indices)
             fill_idx = set()
             for i in range(sorted_preds_idx.shape[1]):
                 if len(fill_idx)+len(condense_idx) >= ack_batch_size:
                     break
                 for i_model in indices:
+                    if len(fill_idx)+len(condense_idx) >= ack_batch_size:
+                        break
                     idx = int(sorted_preds_idx[i_model][i])
                     if idx not in fill_idx and idx not in condense_idx and idx not in skip_idx:
                         fill_idx.update({idx})
-                        break
-                    if len(fill_idx)+len(condense_idx) >= ack_batch_size:
-                        break
             condense_idx += list(fill_idx)
         else:
             assert False, params.batch_fill + " batch_fill not implemented"

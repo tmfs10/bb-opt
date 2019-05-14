@@ -185,6 +185,7 @@ def add_parse_args(parser):
 
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')
+    parser.add_argument('--num_rand_diversity', type=int)
     parser.add_argument('--diversity_coeff', type=float)
     parser.add_argument('--ucb_ekb_weighting', type=float)
     parser.add_argument('--ekb_use_median', type=str2bool)
@@ -236,6 +237,9 @@ def add_parse_args(parser):
     parser.add_argument('--chemvae_prop_pred_depth', type=int)
     parser.add_argument('--chemvae_prop_pred_growth_factor', type=float)
     parser.add_argument('--chemvae_prop_batchnorm', type=str2bool)
+
+    # test_fn args
+    parser.add_argument('--test_fn', type=str)
 
 def add_parse_args_wrongness(parser):
     parser.add_argument('--predict_ood', type=str2bool)

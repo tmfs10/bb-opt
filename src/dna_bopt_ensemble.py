@@ -88,6 +88,9 @@ elif params.project in ['imdb', 'wiki']:
 elif params.project == 'chemvae':
     task_name += [params.project]
     sample_uniform_fn = None
+elif params.project == 'test_fn':
+    task_name += [params.test_fn]
+    sample_uniform_fn = None
 
 if params.stdout_file != "stdout":
     orig_stdout = sys.stdout
@@ -158,6 +161,20 @@ for task_iter in range(len(task_name)):
 
         ood_X = torch.tensor(ood_inputs, device=device)
         ood_Y = torch.tensor(ood_labels, device=device)
+    elif params.project == "test_fn":
+        params.predict_mi = False
+        params.infomax_weight = 0
+        params.num_test_points = 0
+        params.ack_change_stat_logging = False
+        params.empirical_ack_change_stat_logging = False
+        import test_fns
+        bb_fn = getattr(test_fns, params.test_fn)()
+        inputs, labels = bb_fn.sample(2*params.init_train_examples)
+        inputs = inputs.cpu().numpy()
+        labels = labels.cpu().numpy()
+
+        X = torch.tensor(inputs, device=device)
+        Y = torch.tensor(labels, device=device)
     else:
         assert False, params.project + " is an unknown project"
 
@@ -235,6 +252,17 @@ for task_iter in range(len(task_name)):
                 device=params.device,
                 )
         init_model = init_model.to(params.device)
+    elif params.project == "test_fn":
+        init_model = dbopt.get_model_nn_ensemble(
+                inputs.shape[1], 
+                params.num_models, 
+                params.num_hidden, 
+                sigmoid_coeff=params.sigmoid_coeff, 
+                device=params.device,
+                separate_mean_var=params.separate_mean_var,
+                mu_prior=params.bayesian_theta_prior_mu if params.bayesian_ensemble else None,
+                std_prior=params.bayesian_theta_prior_std if params.bayesian_ensemble else None,
+                )
     elif params.project in ["wiki", "imdb"]:
         init_model = ResnetEnsemble2(
                 params,
@@ -279,6 +307,8 @@ for task_iter in range(len(task_name)):
         checkpoint = torch.load(init_model_path)
         init_model.load_state_dict(checkpoint['model_state_dict'])
         logging = checkpoint["logging"]
+        zero_gamma_model = None
+        best_gamma = -1
         if "train_idx" in checkpoint:
             train_idx = checkpoint["train_idx"].numpy()
     else:
@@ -629,7 +659,7 @@ for task_iter in range(len(task_name)):
                                     if len(cur_ack_idx) == ack_batch_size:
                                         break
 
-                        elif params.ack_fun == "info":
+                        elif "info" in params.ack_fun and "grad" not in params.ack_fun:
                             cur_ack_idx = bopt.get_info_ack(
                                     params,
                                     pre_ack_pred_means,
@@ -637,6 +667,94 @@ for task_iter in range(len(task_name)):
                                     skip_idx_cur,
                                     labels,
                                     )
+                            if "rand" in params.ack_fun:
+                                unseen_idx2 = list(unseen_idx)
+                                random.shuffle(unseen_idx2)
+                                cur_ack_idx = cur_ack_idx[:-params.num_rand_diversity]
+                                for idx in unseen_idx2:
+                                    if len(cur_ack_idx) >= ack_batch_size:
+                                        break
+                                    if idx in cur_ack_idx:
+                                        continue
+                                    cur_ack_idx += [idx]
+                        elif "grad" in params.ack_fun:
+                            if "pdts" in params.ack_fun:
+                                point_locs, point_preds = bopt.optimize_model_input_pdts(
+                                        params, 
+                                        cur_model.input_shape(),
+                                        cur_model,
+                                        input_transform=lambda x : x.view(x.shape[0], -1),
+                                        hsic_diversity_lambda=params.hsic_diversity_lambda,
+                                        normalize_hsic=params.normalize_hsic,
+                                        )
+                            elif "ucb" in params.ack_fun:
+                                point_locs, point_preds = bopt.optimize_model_input_ucb(
+                                        params,
+                                        cur_model.input_shape(),
+                                        cur_model,
+                                        num_points_to_optimize=params.num_models,
+                                        diversity_lambda=params.hsic_diversity_lambda,
+                                        beta=params.ucb,
+                                        )
+                                assert ops.is_finite(point_locs)
+                                assert ops.is_finite(point_preds)
+                            else:
+                                assert False, params.ack_fun + " ack_fun not implemented"
+
+                            if "rand" in params.ack_fun:
+                                assert "info" not in params.ack_fun
+                                x, _ = bb_fn.sample(params.num_rand_diversity)
+                                point_locs[:params.num_rand_diversity, :] = x
+                            elif "info" in params.ack_fun:
+                                if params.measure == "pes":
+                                    hsic_batch, best_hsic = bopt.acquire_batch_via_grad_opt_location(
+                                            params, 
+                                            cur_model,
+                                            cur_model.input_shape(),
+                                            point_locs, 
+                                            ack_batch_size,
+                                            device=params.device,
+                                            hsic_condense_penalty=params.hsic_condense_penalty,
+                                            input_transform=lambda x : x.view(x.shape[0], -1),
+                                            normalize_hsic=params.normalize_hsic,
+                                            min_hsic_increase=params.min_hsic_increase,
+                                            )
+                                elif params.measure == "mves":
+                                    hsic_batch, best_hsic = bopt.acquire_batch_via_grad_hsic2(
+                                            params, 
+                                            cur_model,
+                                            cur_model.input_shape(),
+                                            opt_values,
+                                            ack_batch_size,
+                                            device=params.device,
+                                            hsic_condense_penalty=params.hsic_condense_penalty,
+                                            input_transform=lambda x : x.view(x.shape[0], -1),
+                                            normalize_hsic=params.normalize_hsic,
+                                            )
+
+                                assert hsic_batch.shape[1:] == X.shape[1:], "%s[1:] == %s[1:]" % (hsic.batch.shape, X.shape)
+                                assert hsic_batch.shape[0] <= ack_batch_size
+
+                                temp_rand_idx = torch.randperm(point_locs.shape[0])
+                                point_locs = point_locs[temp_rand_idx]
+                                point_locs[:hsic_batch.shape[0], :] = hsic_batch
+
+                            assert point_locs.shape[0] >= ack_batch_size
+                            X2 = point_locs[:ack_batch_size]
+                            Y2 = bb_fn(X2)
+
+                            assert not ops.is_nan(Y2)
+                            assert not ops.is_inf(Y2)
+
+                            old_n = X.shape[0]
+
+                            X = torch.cat([X, X2], dim=0)
+                            Y = torch.cat([Y, Y2], dim=0)
+                            inputs = np.concatenate([inputs, X2.cpu().numpy()], axis=0)
+                            labels = np.concatenate([labels, Y2.cpu().numpy()], axis=0)
+
+                            cur_ack_idx = [i+old_n for i in range(X2.shape[0])]
+                            print('shapes', X2.shape, X.shape, Y.shape, Y2.shape, old_n, cur_ack_idx)
                         elif params.ack_fun == "kb":
                             cur_ack_idx = bopt.get_kriging_believer_ack(
                                     params,
@@ -675,6 +793,10 @@ for task_iter in range(len(task_name)):
                                     normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                                     )
                         elif "_ucb" in params.ack_fun:
+                            normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization
+                            mean_temp = train_Y_cur.mean()
+                            std_temp = train_Y_cur.std()
+                            train_Y_temp = normalize_fn(train_Y_cur, mean_temp, std_temp, exp=torch.exp)
                             cur_ack_idx = bopt.get_noninfo_ack(
                                     params,
                                     params.ack_fun,
@@ -682,8 +804,18 @@ for task_iter in range(len(task_name)):
                                     ack_batch_size,
                                     skip_idx_cur,
                                     ack_iter_info=ack_iter_info,
-                                    best_so_far=train_Y_cur.max(),
+                                    best_so_far=train_Y_temp.max(),
                                     )
+                            if "rand" in params.ack_fun:
+                                unseen_idx2 = list(unseen_idx)
+                                random.shuffle(unseen_idx2)
+                                cur_ack_idx = cur_ack_idx[:-params.num_rand_diversity]
+                                for idx in unseen_idx2:
+                                    if len(cur_ack_idx) >= ack_batch_size:
+                                        break
+                                    if idx in cur_ack_idx:
+                                        continue
+                                    cur_ack_idx += [idx]
                         else:
                             assert False, params.ack_fun + " not implemented"
                     elif params.mode == "active_learning":
@@ -1002,39 +1134,58 @@ for task_iter in range(len(task_name)):
 
                     # inference regret computation using retrained ensemble
                     if params.mode == "bayes_opt":
-                        s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
-                                params,
-                                cur_model,
-                                X,
-                                labels,
-                                ack_all_cur,
-                                params.ack_batch_size
-                            )
-                        idx_frac = bopt.compute_idx_frac(ack_all_cur, top_frac_idx)
-                        s += [idx_frac]
-                        s = "\t".join((str(k) for k in s))
+                        if params.project == "test_fn":
+                            ir = bopt.compute_ir_regret_ensemble_grad(
+                                    params,
+                                    cur_model,
+                                    bb_fn,
+                                    )
+                            print ('ir regret:', ir)
+                        else:
+                            s, ir, ir_sortidx = bopt.compute_ir_regret_ensemble(
+                                    params,
+                                    cur_model,
+                                    X,
+                                    labels,
+                                    ack_all_cur,
+                                    params.ack_batch_size
+                                )
+                            idx_frac = bopt.compute_idx_frac(ack_all_cur, top_frac_idx)
+                            s += [idx_frac]
+                            s = "\t".join((str(k) for k in s))
 
-                        print(s)
-                        f.write(s + "\n")
+                            print(s)
+                            f.write(s + "\n")
 
                         if logging is not None and not params.log_all_train_iter:
                             logging[0] = None
 
                         best_so_far_idx = ack_array[ack_labels.argmax()]
-                        ack_rel_opt_value = idx_to_rel_opt_value[best_so_far_idx]
-                        ir_rel_opt_value = ack_rel_opt_value
-                        if idx_to_rel_opt_value[ir_sortidx[-1]] > ir_rel_opt_value:
-                            ir_rel_opt_value = idx_to_rel_opt_value[ir_sortidx[-1]]
+                        if params.project == "test_fn":
+                            ack_rel_opt_value = bb_fn.optimum()-ack_labels.max()
+                            ir_rel_opt_value = min(ack_rel_opt_value, bb_fn.optimum()-ir)
+                        else:
+                            ack_rel_opt_value = idx_to_rel_opt_value[best_so_far_idx]
+                            ir_rel_opt_value = ack_rel_opt_value
+                            if idx_to_rel_opt_value[ir_sortidx[-1]] > ir_rel_opt_value:
+                                ir_rel_opt_value = idx_to_rel_opt_value[ir_sortidx[-1]]
 
                         print('best so far:', labels[best_so_far_idx])
                         print('regret:', ack_rel_opt_value, ir_rel_opt_value)
-                        temp = {
-                            'ack_rel_opt_value': ack_rel_opt_value,
-                            'ir_batch_cur': torch.from_numpy(ir),
-                            'ir_batch_cur_idx': torch.from_numpy(ir_sortidx),
-                            'ir_rel_opt_value': ir_rel_opt_value,
-                            'idx_frac': torch.tensor(idx_frac),
-                            }
+
+                        if params.project == "test_fn":
+                            temp = {
+                                'ack_rel_opt_value': ack_rel_opt_value,
+                                'ir_rel_opt_value': ir_rel_opt_value,
+                                }
+                        else:
+                            temp = {
+                                'ack_rel_opt_value': ack_rel_opt_value,
+                                'ir_batch_cur': torch.from_numpy(ir),
+                                'ir_batch_cur_idx': torch.from_numpy(ir_sortidx),
+                                'ir_rel_opt_value': ir_rel_opt_value,
+                                'idx_frac': torch.tensor(idx_frac),
+                                }
                         for k in temp:
                             to_save_dict[k] = temp[k]
                     elif params.mode == "active_learning":

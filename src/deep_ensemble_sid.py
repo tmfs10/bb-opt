@@ -105,6 +105,7 @@ class NN(torch.nn.Module):
         self.n_hidden = n_hidden
         #self.pred_var_out = nn.Softplus()
         self.pred_var_out = torch.sigmoid
+        self.n_inputs = n_inputs
 
     def set_fixed_noise_std(self, fixed_noise_std):
         self.fixed_noise_std = fixed_noise_std
@@ -123,7 +124,7 @@ class NN(torch.nn.Module):
             if self.sigmoid_coeff > 0:
                 mean = torch.sigmoid(output[0][:, 0])*self.sigmoid_coeff
             else:
-                mean = output[:, 0]
+                mean = output[0][:, 0]
             variance = self.pred_var_out(output[0][:, 1])*self.max_var+self.min_variance
         else:
             if self.sigmoid_coeff > 0:
@@ -134,6 +135,9 @@ class NN(torch.nn.Module):
 
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean.view(-1), variance.view(-1)
+
+    def input_shape(self):
+        return [self.n_inputs]
 
     def reset_parameters(self):
         for h in self.hidden:
@@ -164,6 +168,7 @@ class NN2(torch.nn.Module):
         self.min_variance = min_variance
         self.sigmoid_coeff = sigmoid_coeff
         self.fixed_noise_std = fixed_noise_std
+        self.n_inputs = n_inputs
         self.maxvar = 0.1
 
     def set_fixed_noise_std(self, fixed_noise_std):
@@ -183,6 +188,9 @@ class NN2(torch.nn.Module):
         else:
             variance = torch.ones(x.shape[0], device=x.device)*(self.fixed_noise_std**2)*1./self.max_var + self.min_variance
         return mean, variance
+
+    def input_shape(self):
+        return [self.n_inputs]
 
     def reset_parameters(self):
         self.hidden1.reset_parameters()
@@ -292,6 +300,9 @@ class NNEnsemble(torch.nn.Module):
             self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models] 
             self.generate_new_anchors()
 
+    def num_models(self):
+        return self.n_models
+
     def set_fixed_noise_std(self, fixed_noise_std):
         for nn in self.models:
             nn.set_fixed_noise_std(fixed_noise_std)
@@ -321,6 +332,9 @@ class NNEnsemble(torch.nn.Module):
                 l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
 
         return torch.sum(torch.tensor(l2))
+
+    def input_shape(self):
+        return self.models[0].input_shape()
 
     def reset_parameters(self):
         for model in self.models:

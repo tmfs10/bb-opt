@@ -47,7 +47,6 @@
 --early_stopping 10
 --take_log True
 --fixed_noise_std -1
---mse_mode False
 
 --unseen_reg normal
 --gammas 1.0 5.0 10.0 20.0
@@ -112,3 +111,5 @@
 
 --bottom_skip_frac 0.
 --batch_fill ucb
+
+--num_rand_diversity 0

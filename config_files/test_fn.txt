@@ -1,0 +1,22 @@
+
+--project test_fn
+
+--ack_fun info_grad_pdts
+--num_models 20
+--hsic_kernel_fn mixrbf_kernels
+--min_hsic_increase 0.05
+--mves_compute_batch_size 3000
+--measure pes
+--num_diversity 5
+
+--test_fn hartmann6d
+
+--input_opt_lr 0.1
+--input_opt_num_iter 200
+--hsic_opt_lr 0.05
+--hsic_opt_num_iter 100
+
+--hsic_diversity_lambda 0.0
+--sparse_hsic_penalty 0.0
+--sparse_hsic_threshold 0.01
+--hsic_condense_penalty 1.0 1.0
