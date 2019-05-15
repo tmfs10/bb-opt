@@ -708,7 +708,7 @@ for task_iter in range(len(task_name)):
                             elif "info" in params.ack_fun:
                                 if params.measure == "pes":
                                     hsic_batch, best_hsic = bopt.acquire_batch_via_grad_opt_location(
-                                            params, 
+                                            params,
                                             cur_model,
                                             cur_model.input_shape(),
                                             point_locs, 

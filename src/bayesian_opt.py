@@ -1229,10 +1229,14 @@ def acquire_batch_mves_sid(
     divide_by_std=False,
     double=False,
     opt_weighting=None,
+    point_pool_idx=None,
     min_hsic_increase=0.05,
 )-> torch.tensor:
 
     opt_values = opt_values.to(device)
+
+    if point_pool_idx is not None:
+        candidate_points_preds = candidate_points_preds[:, point_pool_idx]
 
     num_candidate_points = candidate_points_preds.shape[1]
     num_samples = candidate_points_preds.shape[0]
@@ -1383,6 +1387,9 @@ def acquire_batch_mves_sid(
         idx_hsic_values = torch.cat(idx_hsic_values).cpu().numpy()
         batch_idx = set(idx_hsic_values.argsort()[-ack_batch_size:].tolist())
         best_hsic = idx_hsic_values[-1]
+
+    if point_pool_idx is not None:
+        batch_idx = [point_pool_idx[k] for k in batch_idx]
 
     print('best_hsic_vec', best_hsic_vec)
     return batch_idx, best_hsic
@@ -1808,6 +1815,63 @@ def acquire_batch_via_grad_opt_location(
         complete_input_tensor[:ack_iter+1, :] = input_tensor.detach()
 
     return complete_input_tensor[:ack_iter].detach(), hsic_loss_so_far
+
+
+def acquire_batch_via_grad_opt_location2(
+    params,
+    model_ensemble,
+    input_shape,
+    opt_locations, # (num_samples, num_features)
+    ack_batch_size,
+    device,
+    hsic_condense_penalty,
+    biased_hsic=False,
+    do_mean=False,
+    seed: torch.tensor = None,
+    normalize_hsic=True,
+    one_hot=False,
+    min_hsic_increase=0.05,
+    input_transform=lambda x : x,
+    jupyter: bool = False,
+):
+
+    print('acquire_batch_via_grad_hsic: ack_batch_size', ack_batch_size)
+    input_tensor_list = []
+    complete_input_tensor = torch.randn([ack_batch_size] + input_shape, device=device, requires_grad=False)
+
+    kernel_fn = getattr(hsic, "two_vec_" + params.hsic_kernel_fn)
+    opt_kernel_matrix = kernel_fn(opt_locations, opt_locations, do_mean=do_mean)[:, :, 0]  # shape (n=num_samples, n, 1)
+
+    input_tensor = torch.zeros([ack_batch_size] + input_shape, device=device, requires_grad=True)
+    optim = torch.optim.Adam([input_tensor], lr=params.hsic_opt_lr)
+    for step_iter in range(params.hsic_opt_num_iter):
+        if one_hot:
+            assert len(input_shape) == 2
+            input_tensor2 = torch.nn.functional.softmax(input_tensor, dim=-1)
+        input_tensor2 = input_transform(input_tensor)
+
+        preds, _ = model_ensemble(input_tensor2) # (num_samples, ack_batch_size)
+        assert preds.ndimension() == 2
+        assert opt_kernel_matrix.shape[0] == preds.shape[0], str(opt_kernel_matrix.shape) + "[0] == " + str(preds.shape) + "[0]"
+
+        mean_pred = torch.mean(preds)
+        loss = -hsic_condense_penalty[0]*mean_pred
+
+        preds_kernel_matrix = kernel_fn(preds, preds, do_mean=do_mean)[:, :, 0]
+        hsic_xy = hsic.hsic_xy(opt_kernel_matrix, preds_kernel_matrix, biased=biased_hsic, normalized=normalize_hsic)
+
+        # if preds end up having 0 stddev hsic estimator becoming infinity
+        if not ops.is_finite(hsic_xy):
+            break
+
+        hsic_loss = hsic_xy.item()
+        loss += -hsic_condense_penalty[1]*hsic_xy
+
+        optim.zero_grad()
+        loss.backward()
+        optim.step()
+
+    return input_tensor.detach(), hsic_loss_so_far
 
 
 def acquire_batch_pi(
@@ -2779,6 +2843,7 @@ def get_info_ack(
         #best_pred = sorted_preds[:, -top_k:]
 
         opt_weighting = None
+        point_pool_idx = None
         if params.measure == 'er_mves_mix':
             print('er_mves_mix')
             er_sortidx = np.argsort(er)
@@ -2793,7 +2858,7 @@ def get_info_ack(
         elif params.measure == 'er_pdts_mix':
             print('er_pdts_mix')
             er_sortidx = np.argsort(er)
-            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True)
+            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size, density=True, skip_idx=skip_idx)
             print('pdts_idx:', pdts_idx)
             er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
             best_pred = torch.cat([preds[:, er_idx], preds[:, pdts_idx]], dim=-1)
@@ -2807,8 +2872,9 @@ def get_info_ack(
             er_sortidx = np.argsort(er)
             er_idx = er_sortidx[-params.num_diversity*ack_batch_size:]
         elif params.measure == 'pdts_condense':
-            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size)
+            pdts_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size, skip_idx=skip_idx)
             best_pred = preds[:, pdts_idx]
+            point_pool_idx = pdts_idx
         elif params.measure == 'mves':
             print('mves')
             er_sortidx = np.argsort(er)
@@ -2871,6 +2937,7 @@ def get_info_ack(
                 opt_weighting=None,
                 min_hsic_increase=params.min_hsic_increase,
                 double=True,
+                point_pool_idx=point_pool_idx,
                 )
 
         #print('er_idx', er_idx)
