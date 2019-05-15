@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("-ds", "--dataset",dest='dataset',type=str,default='ARX_L343Q_R1_8mers.txt',help="which dataset to use")
     parser.add_argument("-p", "--top",dest="percent",type=float,default=0.1,help="percentage of top data heldout")
     parser.add_argument("-sd", "--seed",dest="seed",type=int,default=0,help="random seed")
+    parser.add_argument("-ad", "--adverse",dest="adverse_eps",type=float,default=None,help="epsilon for adverserial training")
     return parser.parse_args()
 
 def sample_uniform(out_size):
@@ -53,7 +54,7 @@ if __name__ == "__main__":
 	args = parse_args()
 	#gpu_id = gpu_init()
 	torch.cuda.set_device(args.gpu)
-	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden))
+	model_path=os.path.join(args.model_dir,'{}_{}_{}_{}_{}_{}_{}_{}_{}.pth'.format(args.dataset.split('_8mers')[0],args.loss_type,args.sample_size,args.hyper,args.lr,args.l2,args.ensem_size,args.hidden,args.adverse_eps if args.adverse_eps else 0.0))
 	print(model_path)
 	if exists(model_path.replace(".pth", ".txt")):
 		print("file exists!")
@@ -77,7 +78,7 @@ if __name__ == "__main__":
 	n_inputs = data.train.inputs.shape[1]
 	train_loader = DataLoader(TensorDataset(data.train.inputs, data.train.labels),batch_size=batch_size,shuffle=True)
 	n_models = args.ensem_size
-	adversarial_epsilon = None
+	adversarial_epsilon = args.adverse_eps
 	model = NNEnsemble.get_model(n_inputs, batch_size, n_models, n_hidden, adversarial_epsilon, device,extra_random=args.extra_random,single_layer=(args.single_layer=='Y'))
 	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.l2)
 	myhist={'train_nll':[],'train_nll_mix':[],'train_mse':[],'train_loss':[],'train_var':[],'test_nll':[],'test_nll_mix':[],'test_mse':[],'test_var':[],'val_nll':[],'val_nll_mix':[],'val_mse':[],'top_nll':[],'top_nll_mix':[],'top_mse':[],'top_var':[]}
@@ -110,6 +111,10 @@ if __name__ == "__main__":
 				train_newloss.append(nll.item())
 			elif args.loss_type=="normal":
 				loss=negative_log_likelihood
+			elif args.loss_type=="normal+at":
+				means_adv, variances_adv = model(inputs,labels)
+				negative_log_likelihood_adv, mse_adv = NNEnsemble.compute_negative_log_likelihood(labels, means_adv, variances_adv, return_mse=True)
+				loss=negative_log_likelihood+negative_log_likelihood_adv
 			elif args.loss_type=="invar":
 				var=(means.var(dim=0).mean())
 				loss=negative_log_likelihood-args.hyper*var

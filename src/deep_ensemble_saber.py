@@ -11,13 +11,18 @@ on the same GPU; modifications would be needed to use this for larger models.
 import pickle
 import numpy as np
 import torch
+import copy
+import torch.nn as nn
 from torch.nn import Linear, ReLU, Softplus,Dropout
 from torch.utils.data import TensorDataset, DataLoader
+import torch.distributions as tdist
 from itertools import cycle
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
 from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
 from bb_opt.src.bo_model import BOModel
 from bb_opt.src.networks.wide_resnet import Wide_ResNet
+import bayesian_opt as bopt
+import sys
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
 
@@ -167,7 +172,10 @@ class NNEnsemble(BOModel, torch.nn.Module):
         n_models: int,
         model_generator,
         model_kwargs_generator,
+        device=None,
         adversarial_epsilon: Optional = None,
+        mu_prior=None,
+        std_prior=None,
     ):
         super().__init__()
 
@@ -193,11 +201,49 @@ class NNEnsemble(BOModel, torch.nn.Module):
             ]
         )
         self.adversarial_epsilon = adversarial_epsilon
+        self.mu_prior = mu_prior
+        self.std_prior = std_prior
+        self.anchor_models = []
+        if mu_prior is not None:
+            self.anchor_models = [copy.deepcopy(model).to(device) for model in self.models]
+            self.generate_new_anchors()
 
-    def forward(self, x, y=None, optimizer=None, individual_predictions: bool = True):
+    def generate_new_anchors(self):
+        with torch.no_grad():
+            for model in self.anchor_models:
+                for param in model.parameters():
+                    param.normal_(self.mu_prior, self.std_prior)
+
+    def bayesian_ensemble_loss(self, data_noise):
+        if len(self.anchor_models) == 0:
+            return 0.
+
+        assert data_noise > 0
+        l2 = [0.] * len(self.anchor_models)
+        for i in range(len(self.anchor_models)):
+            normal_model = self.models[i]
+            anchor_model = self.anchor_models[i]
+            normal_params = [param for param in normal_model.parameters()]
+            anchor_params = [param for param in anchor_model.parameters()]
+
+            n_params = len(normal_params)
+            assert n_params == len(anchor_params)
+
+            for j in range(n_params):
+                l2[i] += data_noise/self.std_prior * torch.sum((normal_params[j]-anchor_params[j])**2)
+
+        return torch.sum(torch.tensor(l2).cuda())
+
+    def reset_parameters(self):
+        for model in self.models:
+            model.reset_parameters()
+
+    def forward(self, x, y=None, optimizer=None, custom_std=None, individual_predictions: bool = True):
         if y is not None and self.adversarial_epsilon is not None:
             x.requires_grad_()
             means, variances = self(x)
+            if custom_std is not None:
+                variances = torch.tensor(custom_std**2).cuda()
             negative_log_likelihood = self.compute_negative_log_likelihood(
                 y, means, variances
             )
@@ -221,6 +267,15 @@ class NNEnsemble(BOModel, torch.nn.Module):
             return means, variances
 
         return self.combine_means_variances(means, variances)
+    
+    def bagging_forward(self, x, num_to_bag=4):
+        nn_idx = np.random.choice(len(self.models), size=4, replace=False)
+        models = [self.models[i] for i in nn_idx]
+
+        means, variances = list(zip(*[models[i](x) for i in range(len(models))]))
+        means, variances = torch.stack(means), torch.stack(variances)
+
+        return means, variances
 
     def predict(self, inputs: torch.Tensor) -> torch.Tensor:
         with torch.no_grad():
@@ -251,6 +306,12 @@ class NNEnsemble(BOModel, torch.nn.Module):
         return mean, variance
 
 #    def reset()
+    def compute_negative_correlation(means):
+        m=means.mean(dim=0)
+        diff=means-m
+        cov=(torch.mm(diff,diff.t())/means.size()[1]).cuda()
+        mask = cov * (1-torch.eye(means.size()[0])).cuda()
+        return mask.sum()
 
     def compute_ind_negative_log_likelihood(
         labels, means, variances, return_mse: bool = False
@@ -266,8 +327,10 @@ class NNEnsemble(BOModel, torch.nn.Module):
 
     @staticmethod
     def compute_negative_log_likelihood(
-        labels, means, variances, return_mse: bool = False
+        labels, means, variances, custom_std=None,return_mse: bool = False
     ):
+        if custom_std is not None:
+            variances = torch.tensor(custom_std**2).cuda()
         mse = (labels - means) ** 2
         negative_log_likelihood = 0.5 * (torch.log(variances) + mse / variances)
         negative_log_likelihood = negative_log_likelihood.mean(dim=-1).sum()
@@ -277,9 +340,32 @@ class NNEnsemble(BOModel, torch.nn.Module):
             return negative_log_likelihood, mse
         return negative_log_likelihood
 
+    def report_metric_sid(
+        labels, means, variances, custom_std=None, return_mse=False
+    ):  
+        num_samples = means.shape[0]
+
+        d = tdist.Normal(means.view(-1), torch.sqrt(variances.view(-1)))
+        negative_log_likelihood1 = -d.log_prob(labels.unsqueeze(0).expand(num_samples, -1).contiguous().view(-1)).mean().detach()
+
+        m, v = bopt.combine_means_variances(means, variances)
+        mse_m = ((labels - m) ** 2).detach()
+        #if custom_std is None:
+        #    d = tdist.Normal(m, torch.sqrt(v))
+        #else:
+        #    d = tdist.Normal(m, custom_std)
+        #negative_log_likelihood2 = -d.log_prob(labels).mean().detach()
+        negative_log_likelihood2 = bopt.get_nll(means, torch.sqrt(variances), labels, tdist.Normal, single_gaussian=True).mean().detach()
+
+        if return_mse:
+            return negative_log_likelihood1, negative_log_likelihood2, mse_m.mean()
+        return negative_log_likelihood1, negative_log_likelihood2
+
     def report_metric(
-        labels, means, variances, return_mse: bool = False
+        labels, means, variances, custom_std=None, return_mse: bool = False
     ):
+        if custom_std is not None:
+            variances = torch.tensor(custom_std**2).cuda()
         m = means.mean(dim=0)
         v = (variances + means ** 2).mean(dim=0)-m ** 2
         mse_m= (labels - m) ** 2
@@ -336,7 +422,11 @@ class NNEnsemble(BOModel, torch.nn.Module):
         device=None,
         nonlinearity_names: Sequence[str] = None,
         extra_random: bool = False,
-        single_layer:bool = True
+        single_layer:bool = True,
+        sigmoid_coeff : float = 1.,
+        separate_mean_var = False,
+        mu_prior=None,
+        std_prior=None,
     ):
         device = device or "cpu"
 	
@@ -344,11 +434,11 @@ class NNEnsemble(BOModel, torch.nn.Module):
             model_kwargs = {"n_inputs": n_inputs, "n_hidden": n_hidden}
             if single_layer:
                 model = cls(
-                    n_models, NN, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                    n_models, NN, model_kwargs,device=device, adversarial_epsilon=adversarial_epsilon,mu_prior=mu_prior,std_prior=std_prior
                 ).to(device)
             else:
                 model = cls(
-                    n_models, NN3, model_kwargs, adversarial_epsilon=adversarial_epsilon
+                    n_models, NN3, model_kwargs,device=device, adversarial_epsilon=adversarial_epsilon,mu_prior=mu_prior,std_prior=std_prior
                 ).to(device)
             return model
 
