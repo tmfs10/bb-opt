@@ -207,6 +207,9 @@ def add_parse_args(parser):
     parser.add_argument('--min_hsic_increase', type=float, help="minimum hsic increase after which batch filled using ei")
     parser.add_argument('--bottom_skip_frac', type=float01)
     parser.add_argument('--batch_fill', type=str)
+    parser.add_argument('--info_measure', type=str)
+    parser.add_argument('--info_ack_l1_coeff', type=float)
+    parser.add_argument('--emb_corr_compute_batch_size', type=int)
 
     # imdbwiki args
     parser.add_argument('--resnet_depth', type=int)
@@ -228,7 +231,7 @@ def add_parse_args(parser):
 
     # ensemble args
     parser.add_argument('--num_models', type=int, help='number of models in ensemble')
-    parser.add_argument('--adv_epsilon', type=float, help='adversarial epsilon')
+    parser.add_argument('--adv_epsilon', type=float, nargs='+', help='adversarial epsilon')
 
     # chemvae args
     parser.add_argument('--chemvae_prop_activation', type=str)

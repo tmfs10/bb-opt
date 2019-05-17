@@ -3,6 +3,7 @@ import random
 import copy
 import gc
 import sys
+from sklearn import linear_model
 import numpy as np
 import math
 import pandas as pd
@@ -1211,6 +1212,101 @@ def acquire_batch_mves_sid_unnormalized(
     print('best_hsic_vec', best_hsic_vec)
     return batch_idx, best_hsic
 
+
+def acquire_batch_maxminembcorr_info(
+    params,
+    preds,
+    model, # (num_samples, num_opt_values)
+    X,
+    ack_batch_size,
+    skip_idx,
+    device='cuda',
+):
+    if params.measure == "pdts_condense":
+        opt_idx = get_pdts_idx(preds, params.num_diversity*ack_batch_size, skip_idx=skip_idx)
+    opt_emb = model.forward_penultimate(X[opt_idx]) # (num_ensemble, num_points, emb_dim)
+    opt_emb = torch.mean(opt_emb, 1, keepdim=True)
+    opt_emb = opt_emb.permute([2, 0, 1]) # (p, n, a)
+
+    num_points = X.shape[0]
+    batches = utils.make_batches(params.emb_corr_compute_batch_size, num_points)
+
+    emb_corr_vec = torch.zeros(num_points, device=params.device)
+    sim_list = []
+    for bi in range(len(batches)-1):
+        bs = batches[bi]
+        be = batches[bi+1]
+
+        emb = model.forward_penultimate(X[bs:be]).permute([2, 0, 1])
+
+        sim = ops.parallel_cross_corrcoef(opt_emb, emb) # (emb_dim, num_opt, num_batch)
+        sim = sim.min(dim=0)[0]
+        assert len(sim.shape) == 2 # (num_opt, num_batch)
+        sim_list += [sim]
+
+    sim = torch.cat(sim_list, dim=-1)
+    sim[sim != sim] = 0
+    sim = sim.sum(0, keepdim=True)
+    sim, sim_sorted_idx = torch.sort(sim, dim=1, descending=True)
+
+    cur_ack_idx = []
+
+    for j in range(sim_sorted_idx.shape[1]):
+        for i in range(sim_sorted_idx.shape[0]):
+            if len(cur_ack_idx) >= ack_batch_size:
+                break
+            idx = sim_sorted_idx[i, j].item()
+            if idx not in skip_idx:
+                cur_ack_idx += [idx]
+
+    cur_ack_idx = cur_ack_idx[:1]
+    opt_idx = get_pdts_idx(preds, ack_batch_size, skip_idx=skip_idx)
+    for idx in opt_idx:
+        if len(cur_ack_idx) >= ack_batch_size:
+            break
+        if idx not in cur_ack_idx and idx not in skip_idx:
+            cur_ack_idx += [idx]
+
+    return cur_ack_idx
+
+
+def acquire_batch_lasso_info(
+    params,
+    opt_values, # (num_samples, num_opt_values)
+    preds,
+    point_pool_idx,
+    skip_idx,
+    ack_batch_size,
+    device='cuda',
+    min_coeff=ops._eps,
+    l1_coeff=0.1,
+):
+    assert point_pool_idx is not None
+    opt_values = opt_values.mean(1).cpu().numpy()
+
+    lasso = linear_model.Lasso(alpha=l1_coeff*opt_values.mean())
+    preds = preds[:, point_pool_idx].cpu().numpy()
+
+    lasso.fit(preds, opt_values)
+    coeffs = np.abs(lasso.coef_)
+    coeffs_idx = np.argsort(coeffs)[::-1]
+
+    opt_preds = lasso.predict(preds)
+    residual = np.sqrt(((opt_values-opt_preds)**2).mean())
+
+    cur_ack_idx = []
+    print('coeffs', coeffs[coeffs_idx][:10])
+    for i in range(coeffs_idx.shape[0]):
+        if len(cur_ack_idx) >= 2:
+            break
+        if coeffs[coeffs_idx[i]] <= min_coeff:
+            break
+        idx = point_pool_idx[coeffs_idx[i]]
+        if idx in skip_idx:
+            continue
+        cur_ack_idx += [idx]
+
+    return cur_ack_idx, residual
 
 
 
@@ -2823,6 +2919,7 @@ def get_info_ack(
     ack_batch_size,
     skip_idx,
     labels,
+    info_measure='hsic',
 ):
     with torch.no_grad():
         er = preds.mean(dim=0).view(-1).cpu().numpy()
@@ -2922,23 +3019,36 @@ def get_info_ack(
         else:
             hsic_skip_idx = skip_idx
 
-        condense_idx, best_hsic = acquire_batch_mves_sid(
-                params,
-                best_pred, 
-                preds, 
-                hsic_skip_idx,
-                params.mves_compute_batch_size, 
-                ack_batch_size, 
-                #true_labels=labels, 
-                greedy_ordering=params.mves_greedy, 
-                pred_weighting=params.pred_weighting, 
-                normalize=params.normalize_hsic, 
-                divide_by_std=params.divide_by_std, 
-                opt_weighting=None,
-                min_hsic_increase=params.min_hsic_increase,
-                double=True,
-                point_pool_idx=point_pool_idx,
-                )
+        if info_measure == 'hsic':
+            condense_idx, best_hsic = acquire_batch_mves_sid(
+                    params,
+                    best_pred, 
+                    preds, 
+                    hsic_skip_idx,
+                    params.mves_compute_batch_size, 
+                    ack_batch_size, 
+                    #true_labels=labels, 
+                    greedy_ordering=params.mves_greedy, 
+                    pred_weighting=params.pred_weighting, 
+                    normalize=params.normalize_hsic, 
+                    divide_by_std=params.divide_by_std, 
+                    opt_weighting=None,
+                    min_hsic_increase=params.min_hsic_increase,
+                    double=True,
+                    point_pool_idx=point_pool_idx,
+                    )
+        elif info_measure == 'lasso':
+            condense_idx, best_hsic = acquire_batch_lasso_info(
+                    params,
+                    best_pred, 
+                    preds,
+                    point_pool_idx,
+                    hsic_skip_idx,
+                    ack_batch_size, 
+                    l1_coeff=params.info_ack_l1_coeff,
+                    )
+        else:
+            assert False, "info_measure: " + info_measure + " not implemented"
 
         #print('er_idx', er_idx)
         print('len(condense_idx)', len(condense_idx))

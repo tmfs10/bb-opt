@@ -193,6 +193,40 @@ def cross_cov(x, y):
 
     return c
 
+def parallel_cross_cov(x, y):
+    # calculate covariance vector
+    # (p, n, a), (p, n, b) -> (b, n, q), n is the number of samples
+
+    mean_x = x.mean(1, keepdim=True)
+    mean_y = y.mean(1, keepdim=True)
+
+    xm = x-mean_x.expand_as(x)
+    ym = y-mean_y.expand_as(y)
+
+    xm = xm.permute([0, 2, 1]) # becomes (p, a, n)
+    c = torch.einsum('pan,pnb->pab', xm, ym)
+
+    c /= (x.shape[1] - 1)
+
+    return c # pab
+
+def parallel_cross_corrcoef(x, y):
+    # calculate correlation vector
+    # (p, n, a), (p, n, b) -> (b, n, q), n is the number of samples
+
+    c = parallel_cross_cov(x, y)
+    stddev_x = x.std(1, keepdim=True).permute([0, 2, 1]) # (p, a, 1)
+    stddev_y = y.std(1, keepdim=True) # (p, 1, b)
+    norm = stddev_x*stddev_y # (p, a, b)
+
+    c /= norm
+
+    # clamp between -1 and 1
+    # probably not necessary but numpy does it
+    c = torch.clamp(c, -1.0, 1.0)
+
+    return c
+
 def cross_corrcoef(x, y):
     # x is (n, p), y is (n, q) -> (p, q)
     # calculate correlation matrix of rows

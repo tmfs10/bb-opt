@@ -20,3 +20,6 @@
 --sparse_hsic_penalty 0.0
 --sparse_hsic_threshold 0.01
 --hsic_condense_penalty 1.0 1.0
+
+--info_measure hsic
+--info_ack_l1_coeff 1

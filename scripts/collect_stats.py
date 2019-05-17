@@ -418,7 +418,7 @@ def prop_test2(
         std = [np.std(stat[0]), np.std(stat[1])]
         score = ret[0]
         pval = ret[1]
-        if pval <= pval_threshold:
+        if pval <= pval_threshold or pval != pval:
             m = [np.mean(stat[0]), np.mean(stat[1])]
             c = 1 if m[1] > m[0] else 0
             count += c

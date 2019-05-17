@@ -124,12 +124,13 @@ def jointplot(
 
 
 def dfs_exhaustive_search(branching_values):
-    branching_indices = [0]*branching_values
+    # yields branching indices
     m = len(branching_values)
-    assert m == len(branching_indices)
+    branching_indices = [0]*m
 
-    while branching_indices[0] != len(branching_values[0]):
-        values = [branching_values[branching_indices[i]] for i in range(m)]
+    while branching_indices[0] < len(branching_values[0]):
+        values = [branching_values[i][branching_indices[i]] for i in range(m)]
+        yield values
         carry = True
         for i in reversed(range(m)):
             n = len(branching_values[i])
@@ -138,11 +139,10 @@ def dfs_exhaustive_search(branching_values):
                 assert branching_indices[i] <= n
                 if branching_indices[i] < n:
                     carry = False
-                else:
+                elif i > 0:
                     branching_indices[i] = 0
             else:
                 break
-        yield values
 
 
 
@@ -202,7 +202,9 @@ def normal_standardization(labels, mean, std, exp=np.exp):
 
 def make_batches(batch_size, N):
     num_batches = N//batch_size+1
-    batches = [i*batch_size  for i in range(num_batches)] + [N]
+    batches = [i*batch_size  for i in range(num_batches)]
+    if batches[-1] < N:
+        batches += [N]
     return batches
 
 def randint(low, n):

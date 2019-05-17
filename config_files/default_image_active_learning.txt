@@ -24,6 +24,7 @@
 --fixed_num_epoch_iters 0
 --init_train_examples 3000
 
+--ensemble_forward_batch_size 128
 --init_train_num_epochs 30
 --re_train_num_epochs 100
 --init_train_batch_size 200
@@ -110,3 +111,4 @@
 --loss_fn nll
 
 --bottom_skip_frac 0.
+--adv_epsilon 0.0

@@ -136,6 +136,18 @@ class NN(torch.nn.Module):
         #variance = self.softplus(output[:, 1]) + self.min_variance
         return mean.view(-1), variance.view(-1)
 
+    def forward_penultimate(self, x):
+        hidden = []
+        output = []
+        for i in range(len(self.output)):
+            if self.n_hidden > 0:
+                output += [self.non_linearity(self.hidden[i](x))]
+            else:
+                output += [self.output[i](x)]
+
+        output = torch.cat(output, dim=1)
+        return output
+
     def input_shape(self):
         return [self.n_inputs]
 
@@ -188,6 +200,11 @@ class NN2(torch.nn.Module):
         else:
             variance = torch.ones(x.shape[0], device=x.device)*(self.fixed_noise_std**2)*1./self.max_var + self.min_variance
         return mean, variance
+
+    def forward_penultimate(self, x):
+        hidden1 = self.non_linearity(self.hidden1(x))
+        hidden2 = self.non_linearity(self.hidden2(hidden1))
+        return hidden2
 
     def input_shape(self):
         return [self.n_inputs]
@@ -264,7 +281,6 @@ class NNEnsemble(torch.nn.Module):
         model_generator,
         model_kwargs_generator,
         device='cuda',
-        adversarial_epsilon=None,
         mu_prior=None,
         std_prior=None,
     ):
@@ -291,7 +307,6 @@ class NNEnsemble(torch.nn.Module):
                 for _ in range(n_models)
             ]
         )
-        self.adversarial_epsilon = adversarial_epsilon
 
         self.mu_prior = mu_prior
         self.std_prior = std_prior
@@ -340,7 +355,65 @@ class NNEnsemble(torch.nn.Module):
         for model in self.models:
             model.reset_parameters()
 
-    def forward(self, x, individual_predictions: bool = True, all_pairs: bool = True):
+    def forward_penultimate(
+            self, 
+            x, 
+            all_pairs: bool = True,
+    ):
+        if not all_pairs:
+            N = x.shape[0]
+            m = len(self.models)
+            per_model = N//m
+            batches = [i*per_model for i in range(m)] + [N]
+            assert len(batches) == m+1
+
+            embeddings = []
+            for batch_iter in range(len(batches)-1):
+                bs = batches[batch_iter]
+                be = batches[batch_iter+1]
+                assert be-bs > 0, str(be) + "-" + str(bs) + "; " + str(batch_iter) + "; " + str(batches) + "; " + str(N) + "; " + str(m)
+
+                embedding = self.models[batch_iter].forward_penultimate(x[bs:be])
+                embeddings += [embedding]
+
+            means = torch.stack(embeddings, dim=0)
+
+            return embeddings
+
+        embeddings = [self.models[i].forward_penultimate(x) for i in range(self.n_models)]
+        embeddings = torch.stack(embeddings, dim=0)
+
+        return embeddings
+
+
+    def forward(
+            self, 
+            x, 
+            y=None,
+            optimizer=None,
+            adversarial_epsilon=None,
+            individual_predictions: bool = True, 
+            all_pairs: bool = True,
+    ):
+        if y is not None and adversarial_epsilon is not None:
+            x.requires_grad_()
+            means, variances = self(x)
+            negative_log_likelihood = self.compute_negative_log_likelihood(
+                y, means, variances
+            )
+
+            grad = torch.autograd.grad(
+                negative_log_likelihood, x, retain_graph=optimizer is not None
+            )[0]
+            x = x.detach() + self.adversarial_epsilon * torch.sign(grad)
+
+            if optimizer:
+                # then do a backward pass on x as well as returning the prediction
+                # for x_adv to do a pass on that
+                negative_log_likelihood.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+
         if not all_pairs:
             N = x.shape[0]
             m = len(self.models)
@@ -463,7 +536,6 @@ class NNEnsemble(torch.nn.Module):
         n_inputs: int,
         n_models: int = 5,
         n_hidden: int = 100,
-        adversarial_epsilon: Optional = None,
         device='cuda',
         nonlinearity_names: Sequence[str] = None,
         extra_random: bool = False,
@@ -490,7 +562,6 @@ class NNEnsemble(torch.nn.Module):
                     NN, 
                     model_kwargs, 
                     device=device,
-                    adversarial_epsilon=adversarial_epsilon,
                     mu_prior=mu_prior,
                     std_prior=std_prior,
                 ).to(device)
@@ -500,7 +571,6 @@ class NNEnsemble(torch.nn.Module):
                     NN2, 
                     model_kwargs, 
                     device=device,
-                    adversarial_epsilon=adversarial_epsilon,
                     mu_prior=mu_prior,
                     std_prior=std_prior,
                 ).to(device)
@@ -556,7 +626,7 @@ class NNEnsemble(torch.nn.Module):
                 yield kw
 
         model = cls(
-            n_models, RandomNN, model_kwargs(), adversarial_epsilon=adversarial_epsilon
+            n_models, RandomNN, model_kwargs(),
         ).to(device)
         return model
 
@@ -679,7 +749,6 @@ class NNEnsemble(torch.nn.Module):
             "n_models": self.n_models,
             # assumption: all have same hidden size; true in the models I use (so far)
             "n_hidden": next(m.children()).out_features,
-            "adversarial_epsilon": self.adversarial_epsilon,
             "nonlinearity_names": nonlinearity_names,
         }
 
@@ -713,7 +782,6 @@ class NNEnsemble(torch.nn.Module):
                     Wide_ResNet, 
                     model_kwargs, 
                     device=device,
-                    adversarial_epsilon=None,
                     mu_prior=mu_prior,
                     std_prior=std_prior,
                 ).to(device)
@@ -746,7 +814,6 @@ class NNEnsemble(torch.nn.Module):
             n_models = kwargs["n_models"]
             n_inputs = kwargs["n_inputs"]
             n_hidden = kwargs["n_hidden"]
-            adversarial_epsilon = kwargs["adversarial_epsilon"]
             nonlinearity_names = kwargs["nonlinearity_names"]
 
         model = cls.get_model(
@@ -754,7 +821,6 @@ class NNEnsemble(torch.nn.Module):
             batch_size,
             n_models,
             n_hidden,
-            adversarial_epsilon,
             device,
             nonlinearity_names,
         )

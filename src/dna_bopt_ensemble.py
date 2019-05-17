@@ -398,7 +398,7 @@ for task_iter in range(len(task_name)):
 
         zero_gamma_model = None
         if params.project in ['imdb', 'wiki']:
-            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train2(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -412,9 +412,10 @@ for task_iter in range(len(task_name)):
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 unseen_idx=unseen_idx,
+                hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                 )
         else:
-            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train2(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -427,6 +428,7 @@ for task_iter in range(len(task_name)):
                 normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 unseen_idx=unseen_idx,
+                hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                 )
         torch.cuda.empty_cache()
         #print('point 6:', nvidia_smi())
@@ -659,6 +661,16 @@ for task_iter in range(len(task_name)):
                                     if len(cur_ack_idx) == ack_batch_size:
                                         break
 
+                        elif params.ack_fun == "maxminembcorr":
+                            cur_ack_idx = bopt.acquire_batch_maxminembcorr_info(
+                                    params,
+                                    pre_ack_pred_means,
+                                    cur_model,
+                                    X,
+                                    ack_batch_size,
+                                    skip_idx_cur,
+                                    device=params.device,
+                                    )
                         elif "info" in params.ack_fun and "grad" not in params.ack_fun:
                             cur_ack_idx = bopt.get_info_ack(
                                     params,
@@ -666,6 +678,7 @@ for task_iter in range(len(task_name)):
                                     ack_batch_size,
                                     skip_idx_cur,
                                     labels,
+                                    info_measure=params.info_measure,
                                     )
                             if "rand" in params.ack_fun:
                                 unseen_idx2 = list(unseen_idx)
@@ -980,7 +993,7 @@ for task_iter in range(len(task_name)):
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train2(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -993,9 +1006,10 @@ for task_iter in range(len(task_name)):
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                             num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                             unseen_idx=unseen_idx,
+                            hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                             )
                     else:
-                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train2(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -1008,6 +1022,7 @@ for task_iter in range(len(task_name)):
                             normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                             num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                             unseen_idx=unseen_idx,
+                            hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                             )
                     torch.cuda.empty_cache()
                     #print('point 7:', nvidia_smi())
@@ -1048,7 +1063,7 @@ for task_iter in range(len(task_name)):
                                 params.sigmoid_coeff,
                                 train_Y=train_Y_cur,
                                 )
-                        print('test_pred_stats:', pprint.pformat(test_pred_stats))
+                        print('ind_top_ood_pred:', pprint.pformat(ind_top_ood_pred_stats))
 
                         ood_pred_stats = None
                         if ood_inputs is not None:
