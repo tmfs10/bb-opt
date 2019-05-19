@@ -873,6 +873,34 @@ def pairwise_hsic_diversity(
     return hsic_matrix.mean()
 
 
+def get_adv_epsilon_x(
+    params,
+    model,
+    x,
+    y,
+    adv_epsilon
+):
+    assert params.loss_fn == "nll"
+    x.requires_grad_()
+    means, variances = model(x)
+
+    negative_log_likelihood = model.compute_negative_log_likelihood(
+        y, 
+        means, 
+        variances,
+    )
+
+    grad = torch.autograd.grad(
+        negative_log_likelihood, x, retain_graph=False
+    )[0]
+
+    with torch.no_grad():
+        x = x.detach() + adv_epsilon * torch.sign(grad)
+
+    return x
+
+
+
 def train_ensemble(
     params,
     batch_size,
@@ -903,7 +931,8 @@ def train_ensemble(
             old_model_ensemble = copy.deepcopy(model_ensemble)
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
-        adv_train = adv_epsilon > 1e-9
+        adv_train = adv_epsilon > ops._eps
+        print('adv', adv_train)
         train_X, train_Y, val_X, val_Y, X, Y = data
         N = train_X.shape[0]
         assert val_frac >= 0.01
@@ -1060,7 +1089,15 @@ def train_ensemble(
                 assert False, params.loss_fn + " not implemented"
 
             if adv_train:
-                means_adv, variances_adv = model_ensemble(bX, bY)
+                adv_x = get_adv_epsilon_x(
+                        params,
+                        model_ensemble,
+                        bX,
+                        bY,
+                        adv_epsilon,
+                    )
+                means_adv, variances_adv = model_ensemble(adv_x)
+                assert params.loss_fn == "nll"
                 loss += model_ensemble.compute_negative_log_likelihood(
                         bY,
                         means_adv,

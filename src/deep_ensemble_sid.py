@@ -389,31 +389,9 @@ class NNEnsemble(torch.nn.Module):
     def forward(
             self, 
             x, 
-            y=None,
-            optimizer=None,
-            adversarial_epsilon=None,
             individual_predictions: bool = True, 
             all_pairs: bool = True,
     ):
-        if y is not None and adversarial_epsilon is not None:
-            x.requires_grad_()
-            means, variances = self(x)
-            negative_log_likelihood = self.compute_negative_log_likelihood(
-                y, means, variances
-            )
-
-            grad = torch.autograd.grad(
-                negative_log_likelihood, x, retain_graph=optimizer is not None
-            )[0]
-            x = x.detach() + self.adversarial_epsilon * torch.sign(grad)
-
-            if optimizer:
-                # then do a backward pass on x as well as returning the prediction
-                # for x_adv to do a pass on that
-                negative_log_likelihood.backward()
-                optimizer.step()
-                optimizer.zero_grad()
-
         if not all_pairs:
             N = x.shape[0]
             m = len(self.models)
@@ -1075,7 +1053,11 @@ class ResnetEnsemble2(torch.nn.Module):
         self.unfreeze_conv()
         self.unfreeze_fc()
 
-    def forward(self, x, return_fc_input=False):
+    def forward(
+            self, 
+            x, 
+            return_fc_input=False
+    ):
         n_models = len(self.conv_model)
         fc_input = [self.conv_model[i](x) for i in range(n_models)]
         out_mean = []

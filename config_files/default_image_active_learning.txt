@@ -106,7 +106,7 @@
 --hsic_kernel_fn mixrbf_kernels
 
 --pairwise_corr_diversity False
---pairwise_corr_diversity_mean_weighted True
+--pairwise_corr_diversity_mean_weighted False
 
 --loss_fn nll
 
