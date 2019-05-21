@@ -1282,31 +1282,63 @@ def acquire_batch_lasso_info(
     l1_coeff=0.1,
 ):
     assert point_pool_idx is not None
-    opt_values = opt_values.mean(1).cpu().numpy()
 
-    lasso = linear_model.Lasso(alpha=l1_coeff*opt_values.mean())
-    preds = preds[:, point_pool_idx].cpu().numpy()
+    # regression with columns being coeffs for each point and rows
+    # being one row per ensemble member/point
+    # design matrix is composed of the ensemble member specific 
+    # values of the candidate feature (point)
 
-    lasso.fit(preds, opt_values)
-    coeffs = np.abs(lasso.coef_)
-    coeffs_idx = np.argsort(coeffs)[::-1]
+    num_samples = opt_values.shape[0]
+    num_condense_points = opt_values.shape[1]
 
-    opt_preds = lasso.predict(preds)
-    residual = np.sqrt(((opt_values-opt_preds)**2).mean())
+    Y = opt_values.transpose(0, 1).contiguous().view(-1) # num_condense_points, num_ensemble_members
+    X = torch.eye(num_condense_points, dtype=preds.dtype).repeat(1, num_samples).view(-1, num_condense_points)
+
+    preds = preds.cpu().numpy() # num_ensemble_members, num_condense_points
+    X = X.cpu().numpy() # (num_condense_points * num_ensemble_members, num_condense_points)
+    Y = Y.cpu().numpy()
+
+    assert X.shape[0] == num_condense_points * num_samples, "%s[0] == %d=%d*%d" % (X.shape, num_condense_points*num_samples, num_condense_points, num_samples)
+    assert X.shape[1] == num_condense_points, "%s[1] == %d" % (X.shape, num_condense_points)
+    assert Y.shape[0] == num_condense_points * num_samples, "%s[0] == %d=%d*%d" % (Y.shape, num_condense_points*num_samples, num_condense_points, num_samples)
+    
+    lr = linear_model.LinearRegression()
 
     cur_ack_idx = []
-    print('coeffs', coeffs[coeffs_idx][:10])
-    for i in range(coeffs_idx.shape[0]):
-        if len(cur_ack_idx) >= 2:
-            break
-        if coeffs[coeffs_idx[i]] <= min_coeff:
-            break
-        idx = point_pool_idx[coeffs_idx[i]]
-        if idx in skip_idx:
-            continue
-        cur_ack_idx += [idx]
+    point_pool_left = {i for i in range(len(point_pool_idx))}
+    for i in range(ack_batch_size):
+        best_residual = float('inf')
+        best_idx = -1
+        best_j = None
+        best_Y_hat = None
+        for j in range(len(point_pool_idx)):
+            idx = point_pool_idx[j]
+            if idx in cur_ack_idx or idx in skip_idx:
+                continue
+            predictor_vals = np.reshape(np.repeat(preds[:, idx], [num_condense_points]), -1) # num_condense_points, num_ensemble_members
+            assert predictor_vals.shape[0] == num_condense_points * num_samples, "%s[0] == %d=%d*%d" % (predictor_vals.shape, num_condense_points*num_samples, num_condense_points, num_samples)
+            predictor_vals = X*np.expand_dims(predictor_vals, 1)
+            lr.fit(predictor_vals, Y)
 
-    return cur_ack_idx, residual
+            Y_hat = lr.predict(predictor_vals)
+            residual = np.sqrt(((Y-Y_hat)**2).mean())
+
+            if residual < best_residual:
+                best_residual = residual
+                best_idx = idx
+                best_Y_hat = Y_hat
+                best_j = j
+
+        print('best_residual', best_residual, Y.std())
+        point_pool_left.remove(best_j)
+        old_std = Y[list(point_pool_left)].std()
+        Y -= Y_hat
+        new_std = Y[list(point_pool_left)].std()
+        if new_std/old_std > 0.95:
+            break
+        cur_ack_idx += [best_idx]
+
+    return [], best_residual
 
 
 
