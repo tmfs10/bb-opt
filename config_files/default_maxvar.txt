@@ -114,3 +114,4 @@
 
 --num_rand_diversity 0
 --adv_epsilon 0.0
+--rand_diversity_dist condense

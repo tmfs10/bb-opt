@@ -1,5 +1,6 @@
 
 import numpy as np
+import random
 import os
 import pickle
 from typing import Dict, Tuple, Sequence, Union, Callable, Optional
@@ -308,3 +309,11 @@ def load_data_wiki_sid(
     inputs = np.moveaxis(image, -1, 1)
 
     return inputs, labels, gender
+
+
+def get_num_rand(num_rand_diversity):
+    num_rand = int(num_rand_diversity)
+    r = random.random()
+    if r < num_rand_diversity-num_rand:
+        num_rand += 1
+    return num_rand

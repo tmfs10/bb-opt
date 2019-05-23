@@ -54,6 +54,20 @@ def image_sample_uniform(out_size, rng=None):
         out_data /= 255.
     return out_data, rng
 
+def image_sample_gaussian(out_size, rng, scale=1.0):
+    if rng is not None:
+        cur_rng = ops.get_rng_state()
+        ops.set_rng_state(rng)
+
+    z = np.random.normal(scale=scale, size=(out_size,3,32,32))
+
+    if rng is not None:
+        rng = ops.get_rng_state()
+        ops.set_rng_state(cur_rng)
+
+    out_data = torch.from_numpy(z).float().cuda()
+    return out_data, rng
+
 class Qz(nn.Module):
     def __init__(self, num_latent, prior_std):
         super(Qz, self).__init__()
@@ -1044,6 +1058,7 @@ def train_ensemble(
             with torch.no_grad():
                 bX = train_X[bs:be].detach()
                 bY = train_Y[bs:be].detach()
+                sampling_info['bX'] = bX
 
                 if params.unseen_reg != "normal" and params.sampling_dist == "uniform_bb" and isinstance(model_ensemble, NNEnsemble):
                     temp = bX.view(bX.shape[0], -1)

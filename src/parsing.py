@@ -185,7 +185,8 @@ def add_parse_args(parser):
 
     parser.add_argument('--num_diversity', type=int, 
             help='num top max-value dists/top ei sorted point dists')
-    parser.add_argument('--num_rand_diversity', type=int)
+    parser.add_argument('--num_rand_diversity', type=float)
+    parser.add_argument('--rand_diversity_dist', type=str)
     parser.add_argument('--diversity_coeff', type=float)
     parser.add_argument('--ucb_ekb_weighting', type=float)
     parser.add_argument('--ekb_use_median', type=str2bool)
@@ -217,6 +218,7 @@ def add_parse_args(parser):
     parser.add_argument('--resnet_dropout', type=float)
     parser.add_argument('--train_gender', type=int) # 0 female, 1 male, 2 both
     parser.add_argument('--resnet_do_batch_norm', type=str2bool)
+    parser.add_argument('--boundary_stddev', type=float01)
 
     # b-opt grad search args
     parser.add_argument('--input_opt_lr', type=float)
@@ -250,6 +252,14 @@ def add_parse_args_wrongness(parser):
     parser.add_argument('--ood_pred_lr', type=float)
     parser.add_argument('--ood_pred_epoch_iter', type=int)
     parser.add_argument('--ood_pred_batch_size', type=int)
+
+def add_inference_from_saved_model_args(parser):
+    parser.add_argument('--gpu', type=int)
+    parser.add_argument('--save_file_path_prefix', type=str)
+    parser.add_argument('--init_model_path_prefix', type=str)
+    parser.add_argument('--device', type=str, default='cuda')
+    parser.add_argument('--project', type=str, default='wiki')
+    parser.add_argument('--num_seeds', type=int, default=20)
 
 def parse_args(parser):
     args = parser.parse_args()

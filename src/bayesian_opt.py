@@ -2938,6 +2938,18 @@ def get_noninfo_ack(
                     if idx not in cur_ack_idx and idx not in skip_idx:
                         cur_ack_idx.update({idx})
         cur_ack_idx = list(cur_ack_idx)
+        if "rand" in params.ack_fun and params.rand_diversity_dist == "condense":
+            pdts_idx = list(get_pdts_idx(preds, params.num_diversity*ack_batch_size, skip_idx=skip_idx))
+            random.shuffle(pdts_idx)
+            num_rand = utils.get_num_rand(params.num_rand_diversity)
+            if num_rand >= 1:
+                cur_ack_idx = cur_ack_idx[:-num_rand]
+                for idx in pdts_idx:
+                    if len(cur_ack_idx) >= ack_batch_size:
+                        break
+                    if idx in cur_ack_idx:
+                        continue
+                    cur_ack_idx += [idx]
     else:
         assert False, "Not implemented " + ack_fun
     assert len(cur_ack_idx) == ack_batch_size, len(cur_ack_idx)

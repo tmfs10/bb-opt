@@ -340,6 +340,16 @@ for task_iter in range(len(task_name)):
                     out, rng = dbopt.image_sample_uniform(batch_size, sampling_info["ood_sampling_rng"])
                     sampling_info["ood_sampling_rng"] = rng
                     return out
+            elif params.sampling_space == "input" and params.sampling_dist == "boundary":
+                def sample_uniform_fn(batch_size, sampling_info=None):
+                    perturb, rng = dbopt.image_sample_gaussian(batch_size, sampling_info["ood_sampling_rng"], scale=params.boundary_stddev)
+                    sampling_info["ood_sampling_rng"] = rng
+                    with torch.no_grad():
+                        images = sampling_info["bX"]
+                        assert images.shape[0] == batch_size
+                        images = images + perturb
+                        images = torch.clamp(images, images.min(), images.max())
+                    return images
             elif params.sampling_space == "fc" and params.sampling_dist == "uniform":
                 def sample_uniform_fn(batch_size, sampling_info=None):
                     model = sampling_info['model']
@@ -681,15 +691,18 @@ for task_iter in range(len(task_name)):
                                     info_measure=params.info_measure,
                                     )
                             if "rand" in params.ack_fun:
+                                assert params.rand_diversity_dist == 'uniform'
                                 unseen_idx2 = list(unseen_idx)
                                 random.shuffle(unseen_idx2)
-                                cur_ack_idx = cur_ack_idx[:-params.num_rand_diversity]
-                                for idx in unseen_idx2:
-                                    if len(cur_ack_idx) >= ack_batch_size:
-                                        break
-                                    if idx in cur_ack_idx:
-                                        continue
-                                    cur_ack_idx += [idx]
+                                num_rand = utils.get_num_rand(params.num_rand_diversity)
+                                if num_rand >= 1:
+                                    cur_ack_idx = cur_ack_idx[:-num_rand]
+                                    for idx in unseen_idx2:
+                                        if len(cur_ack_idx) >= ack_batch_size:
+                                            break
+                                        if idx in cur_ack_idx:
+                                            continue
+                                        cur_ack_idx += [idx]
                         elif "grad" in params.ack_fun:
                             if "pdts" in params.ack_fun:
                                 point_locs, point_preds = bopt.optimize_model_input_pdts(
@@ -716,8 +729,11 @@ for task_iter in range(len(task_name)):
 
                             if "rand" in params.ack_fun:
                                 assert "info" not in params.ack_fun
-                                x, _ = bb_fn.sample(params.num_rand_diversity)
-                                point_locs[:params.num_rand_diversity, :] = x
+                                assert params.rand_diversity_dist == 'uniform'
+                                num_rand = utils.get_num_rand(params.num_rand_diversity)
+                                if num_rand >= 1:
+                                    x, _ = bb_fn.sample(num_rand)
+                                    point_locs[:num_rand, :] = x
                             elif "info" in params.ack_fun:
                                 if params.measure == "pes":
                                     hsic_batch, best_hsic = bopt.acquire_batch_via_grad_opt_location(
@@ -819,16 +835,18 @@ for task_iter in range(len(task_name)):
                                     ack_iter_info=ack_iter_info,
                                     best_so_far=train_Y_temp.max(),
                                     )
-                            if "rand" in params.ack_fun:
+                            if "rand" in params.ack_fun and params.rand_diversity_dist == "uniform":
                                 unseen_idx2 = list(unseen_idx)
                                 random.shuffle(unseen_idx2)
-                                cur_ack_idx = cur_ack_idx[:-params.num_rand_diversity]
-                                for idx in unseen_idx2:
-                                    if len(cur_ack_idx) >= ack_batch_size:
-                                        break
-                                    if idx in cur_ack_idx:
-                                        continue
-                                    cur_ack_idx += [idx]
+                                num_rand = utils.get_num_rand(params.num_rand_diversity)
+                                if num_rand >= 1:
+                                    cur_ack_idx = cur_ack_idx[:-num_rand]
+                                    for idx in unseen_idx2:
+                                        if len(cur_ack_idx) >= ack_batch_size:
+                                            break
+                                        if idx in cur_ack_idx:
+                                            continue
+                                        cur_ack_idx += [idx]
                         else:
                             assert False, params.ack_fun + " not implemented"
                     elif params.mode == "active_learning":

@@ -5,6 +5,7 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 from scipy.stats import ttest_ind, ttest_rel, combine_pvalues
 
 
@@ -95,15 +96,9 @@ def get_data(exp_folder, suffix, batches, map_loc="cpu", num_samples=10, read_al
     return stats
 
 
-# 1 plot per filename
-# mode takes the following values
-# - avg_seeds : average over seeds before ack
-# - avg_ratio : compute ratio change across ack and then avg
-# - no_avg : look at all seeds in one plot
-def plot_data_vs_ack_iter(
+def plot_data_vs_ack_iter_with_ci(
     batch_size,
     filenames,
-    mode,
     ylabel,
     data_extractor_fn,
     num_acks,
@@ -115,38 +110,24 @@ def plot_data_vs_ack_iter(
     figsize=None,
     save_path=None,
     start_iter=0,
+    ci=None,
 ):
-    assert mode in ["avg_seeds", "avg_ratio", "no_avg"]
     for filename in filenames:
+        data = {'x' : [], 'y' : [], 'Method' : []}
         if figsize is not None:
             plt.figure(figsize=figsize)
-        if mode in ["avg_seeds", "avg_ratio"]:
-            if num_samples_label:
-                plt.xlabel('# of samples acquired')
-            else:
-                plt.xlabel('# of acquisitions')
-            plt.ylabel(ylabel)
-            if title is None:
-                title2 = filename.split("_")[0]
-            else:
-                title2 = title
-            plt.title(title2)
+        xlabel = '# of samples acquired' if num_samples_label else '# of acquisitions'
+        if title is None:
+            title2 = filename.split("_")[0]
+        else:
+            title2 = title
+        plt.xlabel(xlabel)
+        plt.ylabel(ylabel)
+        plt.title(title2)
+
         legend = []
         points = {}
         for exp in to_eval:
-            modd = False
-            if exp == "ensemble7/o_none_ucb_maxvar_inverse_g000510204080_":
-                modd = True
-            if mode == "no_avg":
-                plt.figure(figsize=(6,4))
-                if num_samples_label:
-                    plt.xlabel('# of samples acquired')
-                else:
-                    plt.xlabel('# of acquisitions')
-                plt.ylabel(ylabel)
-                plt.title(filename + " ; " + arrs[exp][1])
-            points[exp] = []
-
             # iterates over the diff seeds
             for i_sample in range(len(arrs[exp][0])):
                 stats = arrs[exp][0][i_sample]
@@ -161,31 +142,27 @@ def plot_data_vs_ack_iter(
                     cur_points = []
                     start = 1
                     end = num_acks
-                    if modd:
-                        start = 1
-                        end = num_acks+1
                     for ack_iter in range(start, end):
-                        cur_points += [data_extractor_fn(cur_stats[ack_iter], filename)]
+                        if num_samples_label:
+                            data['x'] += [ack_iter*batch_size]
+                        else:
+                            data['x'] += [ack_iter]
+                        y = data_extractor_fn(cur_stats[ack_iter], filename)
+                        data['y'] += [y]
+                        data['Method'] += [arrs[exp][1]]
                 except Exception as e:
                     print(ack_iter, i_sample)
                     print(e)
                 #cur_points = cur_points + [cur_points[-1]]*(num_acks-len(cur_stats))
-                cur_points = np.array(cur_points)[start_iter:]
-                if mode == 'no_avg':
-                    plt.plot(cur_points)
-                else:
-                    points[exp] += [cur_points]
-
-            if mode == 'avg_seeds':
-                points[exp] = np.array(points[exp]).mean(axis=0)
-                num_sampled = [(i+1)*batch_size for i in range(len(points[exp]))]
-                if num_samples_label:
-                    plt.plot(num_sampled, points[exp].tolist())
-                else:
-                    plt.plot(points[exp])
-                legend += [arrs[exp][1]]
-        if mode in ["avg_seeds", "avg_ratio"]:
-            plt.legend(legend, loc=legend_loc)
+        data = pd.DataFrame(data)
+        ax = sns.lineplot(
+                x='x',
+                y='y',
+                hue='Method',
+                data=data,
+                ci=ci if ci is not None else 'sd',
+                )
+        ax.set(xlabel=xlabel, ylabel=ylabel, title=title2)
         if save_path is not None:
             plt.savefig(save_path + "/" + title2.lower() + ".png", bbox_inches="tight")
 
@@ -316,6 +293,7 @@ def prop_test(
     ack_iter,
     pval_threshold=0.05,
     paired_test=False,
+    single_test=True,
 ):
     assert len(exp) == 2
     count = 0
@@ -358,18 +336,31 @@ def prop_test(
         std = [np.std(stat[0]), np.std(stat[1])]
         score = ret[0]
         pval = ret[1]
-        if pval <= pval_threshold:
+        test_pval = pval/2. if single_test else pval
+        if test_pval <= pval_threshold:
             m = [np.mean(stat[0]), np.mean(stat[1])]
-            if m[0] == m[1]:
-                continue
             c = 1 if m[1] > m[0] else 0
             count += c
             total += 1
-            if c == 1:
-                pval_list[1] += [pval]
+
+            if not single_test:
+                if m[0] == m[1]:
+                    continue
+                if c == 1:
+                    pval_list[1] += [pval]
+                else:
+                    pval_list[0] += [pval]
+                print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
             else:
-                pval_list[0] += [pval]
-            print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
+                if score == 0:
+                    continue
+                if score < 0 :
+                    pval_list[1] += [pval/2.]
+                    pval_list[0] += [1-pval/2.]
+                else:
+                    pval_list[0] += [pval/2.]
+                    pval_list[1] += [1-pval/2.]
+                print(filename, pval_list[0][-1], pval_list[1][-1], m[0], m[1], '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
 
     print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
     print('count: %d/%d' % (count, total))
@@ -385,6 +376,7 @@ def prop_test2(
     ack_iter,
     pval_threshold=0.05,
     paired_test=False,
+    single_test=True,
 ):
     assert len(data_extractor_fn) == 2
     count = 0
@@ -423,10 +415,20 @@ def prop_test2(
             c = 1 if m[1] > m[0] else 0
             count += c
             total += 1
-            if c == 1:
-                pval_list[1] += [pval]
+            if not single_test:
+                if c == 1:
+                    pval_list[1] += [pval]
+                else:
+                    pval_list[0] += [pval]
             else:
-                pval_list[0] += [pval]
+                if score == 0:
+                    continue
+                if score < 0 :
+                    pval_list[1] += [pval/2.]
+                    pval_list[0] += [(1-pval)/2.]
+                else:
+                    pval_list[0] += [pval/2.]
+                    pval_list[1] += [(1-pval)/2.]
             print(filename, pval, m[0], m[1], c, '\t', '(std: %0.5f %0.5f, #n: %d %d)' % (std[0], std[1], len(stat[0]), len(stat[1])))
 
     print('combined pval: %0.5f vs %0.5f' % (combine_pvalues(pval_list[0])[1], combine_pvalues(pval_list[1])[1]))
