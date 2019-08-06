@@ -2,6 +2,7 @@
 --project test_fn
 
 --ack_fun info_grad_pdts
+--init_train_examples 10
 --num_models 20
 --hsic_kernel_fn mixrbf_kernels
 --min_hsic_increase 0.05
@@ -23,3 +24,5 @@
 
 --info_measure hsic
 --info_ack_l1_coeff 1
+
+--test_fn_dataset_size 100000

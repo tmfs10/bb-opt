@@ -210,6 +210,7 @@ def add_parse_args(parser):
     parser.add_argument('--batch_fill', type=str)
     parser.add_argument('--info_measure', type=str)
     parser.add_argument('--info_ack_l1_coeff', type=float)
+    parser.add_argument('--info_lasso_max_dist', type=str2bool)
     parser.add_argument('--emb_corr_compute_batch_size', type=int)
 
     # imdbwiki args
@@ -245,6 +246,7 @@ def add_parse_args(parser):
 
     # test_fn args
     parser.add_argument('--test_fn', type=str)
+    parser.add_argument('--test_fn_dataset_size', type=int)
 
 def add_parse_args_wrongness(parser):
     parser.add_argument('--predict_ood', type=str2bool)

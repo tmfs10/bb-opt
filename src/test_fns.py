@@ -18,7 +18,7 @@ class TestFunction(object):
 
         return x, y
 
-class shekel(object):
+class shekel(TestFunction):
     """ 
     Global minima:
         m=5,7,10, at x*=(4,4,4,4)
@@ -63,7 +63,7 @@ class shekel(object):
         return -torch.sum((torch.sum((x-self.C[:self.m])**2, dim=1) + self.beta[:self.m])**-1)
 
 
-class michalewicz(object):
+class michalewicz(TestFunction):
     """ 
     Global minima:
         d=2, x*=(2.2, 1.57)

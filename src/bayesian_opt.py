@@ -1280,6 +1280,7 @@ def acquire_batch_lasso_info(
     device='cuda',
     min_coeff=ops._eps,
     l1_coeff=0.1,
+    max_val_dist=False,
 ):
     assert point_pool_idx is not None
 
@@ -1287,6 +1288,11 @@ def acquire_batch_lasso_info(
     # being one row per ensemble member/point
     # design matrix is composed of the ensemble member specific 
     # values of the candidate feature (point)
+
+    if max_val_dist:
+        opt_values = torch.sort(opt_values, dim=1, descending=True)[0] 
+        opt_values = opt_values[:, :1]
+        assert len(opt_values.shape) == 2
 
     num_samples = opt_values.shape[0]
     num_condense_points = opt_values.shape[1]
@@ -3055,7 +3061,7 @@ def get_info_ack(
         print('best_pred.shape\t' + str(best_pred.shape))
         #f.write('best_pred.shape\t' + str(best_pred.shape))
 
-        print('best_pred:', best_pred.mean(0).mean(), best_pred.std(0).mean())
+        print('best_pred:', best_pred.mean(0).mean().item(), best_pred.std(0).mean().item())
         if params.bottom_skip_frac > ops._eps:
             num_points = er_sortidx.shape[0]
             bottom_points = er_sortidx[:int(params.bottom_skip_frac*num_points)]
@@ -3064,7 +3070,7 @@ def get_info_ack(
             hsic_skip_idx = skip_idx
 
         if info_measure == 'hsic':
-            condense_idx, best_hsic = acquire_batch_mves_sid(
+            cur_ack_idx, best_hsic = acquire_batch_mves_sid(
                     params,
                     best_pred, 
                     preds, 
@@ -3082,7 +3088,7 @@ def get_info_ack(
                     point_pool_idx=point_pool_idx,
                     )
         elif info_measure == 'lasso':
-            condense_idx, best_hsic = acquire_batch_lasso_info(
+            cur_ack_idx, best_hsic = acquire_batch_lasso_info(
                     params,
                     best_pred, 
                     preds,
@@ -3090,52 +3096,66 @@ def get_info_ack(
                     hsic_skip_idx,
                     ack_batch_size, 
                     l1_coeff=params.info_ack_l1_coeff,
+                    max_val_dist=params.info_lasso_max_dist,
                     )
         else:
             assert False, "info_measure: " + info_measure + " not implemented"
 
         #print('er_idx', er_idx)
-        print('len(condense_idx)', len(condense_idx))
-        print('intersection size', len(set(condense_idx).intersection(set(er_idx.tolist()))))
+        print('len(cur_ack_idx)', len(cur_ack_idx))
+        print('intersection size', len(set(cur_ack_idx).intersection(set(er_idx.tolist()))))
 
         if params.batch_fill == "ucb":
-            if len(condense_idx) < ack_batch_size:
+            if len(cur_ack_idx) < ack_batch_size:
                 for idx in er_idx[::-1]:
                     idx = int(idx)
-                    if len(condense_idx) >= ack_batch_size:
+                    if len(cur_ack_idx) >= ack_batch_size:
                         break
-                    if idx in condense_idx and idx not in skip_idx:
+                    if idx in cur_ack_idx and idx not in skip_idx:
                         continue
-                    condense_idx += [idx]
+                    cur_ack_idx += [idx]
         elif params.batch_fill == "pdts":
             sorted_preds_idx = torch.sort(preds, dim=-1, descending=True)[1].cpu().numpy()
             indices = [i for i in range(sorted_preds_idx.shape[0])]
             random.shuffle(indices)
             fill_idx = set()
             for i in range(sorted_preds_idx.shape[1]):
-                if len(fill_idx)+len(condense_idx) >= ack_batch_size:
+                if len(fill_idx)+len(cur_ack_idx) >= ack_batch_size:
                     break
                 for i_model in indices:
-                    if len(fill_idx)+len(condense_idx) >= ack_batch_size:
+                    if len(fill_idx)+len(cur_ack_idx) >= ack_batch_size:
                         break
                     idx = int(sorted_preds_idx[i_model][i])
-                    if idx not in fill_idx and idx not in condense_idx and idx not in skip_idx:
+                    if idx not in fill_idx and idx not in cur_ack_idx and idx not in skip_idx:
                         fill_idx.update({idx})
-            condense_idx += list(fill_idx)
+            cur_ack_idx += list(fill_idx)
+
+            if "rand" in params.ack_fun and params.rand_diversity_dist == "condense":
+                pdts_idx = list(get_pdts_idx(preds, params.num_diversity*ack_batch_size, skip_idx=skip_idx))
+                random.shuffle(pdts_idx)
+                num_rand = utils.get_num_rand(params.num_rand_diversity)
+                if num_rand >= 1:
+                    cur_ack_idx = cur_ack_idx[:-num_rand]
+                    for idx in pdts_idx:
+                        if len(cur_ack_idx) >= ack_batch_size:
+                            break
+                        if idx in cur_ack_idx:
+                            continue
+                        cur_ack_idx += [idx]
         else:
             assert False, params.batch_fill + " batch_fill not implemented"
-        assert len(condense_idx) == ack_batch_size, len(condense_idx)
-        assert len(set(condense_idx)) == ack_batch_size
+        assert len(cur_ack_idx) == ack_batch_size, len(cur_ack_idx)
+        assert len(set(cur_ack_idx)) == ack_batch_size
 
         #print('er_labels', labels[er_idx])
-        #print('mves_labels', labels[list(condense_idx)])
+        #print('mves_labels', labels[list(cur_ack_idx)])
 
         print('best_hsic\t' + str(best_hsic))
 
         #f.write('best_hsic\t' + str(best_hsic) + "\n")
         #f.write('train_X.shape\t' + str(train_X_mves.shape) + "\n")
 
-        return condense_idx
+        return cur_ack_idx
 
 def pairwise_logging_pre_ack(
     params,

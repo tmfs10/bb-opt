@@ -169,7 +169,7 @@ for task_iter in range(len(task_name)):
         params.empirical_ack_change_stat_logging = False
         import test_fns
         bb_fn = getattr(test_fns, params.test_fn)()
-        inputs, labels = bb_fn.sample(2*params.init_train_examples)
+        inputs, labels = bb_fn.sample(params.test_fn_dataset_size)
         inputs = inputs.cpu().numpy()
         labels = labels.cpu().numpy()
 
@@ -177,6 +177,9 @@ for task_iter in range(len(task_name)):
         Y = torch.tensor(labels, device=device)
     else:
         assert False, params.project + " is an unknown project"
+
+    sorted_labels_idx = np.argsort(labels)[::-1]
+    sorted_labels_idx_to_rank = {sorted_labels_idx[i] : i for i in range(len(sorted_labels_idx))}
 
     # file output dir
     file_output_dir = params.output_dir + "/" + task_name[task_iter]
@@ -214,7 +217,7 @@ for task_iter in range(len(task_name)):
 
     top_frac_idx = [set(labels_sort_idx[-int(labels.shape[0]*per):].tolist()) for per in [0.01, 0.05, 0.1, 0.2]]
 
-    print('label stats:', labels.mean(), labels.max(), labels.std())
+    print('label stats:', labels.mean(), labels.min(), labels.max(), labels.std())
     print('num_test_idx:', len(test_idx))
 
     train_X_init = torch.FloatTensor(train_inputs).to(device)
@@ -608,6 +611,8 @@ for task_iter in range(len(task_name)):
                 continue
 
             torch.save(to_save_dict, batch_output_dir + "/0.pth")
+            temp_min_rank = min([sorted_labels_idx_to_rank[idx] for idx in train_idx_cur])
+            print('min_rank', temp_min_rank)
 
             with open(batch_output_dir + "/stats.txt", 'w', buffering=1) as f:
                 ack_iter_info = {
@@ -690,8 +695,7 @@ for task_iter in range(len(task_name)):
                                     labels,
                                     info_measure=params.info_measure,
                                     )
-                            if "rand" in params.ack_fun:
-                                assert params.rand_diversity_dist == 'uniform'
+                            if "rand" in params.ack_fun and params.rand_diversity_dist == "uniform":
                                 unseen_idx2 = list(unseen_idx)
                                 random.shuffle(unseen_idx2)
                                 num_rand = utils.get_num_rand(params.num_rand_diversity)
@@ -1194,6 +1198,7 @@ for task_iter in range(len(task_name)):
                             logging[0] = None
 
                         best_so_far_idx = ack_array[ack_labels.argmax()]
+                        best_so_far_idx_rank = sorted_labels_idx_to_rank[best_so_far_idx]
                         if params.project == "test_fn":
                             ack_rel_opt_value = bb_fn.optimum()-ack_labels.max()
                             ir_rel_opt_value = min(ack_rel_opt_value, bb_fn.optimum()-ir)
@@ -1205,11 +1210,13 @@ for task_iter in range(len(task_name)):
 
                         print('best so far:', labels[best_so_far_idx])
                         print('regret:', ack_rel_opt_value, ir_rel_opt_value)
+                        print('rank regret:', best_so_far_idx_rank)
 
                         if params.project == "test_fn":
                             temp = {
                                 'ack_rel_opt_value': ack_rel_opt_value,
                                 'ir_rel_opt_value': ir_rel_opt_value,
+                                'rank_regret': best_so_far_idx_rank,
                                 }
                         else:
                             temp = {
@@ -1218,6 +1225,7 @@ for task_iter in range(len(task_name)):
                                 'ir_batch_cur_idx': torch.from_numpy(ir_sortidx),
                                 'ir_rel_opt_value': ir_rel_opt_value,
                                 'idx_frac': torch.tensor(idx_frac),
+                                'rank_regret': best_so_far_idx_rank,
                                 }
                         for k in temp:
                             to_save_dict[k] = temp[k]

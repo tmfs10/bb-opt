@@ -291,9 +291,11 @@ def prop_test(
     arrs,
     exp,
     ack_iter,
+    num_samples=0,
     pval_threshold=0.05,
     paired_test=False,
     single_test=True,
+    comparator=lambda x, y : x > y,
 ):
     assert len(exp) == 2
     count = 0
@@ -310,13 +312,12 @@ def prop_test(
                     continue
                 if batch_size not in stats[filename]:
                     continue
+                if num_samples > 0 and len(stat[i]) >= num_samples:
+                    break
                 cur_stats = stats[filename][batch_size]
                 if len(cur_stats) <= ack_iter:
                     continue
-                if exp == "ensemble7/o_none_ucb_maxvar_inverse_g000510204080_":
-                    stat[i] += [data_extractor_fn(cur_stats[ack_iter+1], filename)]
-                else:
-                    stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
+                stat[i] += [data_extractor_fn(cur_stats[ack_iter], filename)]
         if len(stat[0]) == 0 or len(stat[1]) == 0:
             continue
 
@@ -337,9 +338,9 @@ def prop_test(
         score = ret[0]
         pval = ret[1]
         test_pval = pval/2. if single_test else pval
+        m = [np.mean(stat[0]), np.mean(stat[1])]
         if test_pval <= pval_threshold:
-            m = [np.mean(stat[0]), np.mean(stat[1])]
-            c = 1 if m[1] > m[0] else 0
+            c = 1 if comparator(m[1], m[0]) else 0
             count += c
             total += 1
 
@@ -354,7 +355,7 @@ def prop_test(
             else:
                 if score == 0:
                     continue
-                if score < 0 :
+                if comparator(0, score):
                     pval_list[1] += [pval/2.]
                     pval_list[0] += [1-pval/2.]
                 else:
