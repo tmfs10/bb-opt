@@ -77,7 +77,7 @@
 
 --langevin_sampling False
 --langevin_num_iter 10
---langevin_lr 1
+--langevin_lr 0.1
 --langevin_beta 100000.0
 
 --ack_fun max_std
