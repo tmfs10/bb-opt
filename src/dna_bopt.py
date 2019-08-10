@@ -358,6 +358,44 @@ def langevin_sampling(
     return x
 
 
+def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
+    def loss_fn(X):
+        unseen_reg_langevin_mapping = {
+                "maxvar" : "maxvar",
+                "maxinoutvar" : "maxvar",
+                "maxvargeometric" : "maxvargeometric",
+                "maxstd" : "maxstd",
+                "maxinoutstd" : "maxstd",
+                "maxstd_std" : "maxstd_std",
+                "maxstd_mean_std" : "maxstd_mean_std",
+                }
+
+        means_o, variances_o = model_ensemble(X)
+
+        assert unseen_reg in unseen_reg_langevin_mapping
+        var_sum = means_o.var(dim=0).sum()
+        loss = var_sum
+        #loss = -unseen_data_loss(
+        #        means_o,
+        #        variances_o,
+        #        unseen_reg_langevin_mapping[unseen_reg],
+        #        gamma,
+        #        means=None,
+        #        )
+
+        """
+        if density_x is not None:
+            assert density_x.shape[1:] == X.shape[1:], "%s[1:] == %s[1:]" % (density_x.shape, X.shape)
+            assert len(density_x.shape) >= 2
+            if len(density_x.shape) > 2:
+                density_x = density_x.view(density_x.shape[0], -1)
+                X = X.view(X.shape[0], -1)
+            similarity = torch.exp(-ops.sqdist(density_x.unsqueeze(1), X.unsqueeze(1)).mean())
+            loss += dist
+        """
+    return loss_fn
+
+
 def unseen_data_loss(
     means_o,
     variances_o,
@@ -570,45 +608,6 @@ def reinit_model(
             assert False, params.ack_model_init_mode + " not implemented"
 
     return reset_rng_state, cur_model
-
-
-def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
-    def loss_fn(X):
-        unseen_reg_langevin_mapping = {
-                "maxvar" : "maxvar",
-                "maxinoutvar" : "maxvar",
-                "maxvargeometric" : "maxvargeometric",
-                "maxstd" : "maxstd",
-                "maxinoutstd" : "maxstd",
-                "maxstd_std" : "maxstd_std",
-                "maxstd_mean_std" : "maxstd_mean_std",
-                }
-
-        means_o, variances_o = model_ensemble(X)
-
-        assert unseen_reg in unseen_reg_langevin_mapping
-        var_sum = means_o.var(dim=0).sum()
-        loss = var_sum
-        #loss = -unseen_data_loss(
-        #        means_o,
-        #        variances_o,
-        #        unseen_reg_langevin_mapping[unseen_reg],
-        #        gamma,
-        #        means=None,
-        #        )
-
-        """
-        if density_x is not None:
-            assert density_x.shape[1:] == X.shape[1:], "%s[1:] == %s[1:]" % (density_x.shape, X.shape)
-            assert len(density_x.shape) >= 2
-            if len(density_x.shape) > 2:
-                density_x = density_x.view(density_x.shape[0], -1)
-                X = X.view(X.shape[0], -1)
-            similarity = torch.exp(-ops.sqdist(density_x.unsqueeze(1), X.unsqueeze(1)).mean())
-            loss += dist
-        """
-        return loss
-    return loss_fn
 
 
 def make_validation_set(
