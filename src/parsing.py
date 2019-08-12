@@ -192,6 +192,7 @@ def add_parse_args(parser):
     parser.add_argument('--ekb_use_median', type=str2bool)
 
     parser.add_argument('--langevin_sampling', type=str2bool)
+    parser.add_argument('--mod_adversarial', type=str2bool)
     parser.add_argument('--langevin_num_iter', type=int)
     parser.add_argument('--langevin_lr', type=float)
     parser.add_argument('--langevin_beta', type=float, help="inverse temp")

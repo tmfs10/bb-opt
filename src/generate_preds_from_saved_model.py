@@ -32,7 +32,7 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import numpy as np
 from scipy.stats import kendalltau, pearsonr
-import dna_bopt as dbopt
+import train
 import chemvae_bopt as cbopt
 import bayesian_opt as bopt
 import active_learning as al
@@ -54,10 +54,10 @@ params.device = device
 task_name = []
 if params.project == 'dna_binding':
     task_name = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
-    sample_uniform_fn = dbopt.dna_sample_uniform
+    sample_uniform_fn = train.dna_sample_uniform
 elif params.project in ['imdb', 'wiki']:
     task_name += [params.project]
-    sample_uniform_fn = dbopt.image_sample_uniform
+    sample_uniform_fn = train.image_sample_uniform
 elif params.project == 'chemvae':
     task_name += [params.project]
     sample_uniform_fn = None
@@ -197,7 +197,7 @@ for task_iter in range(len(task_name)):
         ops.set_rng_state(ensemble_init_rng)
 
         if params.project == "dna_binding":
-            init_model = dbopt.get_model_nn_ensemble(
+            init_model = train.get_model_nn_ensemble(
                     inputs.shape[1], 
                     params.num_models, 
                     params.num_hidden, 
@@ -220,7 +220,7 @@ for task_iter in range(len(task_name)):
                     )
             init_model = init_model.to(params.device)
         elif params.project == "test_fn":
-            init_model = dbopt.get_model_nn_ensemble(
+            init_model = train.get_model_nn_ensemble(
                     inputs.shape[1], 
                     params.num_models, 
                     params.num_hidden, 
@@ -256,7 +256,7 @@ for task_iter in range(len(task_name)):
 
         with torch.no_grad():
             init_model.eval()
-            pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
+            pre_ack_pred_means, pre_ack_pred_vars = train.ensemble_forward(
                     init_model, 
                     X, 
                     params.ensemble_forward_batch_size,
@@ -282,7 +282,7 @@ for task_iter in range(len(task_name)):
             assert ood_inputs.shape[0] == ood_labels.shape[0]
 
             with torch.no_grad():
-                ood_pred_means, ood_pred_vars = dbopt.ensemble_forward(
+                ood_pred_means, ood_pred_vars = train.ensemble_forward(
                         init_model, 
                         ood_X, 
                         params.ensemble_forward_batch_size,

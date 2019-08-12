@@ -27,7 +27,7 @@ from torch.nn.parameter import Parameter
 import torch.distributions as tdist
 import numpy as np
 from scipy.stats import kendalltau, pearsonr
-import dna_bopt as dbopt
+import train
 import chemvae_bopt as cbopt
 import bayesian_opt as bopt
 import active_learning as al
@@ -81,10 +81,10 @@ if not os.path.exists(params.output_dir):
 task_name = []
 if params.project == 'dna_binding':
     task_name = [k.strip() for k in open(params.filename_file).readlines()][:params.num_test_tfs]
-    sample_uniform_fn = dbopt.dna_sample_uniform
+    sample_uniform_fn = train.dna_sample_uniform
 elif params.project in ['imdb', 'wiki']:
     task_name += [params.project]
-    sample_uniform_fn = dbopt.image_sample_uniform
+    sample_uniform_fn = train.image_sample_uniform
 elif params.project == 'chemvae':
     task_name += [params.project]
     sample_uniform_fn = None
@@ -233,7 +233,7 @@ for task_iter in range(len(task_name)):
     ops.set_rng_state(ensemble_init_rng)
 
     if params.project == "dna_binding":
-        init_model = dbopt.get_model_nn_ensemble(
+        init_model = train.get_model_nn_ensemble(
                 inputs.shape[1], 
                 params.num_models, 
                 params.num_hidden, 
@@ -256,7 +256,7 @@ for task_iter in range(len(task_name)):
                 )
         init_model = init_model.to(params.device)
     elif params.project == "test_fn":
-        init_model = dbopt.get_model_nn_ensemble(
+        init_model = train.get_model_nn_ensemble(
                 inputs.shape[1], 
                 params.num_models, 
                 params.num_hidden, 
@@ -289,7 +289,7 @@ for task_iter in range(len(task_name)):
     predict_info_models = None
     if params.predict_mi:
         predict_kernel_dim = 10
-        predict_info_models = dbopt.PredictInfoModels(
+        predict_info_models = train.PredictInfoModels(
                 inputs.shape[1],
                 params.ack_emb_kernel_dim,
                 params.num_models,
@@ -340,12 +340,12 @@ for task_iter in range(len(task_name)):
                     return out
             elif params.sampling_space == "input" and params.sampling_dist == "uniform":
                 def sample_uniform_fn(batch_size, sampling_info=None):
-                    out, rng = dbopt.image_sample_uniform(batch_size, sampling_info["ood_sampling_rng"])
+                    out, rng = train.image_sample_uniform(batch_size, sampling_info["ood_sampling_rng"])
                     sampling_info["ood_sampling_rng"] = rng
                     return out
             elif params.sampling_space == "input" and params.sampling_dist == "boundary":
                 def sample_uniform_fn(batch_size, sampling_info=None):
-                    perturb, rng = dbopt.image_sample_gaussian(batch_size, sampling_info["ood_sampling_rng"], scale=params.boundary_stddev)
+                    perturb, rng = train.image_sample_gaussian(batch_size, sampling_info["ood_sampling_rng"], scale=params.boundary_stddev)
                     sampling_info["ood_sampling_rng"] = rng
                     with torch.no_grad():
                         images = sampling_info["bX"]
@@ -411,7 +411,7 @@ for task_iter in range(len(task_name)):
 
         zero_gamma_model = None
         if params.project in ['imdb', 'wiki']:
-            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train2(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = train.hyper_param_train2(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -428,7 +428,7 @@ for task_iter in range(len(task_name)):
                 hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                 )
         else:
-            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = dbopt.hyper_param_train2(
+            logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = train.hyper_param_train2(
                 params,
                 init_model,
                 [train_X_init, train_Y_cur, val_X, val_Y, X, Y],
@@ -453,14 +453,14 @@ for task_iter in range(len(task_name)):
 
     with torch.no_grad():
         init_model.eval()
-        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(
+        pre_ack_pred_means, pre_ack_pred_vars = train.ensemble_forward(
                 init_model, 
                 X, 
                 params.ensemble_forward_batch_size,
                 progress_bar=params.progress_bar,
                 ) # (num_candidate_points, num_samples)
         if zero_gamma_model is not None:
-            zero_gamma_pred_means, zero_gamma_pred_vars = dbopt.ensemble_forward(
+            zero_gamma_pred_means, zero_gamma_pred_vars = train.ensemble_forward(
                     zero_gamma_model, 
                     X, 
                     params.ensemble_forward_batch_size
@@ -511,7 +511,7 @@ for task_iter in range(len(task_name)):
         assert ood_inputs.shape[0] == ood_labels.shape[0]
 
         with torch.no_grad():
-            ood_preds_means, ood_preds_vars = dbopt.ensemble_forward(
+            ood_preds_means, ood_preds_vars = train.ensemble_forward(
                     init_model, 
                     ood_X, 
                     params.ensemble_forward_batch_size,
@@ -519,7 +519,7 @@ for task_iter in range(len(task_name)):
                     ) # (num_candidate_points, num_samples)
 
             if zero_gamma_model is not None:
-                zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = dbopt.ensemble_forward(
+                zero_gamma_ood_preds_means, zero_gamma_ood_preds_vars = train.ensemble_forward(
                         zero_gamma_model, 
                         ood_X, 
                         params.ensemble_forward_batch_size
@@ -592,7 +592,7 @@ for task_iter in range(len(task_name)):
                 pass
 
             if params.predict_ood:
-                ood_pred_model = dbopt.OodPredModel(train_X_init.shape[1], params.ood_pred_emb_size).to(params.device)
+                ood_pred_model = train.OodPredModel(train_X_init.shape[1], params.ood_pred_emb_size).to(params.device)
                 all_pred_means = []
                 all_pred_variances = []
 
@@ -795,7 +795,7 @@ for task_iter in range(len(task_name)):
                                     [train_X_cur, train_Y_cur, X, Y],
                                     ack_batch_size,
                                     skip_idx_cur,
-                                    dbopt.train_ensemble,
+                                    train.train_ensemble,
                                     )
                         elif params.ack_fun == "bagging_er":
                             cur_ack_idx = bopt.get_bagging_er(
@@ -812,7 +812,7 @@ for task_iter in range(len(task_name)):
                                     [train_X_cur, train_Y_cur, X, Y],
                                     ack_batch_size,
                                     skip_idx_cur,
-                                    dbopt.train_ensemble,
+                                    train.train_ensemble,
                                     cur_rmse,
                                     )
                         elif params.ack_fun == "nb_mcts":
@@ -822,7 +822,7 @@ for task_iter in range(len(task_name)):
                                     [train_X_cur, train_Y_cur, X, Y],
                                     ack_batch_size,
                                     skip_idx_cur,
-                                    dbopt.train_ensemble,
+                                    train.train_ensemble,
                                     normalize_fn=utils.sigmoid_standardization if params.sigmoid_coeff > 0 else utils.normal_standardization,
                                     )
                         elif "_ucb" in params.ack_fun:
@@ -1006,7 +1006,7 @@ for task_iter in range(len(task_name)):
                     assert train_X_cur.shape[0] == int(params.init_train_examples) + expected_num_points, str(train_X_cur.shape) + "[0] == " + str(int(params.init_train_examples) + expected_num_points)
                     assert train_Y_cur.shape[0] == train_X_cur.shape[0]
 
-                    ensemble_init_rng, cur_model = dbopt.reinit_model(
+                    ensemble_init_rng, cur_model = train.reinit_model(
                         params,
                         untrained_model,
                         cur_model,
@@ -1015,7 +1015,7 @@ for task_iter in range(len(task_name)):
 
                     zero_gamma_model = None
                     if params.project in ['imdb', 'wiki']:
-                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train2(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = train.hyper_param_train2(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -1031,7 +1031,7 @@ for task_iter in range(len(task_name)):
                             hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
                             )
                     else:
-                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = dbopt.hyper_param_train2(
+                        logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = train.hyper_param_train2(
                             params,
                             cur_model,
                             [train_X_cur, train_Y_cur, val_X, val_Y, X, Y],
@@ -1056,7 +1056,7 @@ for task_iter in range(len(task_name)):
 
                     with torch.no_grad():
                         cur_model.eval()
-                        pre_ack_pred_means, pre_ack_pred_vars = dbopt.ensemble_forward(cur_model, X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
+                        pre_ack_pred_means, pre_ack_pred_vars = train.ensemble_forward(cur_model, X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
                         pre_ack_pred_means = pre_ack_pred_means.detach()
                         pre_ack_pred_vars = pre_ack_pred_vars.detach()
                         assert pre_ack_pred_means.shape[1] == Y.shape[0], "%s[1] == %s[0]" % (str(pre_ack_pred_means.shape), str(Y.shape))
@@ -1091,7 +1091,7 @@ for task_iter in range(len(task_name)):
                         if ood_inputs is not None:
                             assert ood_labels is not None
                             assert ood_inputs.shape[0] == ood_labels.shape[0]
-                            ood_preds_means, preds_vars = dbopt.ensemble_forward(cur_model, ood_X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
+                            ood_preds_means, preds_vars = train.ensemble_forward(cur_model, ood_X, params.ensemble_forward_batch_size) # (num_candidate_points, num_samples)
                             ood_pred_stats = bopt.get_pred_stats(
                                     ood_preds_means,
                                     torch.sqrt(ood_preds_vars),

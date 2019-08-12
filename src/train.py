@@ -913,7 +913,6 @@ def get_adv_epsilon_x(
     return x
 
 
-
 def train_ensemble(
     params,
     batch_size,
@@ -1141,22 +1140,28 @@ def train_ensemble(
                     assert isinstance(model_ensemble, ResnetEnsemble2)
                     out_data_conv_emb = model_ensemble.conv_forward(out_data).detach()
 
-                if params.langevin_sampling and gamma > 0.0:
-                    model_ensemble.eval()
-                    #num_features = out_data.shape[1]
-                    #xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
-                    #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                    out_data = langevin_sampling(
-                            params,
-                            out_data,
-                            langevin_mod_loss(model_ensemble, unseen_reg),
-                            #xi_dist,
-                            )
-                    #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
-                    model_ensemble.train()
+				if gamma > 0.0:
+					if params.langevin_sampling:
+						assert not params.mod_adversarial
+						num_features = out_data.shape[1]
+						xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
+						means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+					elif params.mod_adversarial:
+						assert not params.langevin_sampling
+						xi_dist = None
 
-                    if isinstance(model_ensemble, ResnetEnsemble2):
-                        model_ensemble.freeze_conv()
+					if params.langevin_sampling or params.mod_adversarial:
+						model_ensemble.eval()
+						out_data = langevin_sampling(
+								params,
+								out_data,
+								langevin_mod_loss(model_ensemble, unseen_reg),
+								xi_dist,
+								)
+						model_ensemble.train()
+
+						if isinstance(model_ensemble, ResnetEnsemble2):
+							model_ensemble.freeze_conv()
 
                 if params.sampling_space == "fc":
                     assert isinstance(model_ensemble, ResnetEnsemble2)
