@@ -914,7 +914,6 @@ def get_adv_epsilon_x(
     return x
 
 
-
 def train_ensemble(
     params,
     batch_size,
@@ -1166,6 +1165,8 @@ def train_ensemble(
 
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     model_ensemble.train()
+                    if isinstance(model_ensemble, ResnetEnsemble2):
+                        model_ensemble.freeze_conv()
 
                 if params.sampling_space == "fc":
                     assert isinstance(model_ensemble, ResnetEnsemble2)
