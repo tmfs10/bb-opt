@@ -19,8 +19,8 @@ import torch.distributions as tdist
 from itertools import cycle
 from tqdm import tnrange, trange
 from typing import Tuple, Optional, Dict, Callable, Sequence, Union, Any, Type, TypeVar
-from bb_opt.src.non_matplotlib_utils import save_checkpoint, load_checkpoint
-from bb_opt.src.networks.wide_resnet_sid import Wide_ResNet
+from non_matplotlib_utils import save_checkpoint, load_checkpoint
+from networks.wide_resnet_sid import Wide_ResNet
 import bayesian_opt as bopt
 
 _NNEnsemble = TypeVar("NNEnsemble", bound="NNEnsemble")
@@ -1135,3 +1135,9 @@ class ResnetEnsemble2(torch.nn.Module):
                 variances,
                 return_mse
                 )
+
+
+class PairwiseEnsemble(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+

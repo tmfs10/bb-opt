@@ -375,6 +375,7 @@ def langevin_mod_loss(model_ensemble, unseen_reg, density_x=None):
         assert unseen_reg in unseen_reg_langevin_mapping
         var_sum = means_o.var(dim=0).sum()
         loss = var_sum
+        return loss
         #loss = -unseen_data_loss(
         #        means_o,
         #        variances_o,
@@ -945,7 +946,7 @@ def train_ensemble(
         do_early_stopping = ("val" in choose_type or "train" in choose_type) and (num_epoch_iters is None)
 
         adv_train = adv_epsilon > ops._eps
-        print('adv', adv_train)
+        print('ensemble adv', adv_train)
         train_X, train_Y, val_X, val_Y, X, Y = data
         N = train_X.shape[0]
         assert val_frac >= 0.01
@@ -1087,6 +1088,12 @@ def train_ensemble(
                 sampling_info['min_val'] = min_val
                 sampling_info['max_val'] = max_val
 
+            def generate_ood_sampling_info(model, ood_sampling_rng, train_X):
+                if isinstance(model, NNEnsemble):
+                    sampling_info = {}
+                else:
+                    sampling_info = {'ood_sampling_rng': ood_sampling_rng, 'train_x': train_X, 'model': model}
+
             optim.zero_grad()
             assert means.shape[1] == bY.shape[0], "%s[1] == %s[0]" % (str(mean.shape[1]), str(bY.shape[0]))
             if params.loss_fn == "nll":
@@ -1141,22 +1148,24 @@ def train_ensemble(
                     assert isinstance(model_ensemble, ResnetEnsemble2)
                     out_data_conv_emb = model_ensemble.conv_forward(out_data).detach()
 
-                if params.langevin_sampling and gamma > 0.0:
+                if (params.langevin_sampling or params.mod_adversarial_training):
                     model_ensemble.eval()
-                    #num_features = out_data.shape[1]
-                    #xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
-                    #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+
+                    xi_dist = None
+                    if params.langevin_sampling:
+                        assert not params.mod_adversarial_training
+                        num_features = out_data.shape[1]
+                        xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
+
                     out_data = langevin_sampling(
                             params,
                             out_data,
                             langevin_mod_loss(model_ensemble, unseen_reg),
-                            #xi_dist,
+                            xi_dist,
                             )
+
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     model_ensemble.train()
-
-                    if isinstance(model_ensemble, ResnetEnsemble2):
-                        model_ensemble.freeze_conv()
 
                 if params.sampling_space == "fc":
                     assert isinstance(model_ensemble, ResnetEnsemble2)
@@ -1185,6 +1194,7 @@ def train_ensemble(
                     means_o, variances_o = model_ensemble.fc_forward(out_data_conv_emb) # (num_samples, num_points)
                 else:
                     means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
+                    #print('out_data std:', means_o.std(0).mean().item())
 
                 if params.pairwise_corr_diversity:
                     ood_loss = gamma * pairwise_corr_diversity(
@@ -1389,217 +1399,7 @@ def hyper_param_train(
     report_zero_gamma=False,
     num_epoch_iters=None,
     unseen_idx=None,
-):
-    gamma_added = False
-    regression = params.num_acks == 0
-    if unseen_reg == "normal" and not params.pairwise_corr_diversity:
-        gammas = [0.0]
-    if report_zero_gamma and 0.0 not in gammas:
-        gammas = [0.0] + gammas
-        gamma_added = True
-
-    train_X, train_Y, val_X, val_Y, _, _ = data
-
-    do_hyper_param_search = len(gammas) > 1 or num_epoch_iters is None # search for gamma and/or early stopping point
-    do_combine_train_val_training = params.combine_train_val and (val_X is None) and not regression 
-    best_gamma = None
-    if not do_hyper_param_search:
-        best_gamma = gammas[0]
-        do_combine_train_val_training = True
-
-    best_nll = float('inf')
-    best_logging = None
-    zero_logging = None
-
-    zero_gamma_nll = None
-    zero_gamma_best_epoch_iter = None
-
-    zero_gamma_model = None
-    best_gamma_model = None
-
-    train_batch_size = getattr(params, stage + "_train_batch_size")
-    train_epochs = getattr(params, stage + "_train_num_epochs")
-    lr = getattr(params, stage + "_train_lr")
-    l2 = getattr(params, stage + "_train_l2")
-
-    ood_sampling_rng = ops.get_rng_state()
-
-    best_epoch_iter = None
-
-    logging = None
-    if do_hyper_param_search:
-        for gamma in gammas:
-            model_copy = copy.deepcopy(model)
-            optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
-            data_split_rng2 = copy.deepcopy(data_split_rng)
-            best_cur_epoch_iter = None
-            logging, data_split_rng2 = train_ensemble(
-                    params,
-                    train_batch_size,
-                    train_epochs,
-                    data,
-                    model_copy,
-                    optim,
-                    choose_type=params.hyper_search_choose_type,
-                    unseen_reg=unseen_reg,
-                    gamma=gamma,
-                    normalize_fn=normalize_fn,
-                    val_frac=params.val_frac,
-                    early_stopping=params.early_stopping,
-                    data_split_rng=data_split_rng2,
-                    ood_val_frac=params.ood_val_frac,
-                    sample_uniform_fn=sample_uniform_fn,
-                    ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-                    num_epoch_iters=num_epoch_iters,
-                    unseen_idx=unseen_idx,
-                    )
-            torch.cuda.empty_cache()
-
-            found_best = False
-            best_cur_epoch_iter = None
-            if num_epoch_iters is None:
-                val_nll_cur = logging[1]['best']['nll']
-            else:
-                val_nll_cur = logging[1]['val']['nll2']
-            best_cur_epoch_iter = logging[1]['best']['epoch_iter']
-
-            if gamma == 0.0:
-                zero_gamma_best_epoch_iter = best_cur_epoch_iter
-                zero_gamma_nll = float(val_nll_cur)
-                zero_gamma_model = copy.deepcopy(model_copy)
-                zero_logging = logging
-
-            if gamma > 0.0 or not gamma_added:
-                if val_nll_cur < best_nll:
-                    print('new_best_maxvar:', val_nll_cur)
-                    best_nll = float(val_nll_cur)
-                    found_best = True
-
-                if found_best:
-                    best_logging = logging
-                    best_gamma = gamma
-                    best_epoch_iter = best_cur_epoch_iter
-                    best_gamma_model = copy.deepcopy(model_copy)
-
-                if params.gamma_cutoff:
-                    if not found_best:
-                        break
-
-            #model_copy = copy.deepcopy(zero_gamma_model)
-            #optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr/10., weight_decay=l2)
-
-    torch.cuda.empty_cache()
-    #print('point 3:', nvidia_smi())
-
-    if do_hyper_param_search:
-        data_split_rng = data_split_rng2
-        logging = best_logging
-
-        assert logging[0] is not None
-        assert logging[1] is not None
-        print('logging:', pprint.pformat(logging[1]))
-
-        assert best_epoch_iter is not None
-        assert best_gamma is not None
-        print('best gamma:', best_gamma)
-
-    if not do_combine_train_val_training:
-        assert best_gamma_model is not None
-    elif params.hyper_search_choose_type != params.final_train_choose_type:
-        assert False, "for paper we aren't doing this option"
-        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-        logging, data_split_rng2 = train_ensemble(
-                params,
-                train_batch_size,
-                train_epochs,
-                data,
-                model_copy,
-                optim,
-                choose_type=params.final_train_choose_type,
-                unseen_reg=unseen_reg,
-                gamma=gamma,
-                normalize_fn=normalize_fn,
-                val_frac=params.val_frac,
-                early_stopping=params.early_stopping,
-                data_split_rng=data_split_rng2,
-                ood_val_frac=params.ood_val_frac,
-                sample_uniform_fn=sample_uniform_fn,
-                ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-                num_epoch_iters=num_epoch_iters,
-                unseen_idx=unseen_idx,
-                )
-    else:
-        zero_gamma_model = None
-        if report_zero_gamma:
-            if best_gamma != 0.0:
-                zero_gamma_model = copy.deepcopy(model)
-
-        assert num_epoch_iters is not None or best_epoch_iter >= 0
-        print('combine_train_val')
-        optim = torch.optim.Adam(list(model.parameters()), lr=lr, weight_decay=l2)
-        #print('point 4:', nvidia_smi())
-        logging2, _ = train_ensemble(
-                params,
-                train_batch_size,
-                train_epochs, 
-                data,
-                model,
-                optim,
-                choose_type=params.final_train_choose_type,
-                unseen_reg=unseen_reg,
-                gamma=best_gamma,
-                normalize_fn=normalize_fn,
-                num_epoch_iters=best_epoch_iter+1 if num_epoch_iters is None else num_epoch_iters,
-                sample_uniform_fn=sample_uniform_fn,
-                ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-                unseen_idx=unseen_idx,
-                )
-        torch.cuda.empty_cache()
-        best_gamma_model = model
-        if logging is None:
-            logging2 = logging
-
-        if zero_gamma_model is not None:
-            assert best_gamma != 0.0
-            assert zero_gamma_best_epoch_iter >= 0
-            optim = torch.optim.Adam(list(zero_gamma_model.parameters()), lr=lr, weight_decay=l2)
-            zero_logging, _ = train_ensemble(
-                    params, 
-                    train_batch_size,
-                    train_epochs, 
-                    data,
-                    zero_gamma_model,
-                    optim,
-                    choose_type=params.final_train_choose_type,
-                    unseen_reg="normal",
-                    gamma=0.0,
-                    normalize_fn=normalize_fn,
-                    num_epoch_iters=zero_gamma_best_epoch_iter+1,
-                    sample_uniform_fn=None,
-                    ood_sampling_rng=copy.deepcopy(ood_sampling_rng),
-                    unseen_idx=unseen_idx,
-                    )
-            torch.cuda.empty_cache()
-
-        #print('point 5:', nvidia_smi())
-        print('combine_train_val done')
-
-    return logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, best_gamma_model
-
-def hyper_param_train2(
-    params,
-    model,
-    data,
-    stage,
-    gammas,
-    unseen_reg,
-    data_split_rng,
-    predict_info_models=None,
-    sample_uniform_fn=None,
-    normalize_fn=None,
-    report_zero_gamma=False,
-    num_epoch_iters=None,
-    unseen_idx=None,
+    mod_adversarial_test=False,
     hyper_params=None,
 ):
     if hyper_params is None:
@@ -1807,6 +1607,39 @@ def hyper_param_train2(
 
         #print('point 5:', nvidia_smi())
         print('combine_train_val done')
+
+    if mod_adversarial_test:
+        n = 100
+        train_X2 = train_X[torch.randperm(train_X.shape[0])[:n]].view(n, -1)
+        train_mean_dist = ops.sqdist(train_X2).sum(-1).sqrt().mean().item()
+
+        assert params.sampling_space == "input", params.sampling_space
+        assert params.sampling_dist == "uniform", params.sampling_space
+        assert params.project in ['imdb', 'wiki']
+        sampling_info = {'ood_sampling_rng': ood_sampling_rng}
+        ood_data_batch_size = int(math.ceil(train_batch_size*params.ood_data_batch_factor))
+        out_data = sample_uniform_fn(ood_data_batch_size, sampling_info=sampling_info)
+        out_data2 = out_data.clone()
+        best_gamma_model.freeze_conv()
+        out_data = langevin_sampling(
+                params,
+                out_data,
+                langevin_mod_loss(best_gamma_model, unseen_reg),
+                None,
+                )
+        best_gamma_model.unfreeze_conv()
+        best_gamma_model.eval()
+        means, variances = best_gamma_model(out_data)
+        means2, variances2 = best_gamma_model(out_data2)
+        epistemic_std = [means.std(0), means2.std(0)]
+
+        train_out_dist = ops.sqdist(train_X2, out_data.view(out_data.shape[0], -1)).sum(-1).sqrt().mean().item()
+        train_out_dist2 = ops.sqdist(train_X2, out_data2.view(out_data2.shape[0], -1)).sum(-1).sqrt().mean().item()
+
+        print('mod adv avg_std:', epistemic_std[0].mean().item(), ",", epistemic_std[1].mean().item())
+        print('mod adv dist:', train_mean_dist, train_out_dist, train_out_dist2)
+        #torch.save({'adv_images' : out_data2}, params.output_dir + '/adv_test_images.pth')
+
 
     return logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, best_gamma_model
 

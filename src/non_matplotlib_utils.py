@@ -6,7 +6,7 @@ import pickle
 from typing import Dict, Tuple, Sequence, Union, Callable, Optional
 from rdkit import Chem
 from rdkit.Chem import Descriptors, QED
-import bb_opt.src.sascorer as sascorer
+import sascorer
 #import pyro
 import torch
 import sys

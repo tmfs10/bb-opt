@@ -76,8 +76,10 @@
 --final_train_choose_type val,nll,ind
 
 --langevin_sampling False
---langevin_num_iter 10
---langevin_lr 0.1
+--mod_adversarial_training False
+--mod_adversarial_test False
+--langevin_num_iter 50
+--langevin_lr 0.5
 --langevin_beta 100000.0
 
 --ack_fun max_std

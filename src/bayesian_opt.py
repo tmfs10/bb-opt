@@ -43,20 +43,12 @@ from typing import (
     Sequence,
 )
 import pickle
-from bb_opt.src.hsic import (
-    dimwise_mixrq_kernels,
-    dimwise_mixrbf_kernels,
-    precompute_batch_hsic_stats,
-    compute_point_hsics,
-    total_hsic,
-    total_hsic_with_batch,
-)
-import bb_opt.src.hsic as hsic
-from bb_opt.src.knn_mi import estimate_mi
-from bb_opt.src import ops
-from bb_opt.src.non_matplotlib_utils import get_path
-import bb_opt.src.non_matplotlib_utils as utils
-from bb_opt.src.bo_model import BOModel
+import hsic
+from knn_mi import estimate_mi
+import ops
+from non_matplotlib_utils import get_path
+import non_matplotlib_utils as utils
+from bo_model import BOModel
 #from bb_opt.src.acquisition_functions import AcquisitionFunction, Uniform
 
 def ExtendedGamma(shape, scale, ndimension=0):
@@ -561,12 +553,12 @@ def acquire_batch_hsic_mean_std(
         best_idx = None
         best_batch_metric = -float("inf")
 
-        batch_stats = precompute_batch_hsic_stats(preds, batch, kernel)
+        batch_stats = hsic.precompute_batch_hsic_stats(preds, batch, kernel)
 
         all_hsics = []
 
         for next_points in torch.tensor(list(acquirable_idx)).split(n_points_parallel):
-            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
+            hsics = hsic.compute_point_hsics(preds, next_points, *batch_stats, kernel)
             idx = hsics.argmin()
             hsic = hsic_coeff * hsics[idx]
             idx = next_points[idx]
@@ -634,12 +626,12 @@ def acquire_batch_hsic_pdts(
         best_idx = None
         min_hsic = float("inf")
 
-        batch_stats = precompute_batch_hsic_stats(preds, batch, kernel)
+        batch_stats = hsic.precompute_batch_hsic_stats(preds, batch, kernel)
 
         all_hsics = []
 
         for next_points in torch.tensor(list(acquirable_idx)).split(n_points_parallel):
-            hsics = compute_point_hsics(preds, next_points, *batch_stats, kernel)
+            hsics = hsic.compute_point_hsics(preds, next_points, *batch_stats, kernel)
             idx = hsics.argmin()
             hsic = hsics[idx]
             idx = next_points[idx]
