@@ -3,6 +3,7 @@ import numpy as np
 from scipy.stats import kendalltau
 
 import hsic
+from pprint import pprint
 import random
 import torch.nn.functional as F
 import torch
@@ -335,12 +336,15 @@ def get_model_nn_ensemble(
 
 
 def langevin_sampling(
-    params,
     x,
+    device,
     loss_fn, # this shld be the maxvar loss
     xi_dist=None,
+    langevin_lr=1,
+    langevin_num_iter=1,
+    langevin_beta=None,
 ):
-    for i in range(params.langevin_num_iter):
+    for i in range(langevin_num_iter):
         x.requires_grad = True
         loss = loss_fn(x)
         loss = loss.sum()
@@ -349,10 +353,10 @@ def langevin_sampling(
 
         x.requires_grad = False
         if xi_dist is not None:
-            xi = xi_dist.sample(sample_shape=torch.Size([x.shape[0]])).to(params.device).detach()
-            x += -params.langevin_lr*x.grad.detach() + math.sqrt(2*params.langevin_lr*1./params.langevin_beta)*xi
+            xi = xi_dist.sample(sample_shape=torch.Size([x.shape[0]])).to(device).detach()
+            x += -langevin_lr*x.grad.detach() + math.sqrt(2*langevin_lr*1./langevin_beta)*xi
         else:
-            x += -params.langevin_lr*x.grad.detach()
+            x += -langevin_lr*x.grad.detach()
         x.grad.zero_()
 
     return x
@@ -455,7 +459,7 @@ def unseen_data_loss(
         diff = means-m
         cov = torch.mm(diff, diff.t())/means.size()[1]
         mask = cov * (1-torch.eye(means.size()[0], device=means_o.device))
-        loss += mask.sum()
+        loss += gamma*mask.sum()
     else:
         assert False, unseen_reg + " not implemented"
 
@@ -713,13 +717,16 @@ def record_stats_ensemble(
                 variances,
                 return_mse=False)
         se = (means.mean(dim=0)-Y)**2
+        rmse_std_corr = torch.cat([torch.sqrt(se).unsqueeze(0), means.std(dim=0).unsqueeze(0)], dim=0)
+        rmse_std_corr = ops.corrcoef(rmse_std_corr)
+        assert list(rmse_std_corr.shape) == [2, 2], rmse_std_corr.shape
         rmse = torch.sqrt(torch.mean(se)).detach().item()
         std = means.std(0).mean().detach().item()
         mean_of_means = means.mean(dim=0).detach()
         assert mean_of_means.shape == Y.shape, "%s == %s" % (mean_of_means.shape, Y.shape)
         kt_corr = kendalltau(mean_of_means.cpu(), Y.cpu())[0]
 
-        return rmse, std, kt_corr, nll1.item(), nll2.item(), mean_of_means
+        return rmse, std, kt_corr, nll1.item(), nll2.item(), mean_of_means, rmse_std_corr[0, 1].item()
 
 
 def choose_best_model(
@@ -937,6 +944,9 @@ def train_ensemble(
     sample_uniform_fn=None,
     ood_sampling_rng=None,
     unseen_idx=None,
+    langevin_lr=None,
+    langevin_num_iter=None,
+    langevin_beta=None,
 ):
     with torch.no_grad():
         old_model_ensemble = None
@@ -1015,6 +1025,7 @@ def train_ensemble(
         train_rmses = []
         train_stds = []
         val_stds = []
+        val_rmse_std_corrs = []
         best_val_indv_rmse = None
 
         if params.progress_bar:
@@ -1108,6 +1119,12 @@ def train_ensemble(
             else:
                 assert False, params.loss_fn + " not implemented"
 
+            if params.unseen_reg == "se_var_corr":
+                rmse_std_loss = torch.cat([((bY-means.mean(dim=0))**2).unsqueeze(0), means.var(dim=0).unsqueeze(0)], dim=0)
+                rmse_std_loss = ops.cov(rmse_std_loss)
+                assert list(rmse_std_loss.shape) == [2, 2], rmse_std_loss.shape
+                rmse_std_loss = rmse_std_loss[0, 1]
+
             if adv_train:
                 adv_x = get_adv_epsilon_x(
                         params,
@@ -1156,12 +1173,19 @@ def train_ensemble(
                         num_features = out_data.shape[1]
                         xi_dist = tdist.Normal(torch.zeros(num_features), torch.ones(num_features))
 
-                    out_data = langevin_sampling(
-                            params,
-                            out_data,
+                    adv_out_data = out_data.clone()
+                    adv_out_data = langevin_sampling(
+                            adv_out_data,
+                            params.device,
                             langevin_mod_loss(model_ensemble, unseen_reg),
-                            xi_dist,
+                            xi_dist=xi_dist,
+                            langevin_lr=langevin_lr,
+                            langevin_num_iter=langevin_num_iter,
+                            langevin_beta=langevin_beta,
                             )
+                    optim.zero_grad()
+                    #out_data = torch.cat([out_data, adv_out_data], dim=0)
+                    out_data = adv_out_data
 
                     #means_o, variances_o = model_ensemble(out_data) # (num_samples, num_points)
                     model_ensemble.train()
@@ -1203,14 +1227,17 @@ def train_ensemble(
                             means_o,
                             )
                 elif params.unseen_reg != "normal":
-                    ood_loss = unseen_data_loss(
-                            means_o,
-                            variances_o,
-                            unseen_reg,
-                            gamma,
-                            means=means,
-                            o_weighting=weighting
-                            )
+                    if params.unseen_reg == "se_var_corr":
+                        ood_loss = -gamma*rmse_std_loss
+                    else:
+                        ood_loss = unseen_data_loss(
+                                means_o,
+                                variances_o,
+                                unseen_reg,
+                                gamma,
+                                means=means,
+                                o_weighting=weighting
+                                )
 
                 else:
                     assert False, "Not implemented"
@@ -1255,7 +1282,7 @@ def train_ensemble(
 
         model_ensemble.eval()
         with torch.no_grad():
-            train_rmse, train_std, train_kt_corr, train_nll1, train_nll2, train_mean_of_means = record_stats_ensemble(params, model_ensemble, train_X, train_Y)
+            train_rmse, train_std, train_kt_corr, train_nll1, train_nll2, train_mean_of_means, train_rmse_std_corr = record_stats_ensemble(params, model_ensemble, train_X, train_Y)
             train_rmses += [train_rmse]
             train_stds += [train_std]
             train_kt_corrs += [train_kt_corr]
@@ -1263,12 +1290,13 @@ def train_ensemble(
             train_nlls[1] += [train_nll2]
 
             if val_X is not None:
-                val_rmse, val_std, val_kt_corr, val_nll1, val_nll2, val_mean_of_means = record_stats_ensemble(params, model_ensemble, val_X, val_Y)
+                val_rmse, val_std, val_kt_corr, val_nll1, val_nll2, val_mean_of_means, val_rmse_std_corr = record_stats_ensemble(params, model_ensemble, val_X, val_Y)
                 val_rmses += [val_rmse]
                 val_stds += [val_std]
                 val_kt_corrs += [val_kt_corr]
                 val_nlls[0] += [val_nll1]
                 val_nlls[1] += [val_nll2]
+                val_rmse_std_corrs += [val_rmse_std_corr]
 
                 nll_criterion = val_nll2 if params.single_gaussian_test_nll else val_nll1
                 assert nll_criterion == nll_criterion
@@ -1367,6 +1395,7 @@ def train_ensemble(
                     'nll2': float(val_nlls[1][best_epoch_iter]),
                     'rmse': float(val_rmses[best_epoch_iter]),
                     'std': float(val_stds[best_epoch_iter]),
+                    'rmse_std_corr': float(val_rmse_std_corrs[best_epoch_iter]),
                     },
                 'baseline': {
                     'nll': val_baseline_nll,
@@ -1427,6 +1456,7 @@ def hyper_param_train(
         do_combine_train_val_training = True
 
     best_nll = float('inf')
+    best_std = 0
     best_logging = None
     best_hparams = None
     zero_hparams = None
@@ -1452,6 +1482,8 @@ def hyper_param_train(
         for gamma in gammas:
             for hparam in utils.dfs_exhaustive_search(hyper_params[1]):
                 hparam_kwargs = {hyper_params[0][i] : hparam[i] for i in range(len(hyper_params[0])) if hyper_params[0][i] != "placeholder"}
+                print('hparams:')
+                pprint.pprint(hparam_kwargs)
                 model_copy = copy.deepcopy(model)
                 optim = torch.optim.Adam(list(model_copy.parameters()), lr=lr, weight_decay=l2)
                 data_split_rng2 = copy.deepcopy(data_split_rng)
@@ -1481,20 +1513,34 @@ def hyper_param_train(
 
                 found_best = False
                 best_cur_epoch_iter = None
+                val_std_cur = logging[1]['val']['rmse_std_corr']
+
                 if num_epoch_iters is None:
                     val_nll_cur = logging[1]['best']['nll']
                 else:
                     val_nll_cur = logging[1]['val']['nll2']
                 best_cur_epoch_iter = logging[1]['best']['epoch_iter']
 
-                if val_nll_cur < best_nll:
-                    print('new_best_maxvar:', val_nll_cur)
+                if gamma > 0.0:
+                    if params.max_ood_std_model:
+                        if val_std_cur > best_std and val_nll_cur < zero_gamma_nll:
+                            print('new_best_maxvar std:', val_std_cur)
+                            best_std = float(val_std_cur)
+                            found_best = True
+                    else:
+                        if val_nll_cur < best_nll:
+                            print('new_best_maxvar nll:', val_nll_cur)
+                            best_nll = float(val_nll_cur)
+                            found_best = True
+                elif val_nll_cur < best_nll:
+                    print('new_best_maxvar nll:', val_nll_cur)
                     best_nll = float(val_nll_cur)
                     found_best = True
 
                 if gamma == 0.0 and found_best:
                     zero_gamma_best_epoch_iter = best_cur_epoch_iter
                     zero_gamma_nll = float(val_nll_cur)
+                    best_std = float(val_std_cur)
                     zero_gamma_model = copy.deepcopy(model_copy)
                     zero_logging = logging
                     zero_hparams = hparam_kwargs

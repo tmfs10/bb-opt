@@ -139,8 +139,8 @@ for task_iter in range(len(task_name)):
         male_gender = (gender == 1)
         female_gender = (gender == 0)
         
-        ood_inputs = inputs[female_gender].astype(np.float32)
-        ood_labels = labels[female_gender].astype(np.float32)
+        #ood_inputs = inputs[female_gender].astype(np.float32)
+        #ood_labels = labels[female_gender].astype(np.float32)
 
         #if params.num_ood_to_eval > 0:
         #    rand_idx = np.random.choice(ood_inputs.shape[0], size=(params.num_ood_to_eval,), replace=False).tolist()
@@ -149,6 +149,14 @@ for task_iter in range(len(task_name)):
 
         inputs = inputs[male_gender].astype(np.float32)
         labels = labels[male_gender].astype(np.float32)
+
+        temp_sortidx = np.argsort(labels)
+        ind_idx = temp_sortidx[:-int(labels.shape[0]*0.1)]
+        ood_idx = temp_sortidx[-int(labels.shape[0]*0.1):]
+        ood_inputs = inputs[ood_idx]
+        ood_labels = labels[ood_idx]
+        inputs = inputs[ind_idx]
+        labels = labels[ind_idx]
 
         #temp_idx = np.random.choice(inputs.shape[0], size=(2000,), replace=False).tolist()
         #inputs = inputs[temp_idx]
@@ -424,7 +432,7 @@ for task_iter in range(len(task_name)):
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 unseen_idx=unseen_idx,
                 mod_adversarial_test=params.mod_adversarial_test,
-                hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
+                hyper_params=[['adv_epsilon', 'langevin_lr', 'langevin_num_iter', 'langevin_beta'], [params.adv_epsilon, params.langevin_lr, params.langevin_num_iter, params.langevin_beta]],
                 )
         else:
             logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, init_model = train.hyper_param_train(
@@ -441,7 +449,7 @@ for task_iter in range(len(task_name)):
                 num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                 unseen_idx=unseen_idx,
                 mod_adversarial_test=params.mod_adversarial_test,
-                hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
+                hyper_params=[['adv_epsilon', 'langevin_lr', 'langevin_num_iter', 'langevin_beta'], [params.adv_epsilon, params.langevin_lr, params.langevin_num_iter, params.langevin_beta]],
                 )
         torch.cuda.empty_cache()
         #print('point 6:', nvidia_smi())
@@ -1029,7 +1037,7 @@ for task_iter in range(len(task_name)):
                             num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                             unseen_idx=unseen_idx,
                             mod_adversarial_test=params.mod_adversarial_test,
-                            hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
+                            hyper_params=[['adv_epsilon', 'langevin_lr', 'langevin_num_iter', 'langevin_beta'], [params.adv_epsilon, params.langevin_lr, params.langevin_num_iter, params.langevin_beta]],
                             )
                     else:
                         logging, best_gamma, data_split_rng, zero_logging, zero_gamma_model, cur_model = train.hyper_param_train(
@@ -1046,7 +1054,7 @@ for task_iter in range(len(task_name)):
                             num_epoch_iters=None if params.fixed_num_epoch_iters == 0 else params.fixed_num_epoch_iters,
                             unseen_idx=unseen_idx,
                             mod_adversarial_test=params.mod_adversarial_test,
-                            hyper_params=[['adv_epsilon'], [params.adv_epsilon]],
+                            hyper_params=[['adv_epsilon', 'langevin_lr', 'langevin_num_iter', 'langevin_beta'], [params.adv_epsilon, params.langevin_lr, params.langevin_num_iter, params.langevin_beta]],
                             )
                     torch.cuda.empty_cache()
                     #print('point 7:', nvidia_smi())

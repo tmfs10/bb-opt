@@ -1,5 +1,6 @@
 
 import sys
+import os
 from gpu_utils.utils import gpu_init, nvidia_smi
 import parsing
 import argparse
@@ -70,6 +71,9 @@ for task_iter in range(len(task_name)):
     for seed in range(1, orig_params.num_seeds+1):
         print('DOING SEED', seed)
         init_model_path = orig_params.init_model_path_prefix + "_" + str(seed) + "/" + task_name[task_iter] + "/init_model.pth"
+        if not os.path.exists(init_model_path):
+            print('CAN\'T FIND SEED', seed, '. SKIPPING...')
+            continue
         checkpoint = torch.load(init_model_path)
         save_file_path_prefix = orig_params.save_file_path_prefix
         params = checkpoint['global_params']

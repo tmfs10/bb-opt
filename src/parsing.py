@@ -99,8 +99,6 @@ def add_parse_args(parser):
     parser.add_argument('--re_train_num_epochs', type=int)
     parser.add_argument('--re_train_lr', type=float)
     parser.add_argument('--re_train_batch_size', type=int)
-    parser.add_argument('--hyper_search_choose_type', type=verify_choose_type)
-    parser.add_argument('--final_train_choose_type', type=verify_choose_type)
     parser.add_argument('--early_stopping', type=int, 
             help="num early stopping iters. 0 means no early stoppping")
     parser.add_argument('--val_frac', type=float,
@@ -119,6 +117,11 @@ def add_parse_args(parser):
     parser.add_argument('--report_zero_gamma', type=str2bool)
     parser.add_argument('--loss_fn', type=verify_loss_fn)
     parser.add_argument('--ensemble_forward_batch_size', type=int)
+
+    # model selection
+    parser.add_argument('--hyper_search_choose_type', type=verify_choose_type)
+    parser.add_argument('--final_train_choose_type', type=verify_choose_type)
+    parser.add_argument('--max_ood_std_model', type=str2bool)
 
     # model params
     parser.add_argument('--num_hidden', type=int)
@@ -194,9 +197,9 @@ def add_parse_args(parser):
     parser.add_argument('--langevin_sampling', type=str2bool)
     parser.add_argument('--mod_adversarial_training', type=str2bool)
     parser.add_argument('--mod_adversarial_test', type=str2bool)
-    parser.add_argument('--langevin_num_iter', type=int)
-    parser.add_argument('--langevin_lr', type=float)
-    parser.add_argument('--langevin_beta', type=float, help="inverse temp")
+    parser.add_argument('--langevin_num_iter', type=int, nargs='+')
+    parser.add_argument('--langevin_lr', type=float, nargs='+')
+    parser.add_argument('--langevin_beta', type=float, nargs='+', help="inverse temp")
 
     # info ack args
     parser.add_argument('--mves_greedy', type=str2bool, 

@@ -60,7 +60,7 @@
 --inverse_density False
 --inverse_density_emb_space False
 --true_max False
---gammas 1.0 5.0 10.0 20.0
+--gammas 0 5 20
 --ood_data_batch_factor 1.0
 --ensemble_type fc
 --sampling_dist uniform
@@ -74,6 +74,7 @@
 --single_gaussian_test_nll True
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
+--max_ood_std_model False
 
 --langevin_sampling False
 --mod_adversarial_training False
@@ -114,4 +115,4 @@
 --loss_fn nll
 
 --bottom_skip_frac 0.
---adv_epsilon 0.0
+--adv_epsilon 0

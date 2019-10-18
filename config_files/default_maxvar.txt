@@ -68,6 +68,7 @@
 --ekb_use_median True
 --hyper_search_choose_type val,nll,ind
 --final_train_choose_type val,nll,ind
+--max_ood_std_model False
 
 --langevin_sampling False
 --langevin_num_iter 20
